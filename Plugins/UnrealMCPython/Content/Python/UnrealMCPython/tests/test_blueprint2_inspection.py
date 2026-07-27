@@ -1,12 +1,17 @@
 """In-editor tests for bounded Universal Blueprint 2 inspection."""
 
+import json
 import unittest
 import uuid
 
 import unreal
 
-from UnrealMCPython.tests.base import MCPTestCase, TEST_ROOT
-from UnrealMCPython.tests.blueprint2_support import call_action
+from UnrealMCPython.tests.base import MCPTestCase
+from UnrealMCPython.tests.blueprint2_support import (
+    BLUEPRINT2_TEST_ROOT,
+    call_action,
+)
+from UnrealMCPython.mcp_unreal_actions import execute_action
 
 
 class TestBlueprint2Inspection(MCPTestCase):
@@ -29,12 +34,12 @@ class TestBlueprint2Inspection(MCPTestCase):
         factory = unreal.BlueprintFactory()
         factory.set_editor_property("parent_class", unreal.Actor)
         blueprint = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
-            name, TEST_ROOT, unreal.Blueprint, factory
+            name, BLUEPRINT2_TEST_ROOT, unreal.Blueprint, factory
         )
         self.assertIsNotNone(
             blueprint, "Actor Blueprint fixture could not be created"
         )
-        self._actor_path = f"{TEST_ROOT}/{name}.{name}"
+        self._actor_path = f"{BLUEPRINT2_TEST_ROOT}/{name}.{name}"
         self._created_assets.append(self._actor_path)
 
         function_graph = unreal.BlueprintEditorLibrary.add_function_graph(
@@ -72,13 +77,13 @@ class TestBlueprint2Inspection(MCPTestCase):
             interface_name = f"Blueprint2Interface_{uuid.uuid4().hex[:10]}"
             interface = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
                 interface_name,
-                TEST_ROOT,
+                BLUEPRINT2_TEST_ROOT,
                 unreal.Blueprint,
                 unreal.BlueprintInterfaceFactory(),
             )
             self.assertIsNotNone(interface)
             self._interface_path = (
-                f"{TEST_ROOT}/{interface_name}.{interface_name}"
+                f"{BLUEPRINT2_TEST_ROOT}/{interface_name}.{interface_name}"
             )
             self._created_assets.append(self._interface_path)
             interface_graph = unreal.BlueprintEditorLibrary.add_function_graph(
@@ -92,12 +97,14 @@ class TestBlueprint2Inspection(MCPTestCase):
             macro_name = f"Blueprint2Macro_{uuid.uuid4().hex[:10]}"
             macro = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
                 macro_name,
-                TEST_ROOT,
+                BLUEPRINT2_TEST_ROOT,
                 unreal.Blueprint,
                 unreal.BlueprintMacroFactory(),
             )
             self.assertIsNotNone(macro)
-            self._macro_path = f"{TEST_ROOT}/{macro_name}.{macro_name}"
+            self._macro_path = (
+                f"{BLUEPRINT2_TEST_ROOT}/{macro_name}.{macro_name}"
+            )
             self._created_assets.append(self._macro_path)
             self.assertTrue(unreal.EditorAssetLibrary.save_loaded_asset(macro))
 
@@ -119,22 +126,38 @@ class TestBlueprint2Inspection(MCPTestCase):
 
     @classmethod
     def tearDownClass(cls):
-        if not unreal.EditorAssetLibrary.does_directory_exist(TEST_ROOT):
+        if not unreal.EditorAssetLibrary.does_directory_exist(
+            BLUEPRINT2_TEST_ROOT
+        ):
             return
         remaining = unreal.EditorAssetLibrary.list_assets(
-            TEST_ROOT, recursive=True, include_folder=False
+            BLUEPRINT2_TEST_ROOT, recursive=True, include_folder=False
         )
         if remaining:
             raise AssertionError(
                 f"Blueprint 2 inspection tests left assets behind: {remaining}"
             )
-        deleted = unreal.EditorAssetLibrary.delete_directory(TEST_ROOT)
-        if not deleted and unreal.EditorAssetLibrary.does_directory_exist(TEST_ROOT):
-            raise AssertionError(f"Failed to remove empty test root: {TEST_ROOT}")
+        deleted = unreal.EditorAssetLibrary.delete_directory(
+            BLUEPRINT2_TEST_ROOT
+        )
+        if (
+            not deleted
+            and unreal.EditorAssetLibrary.does_directory_exist(
+                BLUEPRINT2_TEST_ROOT
+            )
+        ):
+            raise AssertionError(
+                "Failed to remove empty test root: "
+                f"{BLUEPRINT2_TEST_ROOT}"
+            )
 
     def _brief(self, asset_path):
-        return call_action(
-            "blueprint_actions", "ue_get_blueprint_brief", asset_path=asset_path
+        return json.loads(
+            execute_action(
+                "UnrealMCPython.blueprint_actions",
+                "ue_get_blueprint_brief",
+                {"asset_path": asset_path},
+            )
         )
 
     def test_get_blueprint_brief(self):
@@ -280,10 +303,13 @@ class TestBlueprint2Inspection(MCPTestCase):
             self.skipTest("UMG is not enabled")
         name = f"Blueprint2Widget_{uuid.uuid4().hex[:10]}"
         created = call_action(
-            "umg_actions", "ue_create_widget_blueprint", name=name, path=TEST_ROOT
+            "umg_actions",
+            "ue_create_widget_blueprint",
+            name=name,
+            path=BLUEPRINT2_TEST_ROOT,
         )
         self.assertSuccess(created)
-        widget_path = f"{TEST_ROOT}/{name}.{name}"
+        widget_path = f"{BLUEPRINT2_TEST_ROOT}/{name}.{name}"
         self._created_assets.append(widget_path)
 
         result = self._brief(widget_path)

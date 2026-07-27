@@ -161,6 +161,17 @@ FString TargetTypePath(const UEdGraphNode* Node)
     return Node ? Node->GetClass()->GetPathName() : FString();
 }
 
+FString TargetTypePath(const UEdGraphPin* Pin)
+{
+    if (!Pin)
+    {
+        return {};
+    }
+    return Pin->PinType.PinSubCategoryObject.IsValid()
+        ? Pin->PinType.PinSubCategoryObject->GetPathName()
+        : Pin->PinType.PinCategory.ToString();
+}
+
 bool TypeMatches(const FString& Expected, const FString& Actual)
 {
     return Expected.IsEmpty() || Expected == Actual;
@@ -182,7 +193,7 @@ FResolvedTarget StableGraph(UBlueprint* Blueprint, const FGuid& Guid)
             Result.Object = Graph;
             Result.Graph = Graph;
             Result.Id = MakeTargetId(ETargetKind::Graph, Guid);
-            Result.IdKind = TEXT("guid");
+            Result.IdKind = TEXT("graph_guid");
             Result.bStable = true;
             return Result;
         }
@@ -209,7 +220,7 @@ FResolvedTarget StableNode(UBlueprint* Blueprint, const FGuid& Guid)
                 Result.Graph = Graph;
                 Result.Node = Node;
                 Result.Id = MakeTargetId(ETargetKind::Node, Guid);
-                Result.IdKind = TEXT("guid");
+                Result.IdKind = TEXT("node_guid");
                 Result.bStable = true;
                 return Result;
             }
@@ -240,7 +251,7 @@ FResolvedTarget StablePin(UBlueprint* Blueprint, const FGuid& Guid)
                     Result.Node = Node;
                     Result.Pin = Pin;
                     Result.Id = MakeTargetId(ETargetKind::Pin, Guid);
-                    Result.IdKind = TEXT("guid");
+                    Result.IdKind = TEXT("pin_guid");
                     Result.bStable = true;
                     return Result;
                 }
@@ -260,7 +271,7 @@ FResolvedTarget StableVariable(UBlueprint* Blueprint, const FGuid& Guid)
         {
             Result.Variable = &Variable;
             Result.Id = MakeTargetId(ETargetKind::Variable, Guid);
-            Result.IdKind = TEXT("guid");
+            Result.IdKind = TEXT("variable_guid");
             Result.bStable = true;
             return Result;
         }
@@ -279,7 +290,7 @@ FResolvedTarget StableComponent(UBlueprint* Blueprint, const FGuid& Guid)
         Result.Object = Component;
         Result.Component = Component;
         Result.Id = MakeTargetId(ETargetKind::Component, Guid);
-        Result.IdKind = TEXT("guid");
+        Result.IdKind = TEXT("scs_variable_guid");
         Result.bStable = true;
     }
     return Result;
@@ -294,30 +305,14 @@ FResolvedTarget StableInterface(UBlueprint* Blueprint, const FString& Id)
         UClass* InterfaceClass = Description.Interface.Get();
         if (!InterfaceClass) continue;
         const FString Path = InterfaceClass->GetPathName();
-        const FString Expected = MakeQualifiedFallbackId(
-            ETargetKind::Interface,
-            Blueprint->GetPathName(),
-            Path,
-            Path);
+        const FString Expected = FString::Printf(TEXT("interface:%s"), *Path);
         if (Id == Expected)
         {
             Result.Object = InterfaceClass;
             Result.Id = Expected;
-            Result.IdKind = TEXT("interface_path_sha1");
+            Result.IdKind = TEXT("interface_path");
             Result.bStable = true;
             return Result;
-        }
-        for (UEdGraph* Graph : Description.Graphs)
-        {
-            if (Graph && Id == MakeTargetId(ETargetKind::Interface, Graph->GraphGuid))
-            {
-                Result.Object = InterfaceClass;
-                Result.Graph = Graph;
-                Result.Id = Id;
-                Result.IdKind = TEXT("graph_guid");
-                Result.bStable = Graph->GraphGuid.IsValid();
-                return Result;
-            }
         }
     }
     return Result;
@@ -362,9 +357,12 @@ FString MakeGraphTargetId(UBlueprint* Blueprint, const UEdGraph* Graph)
     const FString SchemaClassPath = Graph->GetSchema()
         ? Graph->GetSchema()->GetClass()->GetPathName()
         : FString();
+    const UObject* GraphOwner = Graph->GetOuter();
     return MakeQualifiedFallbackId(
         ETargetKind::Graph,
-        Blueprint ? Blueprint->GetPathName() : FString(),
+        GraphOwner
+            ? GraphOwner->GetPathName()
+            : (Blueprint ? Blueprint->GetPathName() : FString()),
         Graph->GetName(),
         SchemaClassPath);
 }
@@ -396,14 +394,36 @@ FString MakePinTargetId(UBlueprint* Blueprint, const UEdGraphPin* Pin)
     {
         return MakeTargetId(ETargetKind::Pin, Pin->PinId);
     }
-    const FString PinTypePath = Pin->PinType.PinSubCategoryObject.IsValid()
-        ? Pin->PinType.PinSubCategoryObject->GetPathName()
-        : Pin->PinType.PinCategory.ToString();
+    const FString PinTypePath = TargetTypePath(Pin);
+    int32 MatchingPinOrdinal = 0;
+    const UEdGraphNode* OwningNode = Pin->GetOwningNode();
+    if (OwningNode)
+    {
+        for (const UEdGraphPin* Candidate : OwningNode->Pins)
+        {
+            if (Candidate == Pin)
+            {
+                break;
+            }
+            if (Candidate &&
+                Candidate->PinName == Pin->PinName &&
+                Candidate->Direction == Pin->Direction &&
+                Candidate->PinType == Pin->PinType)
+            {
+                ++MatchingPinOrdinal;
+            }
+        }
+    }
+    const FString QualifiedPinType = FString::Printf(
+        TEXT("%s\n%d\n%d"),
+        *PinTypePath,
+        static_cast<int32>(Pin->Direction),
+        MatchingPinOrdinal);
     return MakeQualifiedFallbackId(
         ETargetKind::Pin,
-        MakeNodeTargetId(Blueprint, Pin->GetOwningNode()),
+        MakeNodeTargetId(Blueprint, OwningNode),
         Pin->GetName(),
-        PinTypePath);
+        QualifiedPinType);
 }
 
 bool ParseTargetId(
@@ -418,7 +438,11 @@ bool ParseTargetId(
     {
         return false;
     }
-    return FGuid::Parse(Value, OutGuid) && OutGuid.IsValid();
+    return FGuid::Parse(Value, OutGuid) &&
+        OutGuid.IsValid() &&
+        Value.Equals(
+            OutGuid.ToString(EGuidFormats::DigitsWithHyphensLower),
+            ESearchCase::CaseSensitive);
 }
 
 FResolvedTarget ResolveTarget(
@@ -493,14 +517,14 @@ FResolvedTarget ResolveTarget(
         for (UEdGraph* Graph : Graphs)
         {
             if (Graph && Graph->GetName() == Target.Name &&
-                TypeMatches(Target.TypePath, TargetTypePath(Graph)))
+                TypeMatches(Target.TypePath, TargetTypePath(Graph)) &&
+                Target.Id == MakeGraphTargetId(Blueprint, Graph))
             {
                 FResolvedTarget Match;
                 Match.Object = Graph;
                 Match.Graph = Graph;
-                Match.Id = MakeQualifiedFallbackId(
-                    Kind, Blueprint->GetPathName(), Target.Name, Target.TypePath);
-                Match.IdKind = TEXT("qualified_name_sha1");
+                Match.Id = MakeGraphTargetId(Blueprint, Graph);
+                Match.IdKind = TEXT("qualified_name_fallback");
                 Matches.Add(Match);
             }
         }
@@ -517,15 +541,15 @@ FResolvedTarget ResolveTarget(
             for (UEdGraphNode* Node : Owner.Graph->Nodes)
             {
                 if (Node && Node->GetName() == Target.Name &&
-                    TypeMatches(Target.TypePath, TargetTypePath(Node)))
+                    TypeMatches(Target.TypePath, TargetTypePath(Node)) &&
+                    Target.Id == MakeNodeTargetId(Blueprint, Node))
                 {
                     FResolvedTarget Match;
                     Match.Object = Node;
                     Match.Graph = Owner.Graph;
                     Match.Node = Node;
-                    Match.Id = MakeQualifiedFallbackId(
-                        Kind, Target.OwnerId, Target.Name, Target.TypePath);
-                    Match.IdKind = TEXT("qualified_name_sha1");
+                    Match.Id = MakeNodeTargetId(Blueprint, Node);
+                    Match.IdKind = TEXT("qualified_name_fallback");
                     Matches.Add(Match);
                 }
             }
@@ -542,15 +566,16 @@ FResolvedTarget ResolveTarget(
         {
             for (UEdGraphPin* Pin : Owner.Node->Pins)
             {
-                if (Pin && Pin->GetName() == Target.Name)
+                if (Pin && Pin->GetName() == Target.Name &&
+                    TypeMatches(Target.TypePath, TargetTypePath(Pin)) &&
+                    Target.Id == MakePinTargetId(Blueprint, Pin))
                 {
                     FResolvedTarget Match;
                     Match.Graph = Owner.Graph;
                     Match.Node = Owner.Node;
                     Match.Pin = Pin;
-                    Match.Id = MakeQualifiedFallbackId(
-                        Kind, Target.OwnerId, Target.Name, Target.TypePath);
-                    Match.IdKind = TEXT("qualified_name_sha1");
+                    Match.Id = MakePinTargetId(Blueprint, Pin);
+                    Match.IdKind = TEXT("qualified_name_fallback");
                     Matches.Add(Match);
                 }
             }
@@ -564,13 +589,18 @@ FResolvedTarget ResolveTarget(
                 ? Variable.VarType.PinSubCategoryObject->GetPathName()
                 : Variable.VarType.PinCategory.ToString();
             if (Variable.VarName.ToString() == Target.Name &&
-                TypeMatches(Target.TypePath, TypePath))
+                TypeMatches(Target.TypePath, TypePath) &&
+                Target.Id == MakeQualifiedFallbackId(
+                    Kind,
+                    Blueprint->GetPathName(),
+                    Target.Name,
+                    TypePath))
             {
                 FResolvedTarget Match;
                 Match.Variable = &Variable;
                 Match.Id = MakeQualifiedFallbackId(
-                    Kind, Blueprint->GetPathName(), Target.Name, Target.TypePath);
-                Match.IdKind = TEXT("qualified_name_sha1");
+                    Kind, Blueprint->GetPathName(), Target.Name, TypePath);
+                Match.IdKind = TEXT("qualified_name_fallback");
                 Matches.Add(Match);
             }
         }
@@ -583,14 +613,19 @@ FResolvedTarget ResolveTarget(
                 ? Component->ComponentClass->GetPathName()
                 : FString();
             if (Component && Component->GetVariableName().ToString() == Target.Name &&
-                TypeMatches(Target.TypePath, TypePath))
+                TypeMatches(Target.TypePath, TypePath) &&
+                Target.Id == MakeQualifiedFallbackId(
+                    Kind,
+                    Blueprint->GetPathName(),
+                    Target.Name,
+                    TypePath))
             {
                 FResolvedTarget Match;
                 Match.Object = Component;
                 Match.Component = Component;
                 Match.Id = MakeQualifiedFallbackId(
-                    Kind, Blueprint->GetPathName(), Target.Name, Target.TypePath);
-                Match.IdKind = TEXT("qualified_name_sha1");
+                    Kind, Blueprint->GetPathName(), Target.Name, TypePath);
+                Match.IdKind = TEXT("qualified_name_fallback");
                 Matches.Add(Match);
             }
         }
@@ -605,12 +640,10 @@ FResolvedTarget ResolveTarget(
             {
                 FResolvedTarget Match;
                 Match.Object = InterfaceClass;
-                Match.Id = MakeQualifiedFallbackId(
-                    Kind,
-                    Blueprint->GetPathName(),
-                    InterfaceClass->GetPathName(),
-                    InterfaceClass->GetPathName());
-                Match.IdKind = TEXT("interface_path_sha1");
+                Match.Id = FString::Printf(
+                    TEXT("interface:%s"),
+                    *InterfaceClass->GetPathName());
+                Match.IdKind = TEXT("interface_path");
                 Match.bStable = true;
                 Matches.Add(Match);
             }
@@ -624,7 +657,7 @@ FResolvedTarget ResolveTarget(
             : TEXT("Fallback target is ambiguous.");
         return {};
     }
-    Matches[0].bStable = false;
+    Matches[0].bStable = Kind == ETargetKind::Interface;
     return Matches[0];
 }
 
@@ -799,20 +832,44 @@ TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint)
         TEXT("branch"), TEXT("cast"), TEXT("construct_object"),
         TEXT("dynamic_cast"), TEXT("macro"), TEXT("interface_message")}));
 
+    bool bHasGraph = false;
     bool bHasK2Graph = false;
+    bool bAllGraphsUseK2Schema = true;
     if (Blueprint)
     {
         TArray<UEdGraph*> Graphs;
         Blueprint->GetAllGraphs(Graphs);
         for (const UEdGraph* Graph : Graphs)
         {
-            bHasK2Graph |= Graph && Graph->GetSchema() &&
+            if (!Graph)
+            {
+                continue;
+            }
+            bHasGraph = true;
+            const bool bUsesK2Schema = Graph->GetSchema() &&
                 Graph->GetSchema()->IsA<UEdGraphSchema_K2>();
+            bHasK2Graph |= bUsesK2Schema;
+            bAllGraphsUseK2Schema &= bUsesK2Schema;
         }
     }
+    bAllGraphsUseK2Schema &= bHasGraph;
     const bool bHasSCS = Blueprint && Blueprint->SimpleConstructionScript;
-    Result->SetBoolField(TEXT("k2_schema"), bHasK2Graph);
-    Result->SetBoolField(TEXT("compiler_tokens"), true);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
+    constexpr bool bSupportsCompilerTokens = true;
+#else
+    constexpr bool bSupportsCompilerTokens = false;
+#endif
+    Result->SetBoolField(TEXT("supports_k2_schema"), true);
+    Result->SetBoolField(TEXT("supports_scs_operations"), true);
+    Result->SetBoolField(
+        TEXT("supports_compiler_tokens"),
+        bSupportsCompilerTokens);
+    Result->SetBoolField(TEXT("has_k2_graphs"), bHasK2Graph);
+    Result->SetBoolField(
+        TEXT("all_graphs_k2_schema"),
+        bAllGraphsUseK2Schema);
+    Result->SetBoolField(TEXT("k2_schema"), bAllGraphsUseK2Schema);
+    Result->SetBoolField(TEXT("compiler_tokens"), bSupportsCompilerTokens);
     Result->SetBoolField(TEXT("has_scs"), bHasSCS);
     Result->SetBoolField(TEXT("scs_operations"), bHasSCS);
     return Result;

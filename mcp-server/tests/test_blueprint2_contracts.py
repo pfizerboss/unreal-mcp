@@ -1,7 +1,6 @@
 """Strict contracts for the additive Blueprint 2 registry surface."""
 
 import ast
-import asyncio
 import importlib.util
 import json
 import sys
@@ -251,33 +250,59 @@ def test_stable_id_schema_accepts_qualified_fallback_ids():
     from unreal_mcp.blueprint2_action_specs import STABLE_ID
 
     validator = Draft202012Validator(STABLE_ID)
-    validator.validate(
-        "fallback:graph:c6afa87de837f324fd224c43d4f24e5fe74ce74d"
-    )
-    with pytest.raises(ValidationError):
-        validator.validate("fallback:graph:not-a-sha1")
+    for stable_id in (
+        "graph:00112233-4455-6677-8899-aabbccddeeff",
+        "node:00112233-4455-6677-8899-aabbccddeeff",
+        "pin:00112233-4455-6677-8899-aabbccddeeff",
+        "variable:00112233-4455-6677-8899-aabbccddeeff",
+        "component:00112233-4455-6677-8899-aabbccddeeff",
+        "interface:/Script/Engine.Interface",
+        "interface:/Game/Interfaces/BPI_Test.BPI_Test_C",
+        "fallback:graph:c6afa87de837f324fd224c43d4f24e5fe74ce74d",
+    ):
+        validator.validate(stable_id)
+
+    for invalid_id in (
+        "graph:not-a-guid",
+        "pin:one",
+        "graph:00112233445566778899aabbccddeeff",
+        "graph:00112233-4455-6677-8899-AABBCCDDEEFF",
+        "interface:not-a-path",
+        "interface:/Engine/Interface",
+        "fallback:graph:not-a-sha1",
+        "fallback:interface:c6afa87de837f324fd224c43d4f24e5fe74ce74d",
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate(invalid_id)
 
 
 def test_disconnect_blueprint_pins_has_exclusive_target_forms():
     schema = _new_specs()["disconnect_blueprint_pins"]["input_schema"]
     validator = Draft202012Validator(schema)
     common = {"asset_path": "/Game/BP_Player"}
+    pin_id = "pin:11111111-1111-4111-8111-111111111111"
+    source_pin_id = "pin:22222222-2222-4222-8222-222222222222"
+    target_pin_id = "pin:33333333-3333-4333-8333-333333333333"
 
-    validator.validate({**common, "pin_id": "pin:one"})
+    validator.validate({**common, "pin_id": pin_id})
     validator.validate(
-        {**common, "source_pin_id": "pin:source", "target_pin_id": "pin:target"}
+        {
+            **common,
+            "source_pin_id": source_pin_id,
+            "target_pin_id": target_pin_id,
+        }
     )
     with pytest.raises(ValidationError):
         validator.validate(common)
     with pytest.raises(ValidationError):
-        validator.validate({**common, "source_pin_id": "pin:source"})
+        validator.validate({**common, "source_pin_id": source_pin_id})
     with pytest.raises(ValidationError):
         validator.validate(
             {
                 **common,
-                "pin_id": "pin:one",
-                "source_pin_id": "pin:source",
-                "target_pin_id": "pin:target",
+                "pin_id": pin_id,
+                "source_pin_id": source_pin_id,
+                "target_pin_id": target_pin_id,
             }
         )
 
@@ -295,7 +320,7 @@ def test_component_transform_vectors_are_bounded():
     validator = Draft202012Validator(schema)
     params = {
         "asset_path": "/Game/BP_Player",
-        "component_id": "component:root",
+        "component_id": "component:55555555-5555-4555-8555-555555555555",
         "transform": {"location": [0, 0, 0]},
     }
     validator.validate(params)
@@ -344,7 +369,7 @@ def test_conditional_replication_contract_rejects_ambiguous_notify_names():
     validator = Draft202012Validator(schema)
     common = {
         "asset_path": "/Game/BP_Player",
-        "variable_id": "variable:score-guid",
+        "variable_id": "variable:44444444-4444-4444-8444-444444444444",
     }
     validator.validate({**common, "mode": "none"})
     validator.validate({**common, "mode": "replicated"})
@@ -468,7 +493,7 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
     nodes = {
         node.name[3:]: node
         for node in tree.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name.startswith("ue_")
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("ue_")
     }
     specs = _new_specs()
     assert NEW_BLUEPRINT2_ACTIONS <= set(nodes)
@@ -482,7 +507,7 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
     for action in NEW_BLUEPRINT2_ACTIONS - {"get_blueprint_brief"}:
-        result = asyncio.run(getattr(module, f"ue_{action}")())
+        result = getattr(module, f"ue_{action}")()
         payload = json.loads(result)
         ToolResult.model_validate(payload)
         assert payload["errors"][0]["code"] == "UE_VERSION_UNSUPPORTED"

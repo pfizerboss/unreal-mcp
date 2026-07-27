@@ -42,6 +42,7 @@ _MODULES = [
 
 suite = unittest.TestSuite()
 loader = unittest.TestLoader()
+_load_errors = []
 
 for mod_name in _MODULES:
     try:
@@ -49,7 +50,14 @@ for mod_name in _MODULES:
         importlib.reload(mod)
         suite.addTests(loader.loadTestsFromModule(mod))
     except Exception as e:
-        print(f"[LOAD ERROR] {mod_name}: {e}")
+        message = f"[LOAD ERROR] {mod_name}: {e}"
+        print(message)
+        _load_errors.append(message)
+
+if _load_errors:
+    raise RuntimeError(
+        "In-editor test suites failed to load:\n" + "\n".join(_load_errors)
+    )
 
 runner = unittest.TextTestRunner(verbosity=2, stream=sys.stdout)
 result = runner.run(suite)

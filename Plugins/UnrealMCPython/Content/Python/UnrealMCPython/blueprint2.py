@@ -46,7 +46,20 @@ def call_asset_helper(
     helper_name: str, asset_path: str, request: dict | None = None
 ) -> str:
     """Call a Blueprint helper without parsing or reserializing its result."""
-    blueprint = load_blueprint(asset_path)
+    try:
+        blueprint = load_blueprint(asset_path)
+    except Exception as exc:
+        return _failure(
+            "INTERNAL_ERROR",
+            "asset_path",
+            "Blueprint asset loading failed.",
+            "Verify the asset path and Unreal editor asset registry state.",
+            {
+                "asset_path": asset_path,
+                "exception_type": type(exc).__name__,
+                "reason": str(exc),
+            },
+        )
     if blueprint is None:
         return _failure(
             "PRECONDITION_FAILED",
@@ -55,21 +68,66 @@ def call_asset_helper(
             "Provide the full object path of an existing Blueprint asset.",
             {"asset_path": asset_path},
         )
-    helper = getattr(unreal.MCPythonHelper, helper_name)
-    if request is None:
-        return helper(blueprint)
-    payload = json.dumps(
-        deepcopy(request), separators=(",", ":"), ensure_ascii=False
-    )
-    return helper(blueprint, payload)
+    try:
+        helper = getattr(unreal.MCPythonHelper, helper_name)
+    except AttributeError:
+        return _failure(
+            "UE_VERSION_UNSUPPORTED",
+            "helper",
+            f"Blueprint helper is unavailable: {helper_name}",
+            "Install a compatible UnrealMCPython plugin build.",
+            {"capability": helper_name},
+        )
+    try:
+        if request is None:
+            return helper(blueprint)
+        payload = json.dumps(
+            deepcopy(request), separators=(",", ":"), ensure_ascii=False
+        )
+        return helper(blueprint, payload)
+    except Exception as exc:
+        return _failure(
+            "INTERNAL_ERROR",
+            "helper",
+            f"Blueprint helper failed: {helper_name}",
+            "Inspect the request and Unreal editor log, then retry.",
+            {
+                "helper": helper_name,
+                "exception_type": type(exc).__name__,
+                "reason": str(exc),
+            },
+        )
 
 
 def call_json_helper(helper_name: str, request: dict) -> str:
     """Call a JSON-only helper and preserve its serialized result exactly."""
-    payload = json.dumps(
-        deepcopy(request), separators=(",", ":"), ensure_ascii=False
-    )
-    return getattr(unreal.MCPythonHelper, helper_name)(payload)
+    try:
+        helper = getattr(unreal.MCPythonHelper, helper_name)
+    except AttributeError:
+        return _failure(
+            "UE_VERSION_UNSUPPORTED",
+            "helper",
+            f"Blueprint helper is unavailable: {helper_name}",
+            "Install a compatible UnrealMCPython plugin build.",
+            {"capability": helper_name},
+        )
+    try:
+        payload = json.dumps(
+            deepcopy(request), separators=(",", ":"), ensure_ascii=False
+        )
+        return helper(payload)
+    except Exception as exc:
+        return _failure(
+            "INTERNAL_ERROR",
+            "helper",
+            f"Blueprint helper failed: {helper_name}",
+            "Inspect the request and Unreal editor log, then retry.",
+            {
+                "helper": helper_name,
+                "exception_type": type(exc).__name__,
+                "reason": str(exc),
+            },
+        )
 
 
 def target_request(

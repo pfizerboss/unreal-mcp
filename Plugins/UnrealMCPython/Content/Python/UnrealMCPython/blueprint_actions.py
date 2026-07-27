@@ -21,22 +21,36 @@ def _load_asset(asset_path, expected_class=None):
     return asset, None
 
 
+def _target_identity(target_id, guid_kind):
+    if target_id and target_id.startswith("fallback:"):
+        return "qualified_name_fallback", False
+    return guid_kind, bool(target_id)
+
+
 # ─── Read Actions ─────────────────────────────────────────────────────────────
 
 def ue_get_selected_bp_nodes() -> str:
     """Returns information about currently selected blueprint nodes in the editor."""
     try:
         reflected_infos = unreal.MCPythonHelper.get_selected_blueprint_node_infos()
-        node_infos = [
-            {
+        node_infos = []
+        for info in reflected_infos:
+            id_kind, stable = _target_identity(info.stable_id, "node_guid")
+            graph_id_kind, graph_stable = _target_identity(
+                info.graph_id,
+                "graph_guid",
+            )
+            node_infos.append({
                 "name": info.node_name,
                 "class": info.node_class,
                 "object_path": info.object_path,
                 "stable_id": info.stable_id,
                 "graph_id": info.graph_id,
-            }
-            for info in reflected_infos
-        ]
+                "id_kind": id_kind,
+                "stable": stable,
+                "graph_id_kind": graph_id_kind,
+                "graph_stable": graph_stable,
+            })
         return json.dumps({
             "success": True,
             "selected_nodes_count": len(node_infos),
@@ -58,10 +72,28 @@ def ue_get_selected_bp_node_infos() -> str:
         }
 
         def link_to_dict(link):
+            graph_id_kind, graph_stable = _target_identity(
+                link.graph_id,
+                "graph_guid",
+            )
+            node_id_kind, node_stable = _target_identity(
+                link.node_id,
+                "node_guid",
+            )
+            pin_id_kind, pin_stable = _target_identity(
+                link.pin_id,
+                "pin_guid",
+            )
             d = {
                 "graph_id": link.graph_id,
                 "node_id": link.node_id,
                 "pin_id": link.pin_id,
+                "graph_id_kind": graph_id_kind,
+                "graph_stable": graph_stable,
+                "node_id_kind": node_id_kind,
+                "node_stable": node_stable,
+                "pin_id_kind": pin_id_kind,
+                "pin_stable": pin_stable,
             }
             if link.node_id in stable_to_id:
                 d["node"] = stable_to_id[link.node_id]
@@ -73,6 +105,15 @@ def ue_get_selected_bp_node_infos() -> str:
 
         def pin_to_dict(pin):
             name = pin.friendly_name if pin.friendly_name else pin.pin_name
+            id_kind, stable = _target_identity(pin.stable_id, "pin_guid")
+            graph_id_kind, graph_stable = _target_identity(
+                pin.graph_id,
+                "graph_guid",
+            )
+            node_id_kind, node_stable = _target_identity(
+                pin.node_id,
+                "node_guid",
+            )
             d = {
                 "name": name,
                 "dir": pin.direction,
@@ -80,6 +121,12 @@ def ue_get_selected_bp_node_infos() -> str:
                 "pin_id": pin.pin_id,
                 "graph_id": pin.graph_id,
                 "node_id": pin.node_id,
+                "id_kind": id_kind,
+                "stable": stable,
+                "graph_id_kind": graph_id_kind,
+                "graph_stable": graph_stable,
+                "node_id_kind": node_id_kind,
+                "node_stable": node_stable,
             }
             ptype = pin.pin_type
             if pin.pin_sub_type:
@@ -93,11 +140,20 @@ def ue_get_selected_bp_node_infos() -> str:
             return d
 
         def node_to_dict(node, idx):
+            id_kind, stable = _target_identity(node.stable_id, "node_guid")
+            graph_id_kind, graph_stable = _target_identity(
+                node.graph_id,
+                "graph_guid",
+            )
             d = {
                 "id": idx,
                 "stable_id": node.stable_id,
                 "graph_id": node.graph_id,
                 "title": node.node_title,
+                "id_kind": id_kind,
+                "stable": stable,
+                "graph_id_kind": graph_id_kind,
+                "graph_stable": graph_stable,
             }
             if node.node_comment:
                 d["comment"] = node.node_comment
@@ -560,20 +616,20 @@ def _blueprint2_unsupported(action: str) -> str:
     })
 
 
-async def ue_get_blueprint_brief(asset_path: str = None) -> str:
+def ue_get_blueprint_brief(asset_path: str = None) -> str:
     """Returns a bounded orientation summary for one Blueprint."""
     from UnrealMCPython import blueprint2
 
     return blueprint2.call_asset_helper("get_blueprint_brief", asset_path)
 
 
-async def ue_inspect_blueprint(asset_path: str = None, queries: list = None,
+def ue_inspect_blueprint(asset_path: str = None, queries: list = None,
                                compact: bool = True, cursor: str = "") -> str:
     """Runs bounded, independently paginated queries against one Blueprint."""
     return _blueprint2_unsupported("inspect_blueprint")
 
 
-async def ue_create_blueprint_function(asset_path: str = None, function_name: str = None,
+def ue_create_blueprint_function(asset_path: str = None, function_name: str = None,
                                        inputs: list = [], outputs: list = [],
                                        pure: bool = False, const: bool = False,
                                        access: str = "public", category: str = "",
@@ -582,13 +638,13 @@ async def ue_create_blueprint_function(asset_path: str = None, function_name: st
     return _blueprint2_unsupported("create_blueprint_function")
 
 
-async def ue_rename_blueprint_function(asset_path: str = None, function_id: str = None,
+def ue_rename_blueprint_function(asset_path: str = None, function_id: str = None,
                                        new_name: str = None) -> str:
     """Renames a Blueprint function targeted by stable ID."""
     return _blueprint2_unsupported("rename_blueprint_function")
 
 
-async def ue_set_blueprint_function_signature(asset_path: str = None,
+def ue_set_blueprint_function_signature(asset_path: str = None,
                                               function_id: str = None,
                                               inputs: list = None,
                                               outputs: list = None,
@@ -601,106 +657,106 @@ async def ue_set_blueprint_function_signature(asset_path: str = None,
     return _blueprint2_unsupported("set_blueprint_function_signature")
 
 
-async def ue_delete_blueprint_function(asset_path: str = None,
+def ue_delete_blueprint_function(asset_path: str = None,
                                        function_id: str = None) -> str:
     """Deletes a Blueprint function targeted by stable ID."""
     return _blueprint2_unsupported("delete_blueprint_function")
 
 
-async def ue_create_blueprint_macro(asset_path: str = None, macro_name: str = None,
+def ue_create_blueprint_macro(asset_path: str = None, macro_name: str = None,
                                     inputs: list = [], outputs: list = []) -> str:
     """Creates a Blueprint macro with ordered tunnel parameters."""
     return _blueprint2_unsupported("create_blueprint_macro")
 
 
-async def ue_delete_blueprint_macro(asset_path: str = None, macro_id: str = None) -> str:
+def ue_delete_blueprint_macro(asset_path: str = None, macro_id: str = None) -> str:
     """Deletes a Blueprint macro targeted by stable ID."""
     return _blueprint2_unsupported("delete_blueprint_macro")
 
 
-async def ue_create_custom_event(asset_path: str = None, event_name: str = None,
+def ue_create_custom_event(asset_path: str = None, event_name: str = None,
                                  parameters: list = []) -> str:
     """Creates a custom event with ordered parameters."""
     return _blueprint2_unsupported("create_custom_event")
 
 
-async def ue_delete_custom_event(asset_path: str = None, event_id: str = None) -> str:
+def ue_delete_custom_event(asset_path: str = None, event_id: str = None) -> str:
     """Deletes a custom event targeted by stable ID."""
     return _blueprint2_unsupported("delete_custom_event")
 
 
-async def ue_add_event_dispatcher(asset_path: str = None,
+def ue_add_event_dispatcher(asset_path: str = None,
                                   dispatcher_name: str = None,
                                   parameters: list = []) -> str:
     """Adds an event dispatcher with ordered parameters."""
     return _blueprint2_unsupported("add_event_dispatcher")
 
 
-async def ue_remove_event_dispatcher(asset_path: str = None,
+def ue_remove_event_dispatcher(asset_path: str = None,
                                      dispatcher_id: str = None) -> str:
     """Removes an event dispatcher targeted by stable ID."""
     return _blueprint2_unsupported("remove_event_dispatcher")
 
 
-async def ue_add_blueprint_interface(asset_path: str = None,
+def ue_add_blueprint_interface(asset_path: str = None,
                                      interface_path: str = None) -> str:
     """Adds a Blueprint interface by full Unreal object path."""
     return _blueprint2_unsupported("add_blueprint_interface")
 
 
-async def ue_remove_blueprint_interface(asset_path: str = None,
+def ue_remove_blueprint_interface(asset_path: str = None,
                                         interface_id: str = None) -> str:
     """Removes an implemented Blueprint interface targeted by stable ID."""
     return _blueprint2_unsupported("remove_blueprint_interface")
 
 
-async def ue_add_reflected_blueprint_node(asset_path: str = None, graph_id: str = None,
+def ue_add_reflected_blueprint_node(asset_path: str = None, graph_id: str = None,
                                           member_kind: str = None, member_path: str = None,
                                           position: dict = None) -> str:
     """Adds a reflected node using a full Unreal member object path."""
     return _blueprint2_unsupported("add_reflected_blueprint_node")
 
 
-async def ue_set_blueprint_node_properties(asset_path: str = None, node_id: str = None,
+def ue_set_blueprint_node_properties(asset_path: str = None, node_id: str = None,
                                            properties: dict = None) -> str:
     """Sets allowlisted reflected properties on a node targeted by stable ID."""
     return _blueprint2_unsupported("set_blueprint_node_properties")
 
 
-async def ue_disconnect_blueprint_pins(asset_path: str = None, pin_id: str = "",
+def ue_disconnect_blueprint_pins(asset_path: str = None, pin_id: str = "",
                                        source_pin_id: str = "",
                                        target_pin_id: str = "") -> str:
     """Disconnects one pin entirely or one exact stable pin pair."""
     return _blueprint2_unsupported("disconnect_blueprint_pins")
 
 
-async def ue_rename_blueprint_variable(asset_path: str = None, variable_id: str = None,
+def ue_rename_blueprint_variable(asset_path: str = None, variable_id: str = None,
                                        new_name: str = None) -> str:
     """Renames a Blueprint variable targeted by stable ID."""
     return _blueprint2_unsupported("rename_blueprint_variable")
 
 
-async def ue_remove_blueprint_variable(asset_path: str = None,
+def ue_remove_blueprint_variable(asset_path: str = None,
                                        variable_id: str = None) -> str:
     """Removes a Blueprint variable targeted by stable ID."""
     return _blueprint2_unsupported("remove_blueprint_variable")
 
 
-async def ue_set_blueprint_variable_default(asset_path: str = None,
+def ue_set_blueprint_variable_default(asset_path: str = None,
                                             variable_id: str = None,
                                             default=None) -> str:
     """Sets a Blueprint variable default as a canonical JSON value."""
     return _blueprint2_unsupported("set_blueprint_variable_default")
 
 
-async def ue_set_blueprint_variable_metadata(asset_path: str = None,
+def ue_set_blueprint_variable_metadata(asset_path: str = None,
                                              variable_id: str = None,
                                              metadata: dict = None) -> str:
     """Sets supported Blueprint variable metadata."""
     return _blueprint2_unsupported("set_blueprint_variable_metadata")
 
 
-async def ue_set_blueprint_variable_replication(asset_path: str = None,
+def ue_set_blueprint_variable_replication(asset_path: str = None,
                                                 variable_id: str = None,
                                                 mode: str = None,
                                                 notify_function_name: str = "") -> str:
@@ -708,47 +764,47 @@ async def ue_set_blueprint_variable_replication(asset_path: str = None,
     return _blueprint2_unsupported("set_blueprint_variable_replication")
 
 
-async def ue_rename_blueprint_component(asset_path: str = None,
+def ue_rename_blueprint_component(asset_path: str = None,
                                         component_id: str = None,
                                         new_name: str = None) -> str:
     """Renames an SCS component targeted by stable ID."""
     return _blueprint2_unsupported("rename_blueprint_component")
 
 
-async def ue_reparent_blueprint_component(asset_path: str = None,
+def ue_reparent_blueprint_component(asset_path: str = None,
                                           component_id: str = None,
                                           parent_component_id: str = None) -> str:
     """Reparents an SCS component using stable component IDs."""
     return _blueprint2_unsupported("reparent_blueprint_component")
 
 
-async def ue_reorder_blueprint_component(asset_path: str = None,
+def ue_reorder_blueprint_component(asset_path: str = None,
                                          component_id: str = None,
                                          sibling_index: int = None) -> str:
     """Moves an SCS component to an explicit sibling index."""
     return _blueprint2_unsupported("reorder_blueprint_component")
 
 
-async def ue_set_blueprint_component_transform(asset_path: str = None,
+def ue_set_blueprint_component_transform(asset_path: str = None,
                                                component_id: str = None,
                                                transform: dict = None) -> str:
     """Sets bounded relative transform fields on an SCS component."""
     return _blueprint2_unsupported("set_blueprint_component_transform")
 
 
-async def ue_get_blueprint_health(asset_path: str = None,
+def ue_get_blueprint_health(asset_path: str = None,
                                   include_warnings: bool = True) -> str:
     """Compiles explicitly and returns structured Blueprint health diagnostics."""
     return _blueprint2_unsupported("get_blueprint_health")
 
 
-async def ue_snapshot_blueprint_graph(asset_path: str = None, graph_id: str = None,
+def ue_snapshot_blueprint_graph(asset_path: str = None, graph_id: str = None,
                                       detailed: bool = False) -> str:
     """Returns a deterministic compact graph snapshot ordered by stable ID."""
     return _blueprint2_unsupported("snapshot_blueprint_graph")
 
 
-async def ue_diff_blueprint_graphs(before_snapshot: dict = None,
+def ue_diff_blueprint_graphs(before_snapshot: dict = None,
                                    after_snapshot: dict = None,
                                    queries: list = None) -> str:
     """Diffs two graph snapshots with independently paginated sections."""

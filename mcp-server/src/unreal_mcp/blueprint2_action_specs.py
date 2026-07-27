@@ -5,11 +5,16 @@ from typing import Any
 
 
 ASSET_PATH = {"type": "string", "format": "unreal-asset-path", "minLength": 1}
+LOWER_GUID = (
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}"
+)
 STABLE_ID = {
     "type": "string",
     "pattern": (
-        r"^(?:(graph|node|pin|variable|component|interface):.+"
-        r"|fallback:(graph|node|pin|variable|component|interface):[0-9a-f]{40})$"
+        rf"^(?:(?:graph|node|pin|variable|component):{LOWER_GUID}"
+        r"|interface:/(?:Script|Game)/[^\s:]+"
+        r"|fallback:(?:graph|node|pin|variable|component):[0-9a-f]{40})$"
     ),
 }
 NAME = {
@@ -452,7 +457,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "function_id": "graph:function-guid",
+            "function_id": "graph:11111111-1111-4111-8111-111111111111",
             "new_name": "CalculateFinalScore",
         },
     ),
@@ -485,7 +490,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "function_id": "graph:function-guid",
+            "function_id": "graph:11111111-1111-4111-8111-111111111111",
             "inputs": [{"name": "BaseScore", "type": {"kind": "int"}}],
             "outputs": [{"name": "Score", "type": {"kind": "int"}}],
             "pure": True,
@@ -503,7 +508,10 @@ BLUEPRINT2_ACTION_SPECS = {
             {"asset_path": ASSET_PATH, "function_id": STABLE_ID},
             ("asset_path", "function_id"),
         ),
-        {"asset_path": "/Game/BP_Player", "function_id": "graph:function-guid"},
+        {
+            "asset_path": "/Game/BP_Player",
+            "function_id": "graph:11111111-1111-4111-8111-111111111111",
+        },
     ),
     "create_blueprint_macro": _write(
         "create_blueprint_macro",
@@ -532,7 +540,10 @@ BLUEPRINT2_ACTION_SPECS = {
             {"asset_path": ASSET_PATH, "macro_id": STABLE_ID},
             ("asset_path", "macro_id"),
         ),
-        {"asset_path": "/Game/BP_Player", "macro_id": "graph:macro-guid"},
+        {
+            "asset_path": "/Game/BP_Player",
+            "macro_id": "graph:11111111-1111-4111-8111-111111111111",
+        },
     ),
     "create_custom_event": _write(
         "create_custom_event",
@@ -559,7 +570,10 @@ BLUEPRINT2_ACTION_SPECS = {
             {"asset_path": ASSET_PATH, "event_id": STABLE_ID},
             ("asset_path", "event_id"),
         ),
-        {"asset_path": "/Game/BP_Player", "event_id": "node:event-guid"},
+        {
+            "asset_path": "/Game/BP_Player",
+            "event_id": "node:22222222-2222-4222-8222-222222222222",
+        },
     ),
     "add_event_dispatcher": _write(
         "add_event_dispatcher",
@@ -586,7 +600,10 @@ BLUEPRINT2_ACTION_SPECS = {
             {"asset_path": ASSET_PATH, "dispatcher_id": STABLE_ID},
             ("asset_path", "dispatcher_id"),
         ),
-        {"asset_path": "/Game/BP_Player", "dispatcher_id": "variable:dispatcher-guid"},
+        {
+            "asset_path": "/Game/BP_Player",
+            "dispatcher_id": "variable:44444444-4444-4444-8444-444444444444",
+        },
     ),
     "add_blueprint_interface": _write(
         "add_blueprint_interface",
@@ -625,7 +642,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "graph_id": "graph:event-guid",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
             "member_kind": "function",
             "member_path": "/Script/Engine.Actor.K2_GetActorLocation",
             "position": {"x": 320, "y": 160},
@@ -645,7 +662,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "node_id": "node:node-guid",
+            "node_id": "node:22222222-2222-4222-8222-222222222222",
             "properties": {"NodeComment": "Validated comment"},
         },
         idempotent=True,
@@ -679,7 +696,10 @@ BLUEPRINT2_ACTION_SPECS = {
                 },
             ],
         },
-        {"asset_path": "/Game/BP_Player", "pin_id": "pin:pin-guid"},
+        {
+            "asset_path": "/Game/BP_Player",
+            "pin_id": "pin:33333333-3333-4333-8333-333333333333",
+        },
         idempotent=True,
     ),
     "rename_blueprint_variable": _destructive(
@@ -691,7 +711,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "variable_id": "variable:variable-guid",
+            "variable_id": "variable:44444444-4444-4444-8444-444444444444",
             "new_name": "FinalScore",
         },
     ),
@@ -702,7 +722,10 @@ BLUEPRINT2_ACTION_SPECS = {
             {"asset_path": ASSET_PATH, "variable_id": STABLE_ID},
             ("asset_path", "variable_id"),
         ),
-        {"asset_path": "/Game/BP_Player", "variable_id": "variable:variable-guid"},
+        {
+            "asset_path": "/Game/BP_Player",
+            "variable_id": "variable:44444444-4444-4444-8444-444444444444",
+        },
     ),
     "set_blueprint_variable_default": _write(
         "set_blueprint_variable_default",
@@ -713,7 +736,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "variable_id": "variable:variable-guid",
+            "variable_id": "variable:44444444-4444-4444-8444-444444444444",
             "default": 100,
         },
         idempotent=True,
@@ -744,7 +767,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "variable_id": "variable:variable-guid",
+            "variable_id": "variable:44444444-4444-4444-8444-444444444444",
             "metadata": {"category": "Scoring", "instance_editable": True},
         },
         idempotent=True,
@@ -778,7 +801,7 @@ BLUEPRINT2_ACTION_SPECS = {
         },
         {
             "asset_path": "/Game/BP_Player",
-            "variable_id": "variable:variable-guid",
+            "variable_id": "variable:44444444-4444-4444-8444-444444444444",
             "mode": "rep_notify",
             "notify_function_name": "OnRep_Score",
         },
@@ -793,7 +816,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "component_id": "component:component-guid",
+            "component_id": "component:55555555-5555-4555-8555-555555555555",
             "new_name": "PlayerMesh",
         },
     ),
@@ -810,8 +833,8 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "component_id": "component:mesh-guid",
-            "parent_component_id": "component:root-guid",
+            "component_id": "component:55555555-5555-4555-8555-555555555555",
+            "parent_component_id": "component:66666666-6666-4666-8666-666666666666",
         },
     ),
     "reorder_blueprint_component": _destructive(
@@ -827,7 +850,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "component_id": "component:mesh-guid",
+            "component_id": "component:55555555-5555-4555-8555-555555555555",
             "sibling_index": 0,
         },
     ),
@@ -840,7 +863,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "component_id": "component:mesh-guid",
+            "component_id": "component:55555555-5555-4555-8555-555555555555",
             "transform": {"location": [0, 0, 100], "rotation": [0, 90, 0], "scale": [1, 1, 1]},
         },
         idempotent=True,
@@ -876,7 +899,7 @@ BLUEPRINT2_ACTION_SPECS = {
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "graph_id": "graph:event-guid",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
             "detailed": False,
         },
     ),

@@ -91,6 +91,7 @@ TArray<UObject*> UMCPythonHelper::GetSelectedBlueprintNodes()
     auto* Subsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
     for (UObject* Asset : Subsystem->GetAllEditedAssets())
     {
+        if (!Cast<UBlueprint>(Asset)) continue;
         IAssetEditorInstance* AssetEditorInstance = Subsystem->FindEditorForAsset(Asset, false);
         FAssetEditorToolkit* AssetEditorToolkit = static_cast<FAssetEditorToolkit*>(AssetEditorInstance);
         if (!AssetEditorToolkit) continue;
@@ -120,6 +121,7 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
     auto* Subsystem = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
     for (UObject* Asset : Subsystem->GetAllEditedAssets())
     {
+        if (!Cast<UBlueprint>(Asset)) continue;
         IAssetEditorInstance* AssetEditorInstance = Subsystem->FindEditorForAsset(Asset, false);
         FAssetEditorToolkit* AssetEditorToolkit = static_cast<FAssetEditorToolkit*>(AssetEditorInstance);
         if (!AssetEditorToolkit) continue;

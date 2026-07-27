@@ -51,8 +51,11 @@ EDITOR_TESTS = (
     / "tests"
 )
 EDITOR_TEST_BASE = EDITOR_TESTS / "base.py"
+EDITOR_TEST_SUPPORT = EDITOR_TESTS / "blueprint2_support.py"
 INSPECTION_EDITOR_TEST = EDITOR_TESTS / "test_blueprint2_inspection.py"
+EDITOR_RUN_ALL = EDITOR_TESTS / "run_all.py"
 SELF_HOSTED_WORKFLOW = ROOT / ".github" / "workflows" / "e2e-selfhosted.yml"
+PLUGIN_PYTHON = ADAPTER_FILE.parents[1]
 
 
 def _load_blueprint_actions(monkeypatch, helper):
@@ -154,6 +157,90 @@ def test_call_asset_helper_without_request_uses_unary_reflected_signature(monkey
         ("load", "/Game/BP.BP"),
         ("asset_helper_unary", loaded),
     ]
+
+
+def test_call_asset_helper_normalizes_asset_load_exceptions(monkeypatch):
+    module, _, _, _ = _load(monkeypatch)
+
+    def fail_load(_asset_path):
+        raise RuntimeError("loader exploded")
+
+    monkeypatch.setattr(module, "load_blueprint", fail_load)
+    result_json = module.call_asset_helper(
+        "get_blueprint_brief",
+        "/Game/BP.BP",
+    )
+    result = json.loads(result_json)
+
+    assert result["success"] is False
+    assert result["errors"][0]["code"] == "INTERNAL_ERROR"
+    assert result["errors"][0]["path"] == "asset_path"
+    assert "traceback" not in result_json.lower()
+
+
+def test_call_asset_helper_normalizes_missing_and_failing_helpers(monkeypatch):
+    module, _, _, _ = _load(monkeypatch)
+
+    missing_json = module.call_asset_helper(
+        "missing_blueprint2_helper",
+        "/Game/BP.BP",
+    )
+    missing = json.loads(missing_json)
+    assert missing["errors"][0]["code"] == "UE_VERSION_UNSUPPORTED"
+    assert "traceback" not in missing_json.lower()
+
+    def fail_helper(_blueprint):
+        raise RuntimeError("helper exploded")
+
+    module.unreal.MCPythonHelper.get_blueprint_brief = fail_helper
+    failed_json = module.call_asset_helper(
+        "get_blueprint_brief",
+        "/Game/BP.BP",
+    )
+    failed = json.loads(failed_json)
+    assert failed["errors"][0]["code"] == "INTERNAL_ERROR"
+    assert "traceback" not in failed_json.lower()
+
+
+def test_blueprint_brief_executes_through_real_unreal_dispatcher(monkeypatch):
+    class Blueprint:
+        pass
+
+    blueprint = Blueprint()
+    fake_unreal = SimpleNamespace(
+        Blueprint=Blueprint,
+        EditorAssetLibrary=SimpleNamespace(load_asset=lambda _path: blueprint),
+        MCPythonHelper=SimpleNamespace(
+            get_blueprint_brief=lambda _blueprint: (
+                '{"success":true,"status":"succeeded","summary":"ok",'
+                '"data":{},"changes":[],"warnings":[],"errors":[],'
+                '"next_actions":[],"trace_id":"test"}'
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
+    monkeypatch.syspath_prepend(str(PLUGIN_PYTHON))
+    for module_name in (
+        "UnrealMCPython.blueprint2",
+        "UnrealMCPython.blueprint_actions",
+        "UnrealMCPython.mcp_unreal_actions",
+    ):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    dispatcher = __import__(
+        "UnrealMCPython.mcp_unreal_actions",
+        fromlist=["execute_action"],
+    )
+    result = json.loads(
+        dispatcher.execute_action(
+            "UnrealMCPython.blueprint_actions",
+            "ue_get_blueprint_brief",
+            {"asset_path": "/Game/BP.BP"},
+        )
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "succeeded"
 
 
 def test_call_json_helper_copies_request_and_passes_result_through(monkeypatch):
@@ -302,7 +389,7 @@ def test_graph_node_and_pin_ids_share_deterministic_fallback_helpers():
         "Graph->GetSchema()->GetClass()->GetPathName()",
         "MakeGraphTargetId(Blueprint, Node->GetGraph())",
         "Node->GetClass()->GetPathName()",
-        "MakeNodeTargetId(Blueprint, Pin->GetOwningNode())",
+        "MakeNodeTargetId(Blueprint, OwningNode)",
         "Pin->PinType.PinSubCategoryObject->GetPathName()",
         "Pin->PinType.PinCategory.ToString()",
         "MakeQualifiedFallbackId(",
@@ -320,15 +407,28 @@ def test_self_hosted_workflow_builds_and_runs_native_blueprint2_gate():
 
     for contract in (
         "Engine\\Build\\BatchFiles\\Build.bat",
+        "Engine\\Build\\Build.version",
+        "$buildVersion.MajorVersion -ne 5",
+        "$buildVersion.MinorVersion -ne 7",
         "UnrealMCPSampleEditor Win64 Development",
         "Automation RunTests UnrealMCPython.Blueprint2",
         "Found 2 automation tests",
         "UnrealMCPython.Blueprint2.TargetIds",
         "UnrealMCPython.Blueprint2.BriefCounts",
-        "Test Completed. Result={Success}",
-        "$passed.Count -ne 2",
+        "Result={Success} Name={TargetIds}",
+        "Result={Success} Name={BriefCounts}",
+        "$editorExit = $LASTEXITCODE",
     ):
         assert contract in workflow
+
+
+def test_editor_runner_fails_closed_when_a_suite_cannot_load():
+    runner = EDITOR_RUN_ALL.read_text(encoding="utf-8")
+
+    assert "_load_errors = []" in runner
+    assert "_load_errors.append" in runner
+    assert "if _load_errors:" in runner
+    assert "raise RuntimeError" in runner
 
 
 def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
@@ -338,8 +438,8 @@ def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
             node_name="DuplicateName",
             node_class="K2Node_CustomEvent",
             object_path="/Game/A.A:EventGraph.DuplicateName",
-            stable_id="node:aaaaaaaa",
-            graph_id="graph:11111111",
+            stable_id="fallback:node:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            graph_id="fallback:graph:1111111111111111111111111111111111111111",
         ),
         SimpleNamespace(
             node_name="DuplicateName",
@@ -371,8 +471,12 @@ def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
                 "name": "DuplicateName",
                 "class": "K2Node_CustomEvent",
                 "object_path": "/Game/A.A:EventGraph.DuplicateName",
-                "stable_id": "node:aaaaaaaa",
-                "graph_id": "graph:11111111",
+                "stable_id": "fallback:node:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "graph_id": "fallback:graph:1111111111111111111111111111111111111111",
+                "id_kind": "qualified_name_fallback",
+                "stable": False,
+                "graph_id_kind": "qualified_name_fallback",
+                "graph_stable": False,
             },
             {
                 "name": "DuplicateName",
@@ -380,6 +484,10 @@ def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
                 "object_path": "/Game/B.B:OtherGraph.DuplicateName",
                 "stable_id": "node:bbbbbbbb",
                 "graph_id": "graph:22222222",
+                "id_kind": "node_guid",
+                "stable": True,
+                "graph_id_kind": "graph_guid",
+                "graph_stable": True,
             },
         ],
     }
@@ -440,11 +548,28 @@ def test_compact_selected_node_links_use_stable_ids_with_duplicate_names(
     link = result["nodes"][1]["pins"][0]["linked"][0]
     assert link["node_id"] == "node:aaaaaaaa"
     assert link["node"] == 0
+    assert result["nodes"][1]["id_kind"] == "node_guid"
+    assert result["nodes"][1]["stable"] is True
+    assert result["nodes"][1]["pins"][0]["id_kind"] == "pin_guid"
+    assert result["nodes"][1]["pins"][0]["stable"] is True
+    assert link["node_id_kind"] == "node_guid"
+    assert link["pin_id_kind"] == "pin_guid"
 
 
 def test_editor_brief_fixture_has_exact_counts_and_strict_cleanup_contract():
     base = EDITOR_TEST_BASE.read_text(encoding="utf-8")
+    support = EDITOR_TEST_SUPPORT.read_text(encoding="utf-8")
     inspection_test = INSPECTION_EDITOR_TEST.read_text(encoding="utf-8")
+
+    assert '"/Game/__MCPTests/Blueprint2_' in support
+    assert "inspect.isawaitable" not in support
+    assert "asyncio.run" not in support
+    assert "BLUEPRINT2_TEST_ROOT" in inspection_test
+    assert "mcp_unreal_actions import execute_action" in inspection_test
+    assert '"ue_get_blueprint_brief"' in inspection_test
+    assert "from UnrealMCPython.tests.base import MCPTestCase, TEST_ROOT" not in (
+        inspection_test
+    )
 
     for fixture_name in (
         "BriefEnabled",
@@ -521,3 +646,18 @@ def test_compact_inspection_exposes_runtime_helpers_and_stable_selected_ids():
     assert '"stable_id"' in actions
     assert '"graph_id"' in actions
     assert 'return blueprint2.call_asset_helper("get_blueprint_brief", asset_path)' in actions
+
+
+def test_selected_node_helpers_reject_non_blueprint_editors_before_cast():
+    source = HELPER_SOURCE.read_text(encoding="utf-8")
+
+    for function_name in (
+        "GetSelectedBlueprintNodes",
+        "GetSelectedBlueprintNodeInfos",
+    ):
+        body = source.split(f"UMCPythonHelper::{function_name}", 1)[1]
+        body = body.split("\n}", 1)[0]
+        blueprint_guard = body.index("Cast<UBlueprint>(Asset)")
+        toolkit_cast = body.index("static_cast<FAssetEditorToolkit*>")
+        blueprint_editor_cast = body.index("static_cast<FBlueprintEditor*>")
+        assert blueprint_guard < toolkit_cast < blueprint_editor_cast
