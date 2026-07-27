@@ -383,6 +383,16 @@ def test_editor_brief_fixture_has_exact_counts_and_strict_cleanup_contract():
         "BlueprintInterfaceFactory",
     ):
         assert fixture_name in inspection_test
+    for macro_contract in (
+        "test_get_blueprint_brief_accepts_empty_macro_library",
+        "test_get_blueprint_brief_counts_created_macro_when_supported",
+        'hasattr(unreal.BlueprintEditorLibrary, "add_macro_graph")',
+        "No safe macro graph creation API is exposed in this UE version",
+        'self.assertGreater(data["counts"]["macros"], 0)',
+        'self.assertGreater(data["counts"]["graphs"], 0)',
+        'self.assertGreater(data["counts"]["nodes"], 0)',
+    ):
+        assert macro_contract in inspection_test
     for assertion in (
         '"variables": 1',
         '"components": 2',

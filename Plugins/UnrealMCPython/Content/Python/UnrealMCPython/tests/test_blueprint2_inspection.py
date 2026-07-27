@@ -16,6 +16,7 @@ class TestBlueprint2Inspection(MCPTestCase):
     ACTOR_FUNCTION = "BriefFunction"
     ACTOR_EVENT = "BriefCustomEvent"
     INTERFACE_FUNCTION = "BriefInterfaceFunction"
+    MACRO_GRAPH = "BriefMacro"
 
     def setUp(self):
         self.ensure_test_dir()
@@ -213,7 +214,7 @@ class TestBlueprint2Inspection(MCPTestCase):
         self.assertNotIn("nodes", data)
         self.assertNotIn("pins", data)
 
-    def test_get_blueprint_brief_accepts_macro_library(self):
+    def test_get_blueprint_brief_accepts_empty_macro_library(self):
         if self._macro_path is None:
             self.skipTest(
                 "Blueprint macro libraries are not exposed in this UE version"
@@ -241,6 +242,36 @@ class TestBlueprint2Inspection(MCPTestCase):
         )
         self.assertFalse(data["capabilities"]["k2_schema"])
         self.assertFalse(data["capabilities"]["has_scs"])
+        self.assertNotIn("nodes", data)
+        self.assertNotIn("pins", data)
+
+    def test_get_blueprint_brief_counts_created_macro_when_supported(self):
+        if self._macro_path is None:
+            self.skipTest(
+                "Blueprint macro libraries are not exposed in this UE version"
+            )
+        if not hasattr(unreal.BlueprintEditorLibrary, "add_macro_graph"):
+            self.skipTest(
+                "No safe macro graph creation API is exposed in this UE version"
+            )
+
+        macro = unreal.EditorAssetLibrary.load_asset(self._macro_path)
+        self.assertIsNotNone(macro)
+        macro_graph = unreal.BlueprintEditorLibrary.add_macro_graph(
+            macro, self.MACRO_GRAPH
+        )
+        self.assertIsNotNone(macro_graph)
+        unreal.BlueprintEditorLibrary.compile_blueprint(macro)
+        self.assertTrue(unreal.EditorAssetLibrary.save_loaded_asset(macro))
+
+        result = self._brief(self._macro_path)
+
+        self.assertSuccess(result)
+        data = result["data"]
+        self.assertIn(self.MACRO_GRAPH, data["graphs"])
+        self.assertGreater(data["counts"]["macros"], 0)
+        self.assertGreater(data["counts"]["graphs"], 0)
+        self.assertGreater(data["counts"]["nodes"], 0)
         self.assertNotIn("nodes", data)
         self.assertNotIn("pins", data)
 
