@@ -165,7 +165,9 @@ def test_project_info_reports_concrete_availability_flags(monkeypatch):
     assert {"EnhancedInput", "PythonScriptPlugin"}.issubset(checked_plugins)
 
 
-def test_project_info_reports_malformed_blueprint2_capabilities(monkeypatch):
+def test_project_info_is_preserved_when_blueprint2_capabilities_are_malformed(
+    monkeypatch,
+):
     fake_unreal = SimpleNamespace(
         PluginBlueprintLibrary=SimpleNamespace(
             is_plugin_enabled=lambda _name: False
@@ -199,5 +201,12 @@ def test_project_info_reports_malformed_blueprint2_capabilities(monkeypatch):
 
     result = json.loads(module.ue_get_project_info())
 
-    assert result["success"] is False
-    assert "traceback" in result
+    assert result["success"] is True
+    assert result["project_name"] == "TestGame"
+    assert result["project_dir"] == "/Project/"
+    assert result["content_dir"] == "/Project/Content/"
+    assert result["engine_version"] == "5.7.0"
+    assert result["blueprint2"]["available"] is False
+    assert result["blueprint2"]["error"]["code"] == (
+        "BLUEPRINT2_CAPABILITIES_UNAVAILABLE"
+    )

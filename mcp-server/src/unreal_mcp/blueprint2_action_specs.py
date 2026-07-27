@@ -7,7 +7,10 @@ from typing import Any
 ASSET_PATH = {"type": "string", "format": "unreal-asset-path", "minLength": 1}
 STABLE_ID = {
     "type": "string",
-    "pattern": r"^(graph|node|pin|variable|component|interface):.+$",
+    "pattern": (
+        r"^(?:(graph|node|pin|variable|component|interface):.+"
+        r"|fallback:(graph|node|pin|variable|component|interface):[0-9a-f]{40})$"
+    ),
 }
 NAME = {
     "type": "string",

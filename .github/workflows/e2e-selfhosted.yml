@@ -47,11 +47,14 @@ jobs:
           if (-not $env:UE_ROOT) { throw "UE_ROOT is not set. Set the repo variable UE_ROOT or pass engine_root on dispatch." }
           $cmd = Join-Path $env:UE_ROOT "Engine\Binaries\Win64\UnrealEditor-Cmd.exe"
           $editor = Join-Path $env:UE_ROOT "Engine\Binaries\Win64\UnrealEditor.exe"
+          $build = Join-Path $env:UE_ROOT "Engine\Build\BatchFiles\Build.bat"
           if (-not (Test-Path $cmd)) { throw "UnrealEditor-Cmd.exe not found at $cmd" }
+          if (-not (Test-Path $build)) { throw "Build.bat not found at $build" }
           $uproject = Join-Path $env:GITHUB_WORKSPACE "UnrealMCPSample.uproject"
           if (-not (Test-Path $uproject)) { throw "UnrealMCPSample.uproject not found at $uproject" }
           "cmd=$cmd"           | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "editor=$editor"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "build=$build"       | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "uproject=$uproject" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       # ── Gate 1: catalog vs ue_* signature drift ──────────────────────────────────
@@ -63,6 +66,28 @@ jobs:
       - name: Gate 2 — offline dispatcher tests
         working-directory: mcp-server
         run: uv run --extra dev pytest -q tests/test_dispatcher.py tests/test_core.py
+
+      - name: Gate 3a - build editor target
+        run: |
+          & "${{ steps.paths.outputs.build }}" UnrealMCPSampleEditor Win64 Development `
+            "${{ steps.paths.outputs.uproject }}" -WaitMutex -NoHotReload
+          if ($LASTEXITCODE -ne 0) { throw "Gate 3a: Unreal build failed with exit code $LASTEXITCODE." }
+
+      - name: Gate 3b - native Blueprint 2 automation
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "mcp_blueprint2_native.log"
+          & "${{ steps.paths.outputs.cmd }}" "${{ steps.paths.outputs.uproject }}" `
+            -ExecCmds="Automation RunTests UnrealMCPython.Blueprint2" `
+            -TestExit="Automation Test Queue Empty" `
+            -unattended -nosplash -nop4 -nullrhi -nosound -stdout -FullStdOutLogOutput 2>&1 |
+            Tee-Object -FilePath $log | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "Gate 3b: native automation process failed with exit code $LASTEXITCODE." }
+          $found = Select-String -Path $log -SimpleMatch "Found 2 automation tests"
+          $targetIds = Select-String -Path $log -SimpleMatch "UnrealMCPython.Blueprint2.TargetIds"
+          $briefCounts = Select-String -Path $log -SimpleMatch "UnrealMCPython.Blueprint2.BriefCounts"
+          $passed = Select-String -Path $log -SimpleMatch "Test Completed. Result={Success}"
+          if (-not $found -or -not $targetIds -or -not $briefCounts) { throw "Gate 3b: expected native Blueprint 2 tests were not discovered." }
+          if ($passed.Count -ne 2) { throw "Gate 3b: native Blueprint 2 tests did not both report success." }
 
       # ── Gate 3: full in-editor suite, headless. Exercises every domain against a
       #            real editor and exits. The suite prints a "Results:" summary line. ──

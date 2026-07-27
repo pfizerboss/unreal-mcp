@@ -3,14 +3,22 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "MCPythonBlueprint2Internal.h"
+#include "MCPythonHelper.h"
 
+#include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
+#include "GameFramework/Actor.h"
 #include "K2Node_CustomEvent.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "UObject/Interface.h"
 #include "UObject/Package.h"
 
 namespace
@@ -58,6 +66,13 @@ UEdGraphPin* MakePinFixture(
     UEdGraphPin* Pin = Node->CreatePin(EGPD_Input, Category, Name);
     Pin->PinId.Invalidate();
     return Pin;
+}
+
+TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
+{
+    TSharedPtr<FJsonObject> Result;
+    const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
+    return FJsonSerializer::Deserialize(Reader, Result) ? Result : nullptr;
 }
 }
 
@@ -116,15 +131,15 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
     TestEqualSensitive(
         TEXT("Graph fallback ID is independently precomputed"),
         *GraphFallback,
-        TEXT("graph:c6afa87de837f324fd224c43d4f24e5fe74ce74d"));
+        TEXT("fallback:graph:c6afa87de837f324fd224c43d4f24e5fe74ce74d"));
     TestEqualSensitive(
         TEXT("Node fallback ID is independently precomputed"),
         *NodeFallback,
-        TEXT("node:c83be440e1d769e125ee1f53bc085787330fcd18"));
+        TEXT("fallback:node:79bfb622f4b03440dc12fba6a89ae53d44b0e46b"));
     TestEqualSensitive(
         TEXT("Pin fallback ID is independently precomputed"),
         *PinFallback,
-        TEXT("pin:dfbf200f14eb55f552440426594944a107ba6583"));
+        TEXT("fallback:pin:8459beff0c6223a4ed7482ad60270a8dc2de4ec6"));
     TestEqualSensitive(
         TEXT("Graph fallback ID is deterministic"),
         MakeGraphTargetId(Blueprint, Graph),
@@ -254,6 +269,94 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         TEXT("Pin fallback changes with its pin category/type"),
         MakePinTargetId(Blueprint, PinTypeVariant),
         PinFallback);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2BriefCountsTest,
+    "UnrealMCPython.Blueprint2.BriefCounts",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2BriefCountsTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+
+    UPackage* BriefPackage = CreatePackage(
+        TEXT("/Game/Tests/MCP/Blueprint2NativeBriefCounts"));
+    UBlueprint* BriefBlueprint = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        BriefPackage,
+        TEXT("BP_BriefCounts"),
+        BPTYPE_Normal,
+        TEXT("MCPythonBlueprint2BriefCountsTest"));
+    TestNotNull(TEXT("Brief count fixture Blueprint is created"), BriefBlueprint);
+    if (!BriefBlueprint)
+    {
+        return false;
+    }
+
+    FEdGraphPinType DispatcherType;
+    DispatcherType.PinCategory = UEdGraphSchema_K2::PC_MCDelegate;
+    TestTrue(
+        TEXT("Brief fixture dispatcher variable is added"),
+        FBlueprintEditorUtils::AddMemberVariable(
+            BriefBlueprint,
+            TEXT("OnBriefEvent"),
+            DispatcherType));
+
+    UEdGraph* MacroGraph = FBlueprintEditorUtils::CreateNewGraph(
+        BriefBlueprint,
+        TEXT("BriefMacro"),
+        UEdGraph::StaticClass(),
+        UEdGraphSchema_K2::StaticClass());
+    FBlueprintEditorUtils::AddMacroGraph(
+        BriefBlueprint,
+        MacroGraph,
+        true,
+        nullptr);
+    TestTrue(
+        TEXT("Brief fixture interface is implemented"),
+        FBlueprintEditorUtils::ImplementNewInterface(
+            BriefBlueprint,
+            UInterface::StaticClass()->GetClassPathName()));
+
+    const TSharedPtr<FJsonObject> Brief = ParseJsonObject(
+        UMCPythonHelper::GetBlueprintBrief(BriefBlueprint));
+    TestTrue(TEXT("Blueprint brief is valid JSON"), Brief.IsValid());
+    if (!Brief)
+    {
+        return false;
+    }
+    TestTrue(TEXT("Blueprint brief succeeds"), Brief->GetBoolField(TEXT("success")));
+    const TSharedPtr<FJsonObject> Data = Brief->GetObjectField(TEXT("data"));
+    const TSharedPtr<FJsonObject> Counts = Data->GetObjectField(TEXT("counts"));
+    TestEqual(
+        TEXT("Blueprint brief counts one variable"),
+        Counts->GetIntegerField(TEXT("variables")),
+        int32(1));
+    TestEqual(
+        TEXT("Blueprint brief counts one dispatcher"),
+        Counts->GetIntegerField(TEXT("dispatchers")),
+        int32(1));
+    TestEqual(
+        TEXT("Blueprint brief counts one macro"),
+        Counts->GetIntegerField(TEXT("macros")),
+        int32(1));
+    TestEqual(
+        TEXT("Blueprint brief counts one implemented interface"),
+        Counts->GetIntegerField(TEXT("interfaces")),
+        int32(1));
+    const TArray<TSharedPtr<FJsonValue>>& Interfaces =
+        Data->GetArrayField(TEXT("interfaces"));
+    TestEqual(TEXT("Blueprint brief emits one interface path"), Interfaces.Num(), 1);
+    if (Interfaces.Num() == 1)
+    {
+        TestEqualSensitive(
+            TEXT("Blueprint brief emits the implemented interface path"),
+            Interfaces[0]->AsString(),
+            UInterface::StaticClass()->GetPathName());
+    }
 
     return true;
 }

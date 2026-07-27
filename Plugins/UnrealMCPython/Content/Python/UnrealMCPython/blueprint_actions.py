@@ -51,9 +51,11 @@ def ue_get_selected_bp_node_infos() -> str:
     try:
         node_infos = unreal.MCPythonHelper.get_selected_blueprint_node_infos()
 
-        name_to_id = {}
-        for i, n in enumerate(node_infos):
-            name_to_id[n.node_name] = i
+        stable_to_id = {
+            n.stable_id: i
+            for i, n in enumerate(node_infos)
+            if n.stable_id
+        }
 
         def link_to_dict(link):
             d = {
@@ -61,8 +63,8 @@ def ue_get_selected_bp_node_infos() -> str:
                 "node_id": link.node_id,
                 "pin_id": link.pin_id,
             }
-            if link.node_name in name_to_id:
-                d["node"] = name_to_id[link.node_name]
+            if link.node_id in stable_to_id:
+                d["node"] = stable_to_id[link.node_id]
             else:
                 d["node"] = link.node_title
             if link.pin_name:

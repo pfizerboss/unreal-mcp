@@ -247,6 +247,17 @@ def test_mutation_targets_use_stable_ids():
             assert properties[field] == STABLE_ID, f"{action}.{field}"
 
 
+def test_stable_id_schema_accepts_qualified_fallback_ids():
+    from unreal_mcp.blueprint2_action_specs import STABLE_ID
+
+    validator = Draft202012Validator(STABLE_ID)
+    validator.validate(
+        "fallback:graph:c6afa87de837f324fd224c43d4f24e5fe74ce74d"
+    )
+    with pytest.raises(ValidationError):
+        validator.validate("fallback:graph:not-a-sha1")
+
+
 def test_disconnect_blueprint_pins_has_exclusive_target_forms():
     schema = _new_specs()["disconnect_blueprint_pins"]["input_schema"]
     validator = Draft202012Validator(schema)

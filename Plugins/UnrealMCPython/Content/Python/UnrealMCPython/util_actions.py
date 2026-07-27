@@ -303,9 +303,20 @@ def ue_get_project_info() -> str:
         python_plugin = _is_plugin_enabled("PythonScriptPlugin") or hasattr(
             unreal, "PythonScriptLibrary"
         )
-        blueprint2 = json.loads(
-            unreal.MCPythonHelper.get_blueprint2_capabilities(None)
-        )
+        try:
+            blueprint2 = json.loads(
+                unreal.MCPythonHelper.get_blueprint2_capabilities(None)
+            )
+            if not isinstance(blueprint2, dict):
+                raise ValueError("Blueprint 2 capabilities must be a JSON object")
+        except Exception as capability_error:
+            blueprint2 = {
+                "available": False,
+                "error": {
+                    "code": "BLUEPRINT2_CAPABILITIES_UNAVAILABLE",
+                    "message": str(capability_error),
+                },
+            }
         return json.dumps({
             "success": True,
             "project_name": unreal.SystemLibrary.get_game_name(),

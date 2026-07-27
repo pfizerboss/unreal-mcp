@@ -344,7 +344,7 @@ FString MakeQualifiedFallbackId(
     const FString& TypePath)
 {
     return FString::Printf(
-        TEXT("%s:%s"),
+        TEXT("fallback:%s:%s"),
         PrefixForKind(Kind),
         *Sha1(Owner + TEXT("\n") + Name + TEXT("\n") + TypePath));
 }

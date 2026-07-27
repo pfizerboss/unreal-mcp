@@ -52,6 +52,7 @@ EDITOR_TESTS = (
 )
 EDITOR_TEST_BASE = EDITOR_TESTS / "base.py"
 INSPECTION_EDITOR_TEST = EDITOR_TESTS / "test_blueprint2_inspection.py"
+SELF_HOSTED_WORKFLOW = ROOT / ".github" / "workflows" / "e2e-selfhosted.yml"
 
 
 def _load_blueprint_actions(monkeypatch, helper):
@@ -314,6 +315,22 @@ def test_graph_node_and_pin_ids_share_deterministic_fallback_helpers():
         assert "MakePinTargetId(" in source
 
 
+def test_self_hosted_workflow_builds_and_runs_native_blueprint2_gate():
+    workflow = SELF_HOSTED_WORKFLOW.read_text(encoding="utf-8")
+
+    for contract in (
+        "Engine\\Build\\BatchFiles\\Build.bat",
+        "UnrealMCPSampleEditor Win64 Development",
+        "Automation RunTests UnrealMCPython.Blueprint2",
+        "Found 2 automation tests",
+        "UnrealMCPython.Blueprint2.TargetIds",
+        "UnrealMCPython.Blueprint2.BriefCounts",
+        "Test Completed. Result={Success}",
+        "$passed.Count -ne 2",
+    ):
+        assert contract in workflow
+
+
 def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
     calls = []
     infos = [
@@ -367,6 +384,62 @@ def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
         ],
     }
     assert calls == ["infos"]
+
+
+def test_compact_selected_node_links_use_stable_ids_with_duplicate_names(
+    monkeypatch,
+):
+    link_to_first = SimpleNamespace(
+        graph_id="graph:11111111",
+        node_id="node:aaaaaaaa",
+        pin_id="pin:aaaaaaaa",
+        node_name="DuplicateName",
+        node_title="First node",
+        pin_name="Out",
+    )
+    linked_pin = SimpleNamespace(
+        friendly_name="",
+        pin_name="In",
+        direction="input",
+        stable_id="pin:bbbbbbbb",
+        pin_id="pin:bbbbbbbb",
+        graph_id="graph:22222222",
+        node_id="node:bbbbbbbb",
+        pin_type="exec",
+        pin_sub_type="",
+        default_value="",
+        linked_to=[link_to_first],
+    )
+    infos = [
+        SimpleNamespace(
+            node_name="DuplicateName",
+            node_title="First node",
+            node_comment="",
+            stable_id="node:aaaaaaaa",
+            graph_id="graph:11111111",
+            pins=[],
+        ),
+        SimpleNamespace(
+            node_name="DuplicateName",
+            node_title="Second node",
+            node_comment="",
+            stable_id="node:bbbbbbbb",
+            graph_id="graph:22222222",
+            pins=[linked_pin],
+        ),
+    ]
+
+    class Helper:
+        @staticmethod
+        def get_selected_blueprint_node_infos():
+            return infos
+
+    module = _load_blueprint_actions(monkeypatch, Helper)
+    result = json.loads(module.ue_get_selected_bp_node_infos())
+
+    link = result["nodes"][1]["pins"][0]["linked"][0]
+    assert link["node_id"] == "node:aaaaaaaa"
+    assert link["node"] == 0
 
 
 def test_editor_brief_fixture_has_exact_counts_and_strict_cleanup_contract():
