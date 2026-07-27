@@ -335,57 +335,5 @@ SPECIAL_ACTION_SPECS = {
                 "additionalProperties": True,
             },
         },
-        "plan_gameplay_foundation": {
-            "title": "Plan Gameplay Foundation",
-            "description": "Build the installed gameplay-foundation workflow recipe.",
-            "effect": "read",
-            "risk": "low",
-            "result_kind": "json",
-            "idempotent": True,
-            "supports_preview": True,
-            "supports_undo": False,
-            "requires_confirmation": False,
-            "ue_versions": ["5.6", "5.7", "5.8"],
-            "required_plugins": [],
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "spec": {"type": "object", "default": {}}
-                },
-                "additionalProperties": False,
-            },
-            "output_schema": {
-                "type": "object",
-                "properties": {"success": {"type": "boolean"}},
-                "required": ["success"],
-                "additionalProperties": True,
-            },
-        },
-        "verify_gameplay_foundation": {
-            "title": "Verify Gameplay Foundation",
-            "description": "Verify gameplay-foundation assets against the installed recipe.",
-            "effect": "read",
-            "risk": "low",
-            "result_kind": "json",
-            "idempotent": True,
-            "supports_preview": False,
-            "supports_undo": False,
-            "requires_confirmation": False,
-            "ue_versions": ["5.6", "5.7", "5.8"],
-            "required_plugins": [],
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "spec": {"type": "object", "default": {}}
-                },
-                "additionalProperties": False,
-            },
-            "output_schema": {
-                "type": "object",
-                "properties": {"success": {"type": "boolean"}},
-                "required": ["success"],
-                "additionalProperties": True,
-            },
-        },
     },
 }

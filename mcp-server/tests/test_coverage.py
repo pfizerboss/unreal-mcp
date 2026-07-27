@@ -61,14 +61,6 @@ SERVER_LOCAL_TESTS = {
             "test_workflow_handler.py",
             "test_workflow_undo_routes_signed_token",
         ),
-        "plan_gameplay_foundation": (
-            "test_workflow_handler.py",
-            "test_workflow_plan_gameplay_foundation_uses_installed_hook",
-        ),
-        "verify_gameplay_foundation": (
-            "test_workflow_handler.py",
-            "test_workflow_verify_gameplay_foundation_uses_installed_hook",
-        ),
     },
 }
 SPECIAL = {domain: set(actions) for domain, actions in SERVER_LOCAL_TESTS.items()}

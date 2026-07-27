@@ -11,16 +11,8 @@ from generate_catalog import build, build_registry
 from unreal_mcp.contracts import ToolResult
 
 
-def test_workflow_domain_exposes_only_server_local_actions():
-    expected = {
-        "plan",
-        "apply",
-        "get",
-        "cancel",
-        "undo",
-        "plan_gameplay_foundation",
-        "verify_gameplay_foundation",
-    }
+def test_workflow_domain_exposes_only_generic_actions():
+    expected = {"plan", "apply", "get", "cancel", "undo"}
     assert set(build()["workflow"]) == expected
     assert set(build_registry()["workflow"]) == expected
 

@@ -19,16 +19,11 @@ class WorkflowHandler:
         planner,
         executor,
         store,
-        *,
-        gameplay_planner=None,
-        gameplay_verifier=None,
     ):
         self.registry = registry
         self.planner = planner
         self.executor = executor
         self.store = store
-        self.gameplay_planner = gameplay_planner
-        self.gameplay_verifier = gameplay_verifier
 
     async def handle(
         self,
@@ -71,14 +66,6 @@ class WorkflowHandler:
                     params["plan_id"], params["undo_token"]
                 )
                 return result.model_dump(mode="json")
-            if action == "plan_gameplay_foundation":
-                return await self._foundation(
-                    self.gameplay_planner, params.get("spec", {})
-                )
-            if action == "verify_gameplay_foundation":
-                return await self._foundation(
-                    self.gameplay_verifier, params.get("spec", {})
-                )
         except WorkflowPlanningError as exc:
             return exc.result.model_dump(mode="json")
         except (KeyError, TypeError, ValueError, ValidationError) as exc:
@@ -222,20 +209,6 @@ class WorkflowHandler:
             ],
         }
 
-    async def _foundation(self, hook, spec: dict[str, Any]) -> dict[str, Any]:
-        if hook is None:
-            return self._error(
-                ErrorCode.UE_VERSION_UNSUPPORTED,
-                "Gameplay foundation authoring is not installed",
-                path="action",
-                hint=(
-                    "Complete the Blueprint authoring stage before using "
-                    "this workflow branch."
-                ),
-                details={"capability": "gameplay_foundation_v1"},
-            )
-        return await hook(spec)
-
     @classmethod
     def _schema_error(cls, action, params, spec, error) -> dict[str, Any]:
         if error.validator == "required":
@@ -289,4 +262,3 @@ class WorkflowHandler:
             hint=hint,
             details=details,
         ).model_dump(mode="json")
-

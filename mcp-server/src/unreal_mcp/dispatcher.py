@@ -72,8 +72,6 @@ _LOCAL_ACTIONS = {
             "get",
             "cancel",
             "undo",
-            "plan_gameplay_foundation",
-            "verify_gameplay_foundation",
         }
     ),
 }
@@ -115,15 +113,6 @@ def action_catalog_resource() -> str:
     return json.dumps(
         {"version": 2, "actions": _registry.export()},
         ensure_ascii=False,
-    )
-
-
-@dispatcher_mcp.prompt(name="gameplay_foundation")
-def gameplay_foundation_prompt() -> str:
-    return (
-        "Inspect capabilities, call workflow plan_gameplay_foundation, "
-        "review changes and conflicts, apply with the confirmation token, "
-        "poll workflow get, then call verify_gameplay_foundation."
     )
 
 

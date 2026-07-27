@@ -55,11 +55,11 @@ async def test_catalog_resource_is_registered():
 
 
 @pytest.mark.asyncio
-async def test_gameplay_foundation_prompt_is_registered():
+async def test_gameplay_foundation_prompt_is_not_registered():
     from unreal_mcp.dispatcher import dispatcher_mcp
 
     prompts = await dispatcher_mcp.list_prompts()
-    assert "gameplay_foundation" in {prompt.name for prompt in prompts}
+    assert "gameplay_foundation" not in {prompt.name for prompt in prompts}
 
 
 @pytest.mark.asyncio
@@ -91,6 +91,7 @@ async def test_capabilities_succeeds_when_unreal_is_offline(monkeypatch):
     monkeypatch.setattr(dispatcher, "send_to_unreal", offline)
     result = await dispatcher.util(action="get_capabilities", params={})
     assert result["success"] is True
+    assert "gameplay_foundation_prompt" not in result["data"]["server"]
     assert result["data"]["unreal"]["connected"] is False
     assert result["data"]["unreal"]["retry_hint"]
 

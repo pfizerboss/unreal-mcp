@@ -162,7 +162,6 @@ class DiscoveryService:
                 "fastmcp_version": version("fastmcp"),
                 "discovery": True,
                 "catalog_resource": "unreal://catalog",
-                "gameplay_foundation_prompt": True,
             },
             "safety": {"mode": settings.safety_mode.value},
             "unreal": unreal_data,

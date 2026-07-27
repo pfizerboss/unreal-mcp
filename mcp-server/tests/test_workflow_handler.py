@@ -89,42 +89,16 @@ class FakeProgress:
     pass
 
 
-class FakeHook:
-    def __init__(self, action):
-        self.action = action
-        self.calls = []
-
-    async def __call__(self, spec):
-        self.calls.append(spec)
-        return {
-            "success": True,
-            "status": "succeeded",
-            "summary": f"{self.action} completed",
-            "data": {"spec": spec},
-        }
-
-
 @pytest.fixture
 def runtime():
     planner = FakePlanner()
     executor = FakeExecutor()
     store = FakeStore()
-    gameplay_planner = FakeHook("plan_gameplay_foundation")
-    gameplay_verifier = FakeHook("verify_gameplay_foundation")
-    handler = WorkflowHandler(
-        ActionRegistry(),
-        planner,
-        executor,
-        store,
-        gameplay_planner=gameplay_planner,
-        gameplay_verifier=gameplay_verifier,
-    )
+    handler = WorkflowHandler(ActionRegistry(), planner, executor, store)
     return SimpleNamespace(
         planner=planner,
         executor=executor,
         store=store,
-        gameplay_planner=gameplay_planner,
-        gameplay_verifier=gameplay_verifier,
         handler=handler,
     )
 
@@ -224,26 +198,6 @@ async def test_workflow_undo_routes_signed_token(runtime):
 
 
 @pytest.mark.asyncio
-async def test_workflow_plan_gameplay_foundation_uses_installed_hook(runtime):
-    spec = {"name": "Third Person Foundation"}
-    result = await runtime.handler.handle(
-        "plan_gameplay_foundation", {"spec": spec}
-    )
-    assert result["success"] is True
-    assert runtime.gameplay_planner.calls == [spec]
-
-
-@pytest.mark.asyncio
-async def test_workflow_verify_gameplay_foundation_uses_installed_hook(runtime):
-    spec = {"expected_map": "/Game/Maps/Arena"}
-    result = await runtime.handler.handle(
-        "verify_gameplay_foundation", {"spec": spec}
-    )
-    assert result["success"] is True
-    assert runtime.gameplay_verifier.calls == [spec]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("action", "params", "code"),
     [
@@ -283,19 +237,3 @@ async def test_workflow_plan_rejects_nested_workflow_operation(runtime):
     assert result["success"] is False
     assert result["errors"][0]["code"] == "INVALID_INPUT"
     assert runtime.planner.calls == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "action",
-    ["plan_gameplay_foundation", "verify_gameplay_foundation"],
-)
-async def test_foundation_branch_without_hook_returns_capability_error(action):
-    handler = WorkflowHandler(
-        ActionRegistry(), FakePlanner(), FakeExecutor(), FakeStore()
-    )
-    result = await handler.handle(action, {"spec": {}})
-    error = result["errors"][0]
-    assert error["code"] == "UE_VERSION_UNSUPPORTED"
-    assert error["details"] == {"capability": "gameplay_foundation_v1"}
-
