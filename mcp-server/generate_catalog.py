@@ -18,6 +18,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from unreal_mcp.blueprint2_action_specs import BLUEPRINT2_ACTION_SPECS
 from unreal_mcp.contracts import ActionSpec, ToolResult
 
 
@@ -118,7 +119,10 @@ _DEFAULT_OUTPUT_SCHEMA = {
 }
 
 
-def _params(fn: ast.FunctionDef) -> str:
+ActionNode = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def _params(fn: ActionNode) -> str:
     args = fn.args
     defaults = args.defaults
     pad = len(args.args) - len(defaults)
@@ -137,16 +141,17 @@ def _params(fn: ast.FunctionDef) -> str:
     return ", ".join(parts)
 
 
-def _doc(fn: ast.FunctionDef) -> str:
+def _doc(fn: ActionNode) -> str:
     docstring = ast.get_docstring(fn)
     return docstring.splitlines()[0].strip() if docstring else ""
 
 
-def _action_nodes(tree: ast.Module) -> dict[str, ast.FunctionDef]:
+def _action_nodes(tree: ast.Module) -> dict[str, ActionNode]:
     return {
         node.name[3:]: node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("ue_")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("ue_")
     }
 
 
@@ -171,7 +176,7 @@ def _literal_assignment(tree: ast.Module, name: str) -> dict:
     raise ValueError(f"Missing literal {name}")
 
 
-def _load_action_module(domain: str) -> tuple[dict[str, ast.FunctionDef], dict]:
+def _load_action_module(domain: str) -> tuple[dict[str, ActionNode], dict]:
     path = PLUGIN_DIR / f"{domain}_actions.py"
     if domain in SPECIAL_ONLY_DOMAINS:
         if domain not in _special_specs():
@@ -184,6 +189,11 @@ def _load_action_module(domain: str) -> tuple[dict[str, ast.FunctionDef], dict]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     nodes = _action_nodes(tree)
     metadata = _literal_assignment(tree, "ACTION_METADATA")
+    if domain == "blueprint":
+        overlap = set(metadata) & set(BLUEPRINT2_ACTION_SPECS)
+        if overlap:
+            raise ValueError(f"Duplicate Blueprint metadata: {sorted(overlap)}")
+        metadata = {**metadata, **BLUEPRINT2_ACTION_SPECS}
     missing = sorted(set(nodes) - set(metadata))
     extra = sorted(set(metadata) - set(nodes))
     if missing or extra:
@@ -271,7 +281,7 @@ def _annotation_schema_from_text(text: str) -> dict[str, Any]:
     return dict(scalar.get(text.strip(), {}))
 
 
-def _input_schema(fn: ast.FunctionDef, metadata: dict) -> dict[str, Any]:
+def _input_schema(fn: ActionNode, metadata: dict) -> dict[str, Any]:
     if "input_schema" in metadata:
         return metadata["input_schema"]
 
@@ -380,7 +390,7 @@ def _complete_spec(
     domain: str,
     action: str,
     metadata: dict,
-    fn: ast.FunctionDef | None = None,
+    fn: ActionNode | None = None,
 ) -> dict[str, Any]:
     input_schema = metadata.get("input_schema")
     if input_schema is None:

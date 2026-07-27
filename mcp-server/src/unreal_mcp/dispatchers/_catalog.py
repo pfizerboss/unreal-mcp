@@ -375,6 +375,10 @@ CATALOG = {
         },
     },
     'blueprint': {
+        'add_blueprint_interface': {
+            'params': 'asset_path, interface_path',
+            'doc': 'Adds a Blueprint interface by full Unreal object path.',
+        },
         'add_blueprint_node': {
             'params': "asset_path, graph_name='EventGraph', node_json",
             'doc': 'Adds a single node to a Blueprint graph.',
@@ -382,6 +386,14 @@ CATALOG = {
         'add_component_to_blueprint': {
             'params': "asset_path, component_class_path, component_name, location_x=0.0, location_y=0.0, location_z=0.0, rotation_pitch=0.0, rotation_yaw=0.0, rotation_roll=0.0, parent_component_name=''",
             'doc': "Adds a component to a Blueprint's SCS.",
+        },
+        'add_event_dispatcher': {
+            'params': 'asset_path, dispatcher_name, parameters=[]',
+            'doc': 'Adds an event dispatcher with ordered parameters.',
+        },
+        'add_reflected_blueprint_node': {
+            'params': 'asset_path, graph_id, member_kind, member_path, position',
+            'doc': 'Adds a reflected node using a full Unreal member object path.',
         },
         'add_variable': {
             'params': "asset_path, variable_name, variable_type='real'",
@@ -407,9 +419,49 @@ CATALOG = {
             'params': "asset_path, parent_class_path='/Script/Engine.Actor'",
             'doc': 'Creates a Blueprint asset with the given parent class (default Actor).',
         },
+        'create_blueprint_function': {
+            'params': "asset_path, function_name, inputs=[], outputs=[], pure=False, const=False, access='public', category='', description=''",
+            'doc': 'Creates a Blueprint function with a complete ordered signature.',
+        },
+        'create_blueprint_macro': {
+            'params': 'asset_path, macro_name, inputs=[], outputs=[]',
+            'doc': 'Creates a Blueprint macro with ordered tunnel parameters.',
+        },
+        'create_custom_event': {
+            'params': 'asset_path, event_name, parameters=[]',
+            'doc': 'Creates a custom event with ordered parameters.',
+        },
+        'delete_blueprint_function': {
+            'params': 'asset_path, function_id',
+            'doc': 'Deletes a Blueprint function targeted by stable ID.',
+        },
+        'delete_blueprint_macro': {
+            'params': 'asset_path, macro_id',
+            'doc': 'Deletes a Blueprint macro targeted by stable ID.',
+        },
+        'delete_custom_event': {
+            'params': 'asset_path, event_id',
+            'doc': 'Deletes a custom event targeted by stable ID.',
+        },
+        'diff_blueprint_graphs': {
+            'params': 'before_snapshot, after_snapshot, queries',
+            'doc': 'Diffs two graph snapshots with independently paginated sections.',
+        },
+        'disconnect_blueprint_pins': {
+            'params': "asset_path, pin_id='', source_pin_id='', target_pin_id=''",
+            'doc': 'Disconnects one pin entirely or one exact stable pin pair.',
+        },
+        'get_blueprint_brief': {
+            'params': 'asset_path',
+            'doc': 'Returns a bounded orientation summary for one Blueprint.',
+        },
         'get_blueprint_graph_info': {
             'params': "asset_path, graph_name='EventGraph'",
             'doc': 'Returns the full graph info for a Blueprint graph.',
+        },
+        'get_blueprint_health': {
+            'params': 'asset_path, include_warnings=True',
+            'doc': 'Compiles explicitly and returns structured Blueprint health diagnostics.',
         },
         'get_selected_bp_node_infos': {
             'params': '',
@@ -418,6 +470,10 @@ CATALOG = {
         'get_selected_bp_nodes': {
             'params': '',
             'doc': 'Returns information about currently selected blueprint nodes in the editor.',
+        },
+        'inspect_blueprint': {
+            'params': "asset_path, queries, compact=True, cursor=''",
+            'doc': 'Runs bounded, independently paginated queries against one Blueprint.',
         },
         'list_blueprint_components': {
             'params': 'asset_path',
@@ -431,17 +487,73 @@ CATALOG = {
             'params': "asset_path, filter=''",
             'doc': 'Lists callable functions available in a Blueprint context.',
         },
+        'remove_blueprint_interface': {
+            'params': 'asset_path, interface_id',
+            'doc': 'Removes an implemented Blueprint interface targeted by stable ID.',
+        },
         'remove_blueprint_node': {
             'params': "asset_path, graph_name='EventGraph', node_name",
             'doc': 'Removes a node from a Blueprint graph.',
+        },
+        'remove_blueprint_variable': {
+            'params': 'asset_path, variable_id',
+            'doc': 'Removes a Blueprint variable targeted by stable ID.',
         },
         'remove_component_from_blueprint': {
             'params': 'asset_path, component_name',
             'doc': "Removes a component by variable name from a Blueprint's SCS.",
         },
+        'remove_event_dispatcher': {
+            'params': 'asset_path, dispatcher_id',
+            'doc': 'Removes an event dispatcher targeted by stable ID.',
+        },
+        'rename_blueprint_component': {
+            'params': 'asset_path, component_id, new_name',
+            'doc': 'Renames an SCS component targeted by stable ID.',
+        },
+        'rename_blueprint_function': {
+            'params': 'asset_path, function_id, new_name',
+            'doc': 'Renames a Blueprint function targeted by stable ID.',
+        },
+        'rename_blueprint_variable': {
+            'params': 'asset_path, variable_id, new_name',
+            'doc': 'Renames a Blueprint variable targeted by stable ID.',
+        },
+        'reorder_blueprint_component': {
+            'params': 'asset_path, component_id, sibling_index',
+            'doc': 'Moves an SCS component to an explicit sibling index.',
+        },
+        'reparent_blueprint_component': {
+            'params': 'asset_path, component_id, parent_component_id',
+            'doc': 'Reparents an SCS component using stable component IDs.',
+        },
+        'set_blueprint_component_transform': {
+            'params': 'asset_path, component_id, transform',
+            'doc': 'Sets bounded relative transform fields on an SCS component.',
+        },
+        'set_blueprint_function_signature': {
+            'params': 'asset_path, function_id, inputs, outputs, pure, const, access, category, description',
+            'doc': 'Replaces the complete signature and metadata of a Blueprint function.',
+        },
         'set_blueprint_node_position': {
             'params': "asset_path, graph_name='EventGraph', node_name, pos_x=0.0, pos_y=0.0",
             'doc': 'Sets the canvas position of a node in a Blueprint graph.',
+        },
+        'set_blueprint_node_properties': {
+            'params': 'asset_path, node_id, properties',
+            'doc': 'Sets allowlisted reflected properties on a node targeted by stable ID.',
+        },
+        'set_blueprint_variable_default': {
+            'params': 'asset_path, variable_id, default',
+            'doc': 'Sets a Blueprint variable default as a canonical JSON value.',
+        },
+        'set_blueprint_variable_metadata': {
+            'params': 'asset_path, variable_id, metadata',
+            'doc': 'Sets supported Blueprint variable metadata.',
+        },
+        'set_blueprint_variable_replication': {
+            'params': "asset_path, variable_id, mode, notify_function_name=''",
+            'doc': 'Sets supported Blueprint variable replication behavior.',
         },
         'set_component_property': {
             'params': 'asset_path, component_name, property_name, value',
@@ -450,6 +562,10 @@ CATALOG = {
         'set_variable_flags': {
             'params': 'asset_path, variable_name, instance_editable, expose_on_spawn',
             'doc': "Sets a Blueprint variable's 'Instance Editable' and/or 'Expose On Spawn' flags.",
+        },
+        'snapshot_blueprint_graph': {
+            'params': 'asset_path, graph_id, detailed=False',
+            'doc': 'Returns a deterministic compact graph snapshot ordered by stable ID.',
         },
     },
     'control_rig': {

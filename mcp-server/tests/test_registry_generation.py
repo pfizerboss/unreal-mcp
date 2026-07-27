@@ -11,6 +11,15 @@ from generate_catalog import build, build_registry
 from unreal_mcp.contracts import ToolResult
 
 
+def test_generated_catalog_and_registry_have_expected_action_counts():
+    catalog = build()
+    registry = build_registry()
+
+    assert len(catalog) == len(registry) == 22
+    assert sum(len(actions) for actions in catalog.values()) == 290
+    assert sum(len(actions) for actions in registry.values()) == 290
+
+
 def test_workflow_domain_exposes_only_generic_actions():
     expected = {"plan", "apply", "get", "cancel", "undo"}
     assert set(build()["workflow"]) == expected

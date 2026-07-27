@@ -68,6 +68,39 @@ SPECIAL = {domain: set(actions) for domain, actions in SERVER_LOCAL_TESTS.items(
 # ── Technical debt: actions with no in-editor behavior test yet. SHRINK over time. ──
 # Adding a new action? Write a test in test_<domain>.py instead of adding it here.
 KNOWN_UNTESTED: dict[str, set[str]] = {
+    # Universal Blueprint 2 wrappers intentionally return UE_VERSION_UNSUPPORTED
+    # until Tasks 3-16 add their C++ behavior tests. Task 17 removes this debt.
+    "blueprint": {
+        "add_blueprint_interface",
+        "add_event_dispatcher",
+        "add_reflected_blueprint_node",
+        "create_blueprint_function",
+        "create_blueprint_macro",
+        "create_custom_event",
+        "delete_blueprint_function",
+        "delete_blueprint_macro",
+        "delete_custom_event",
+        "diff_blueprint_graphs",
+        "disconnect_blueprint_pins",
+        "get_blueprint_brief",
+        "get_blueprint_health",
+        "inspect_blueprint",
+        "remove_blueprint_interface",
+        "remove_blueprint_variable",
+        "remove_event_dispatcher",
+        "rename_blueprint_component",
+        "rename_blueprint_function",
+        "rename_blueprint_variable",
+        "reorder_blueprint_component",
+        "reparent_blueprint_component",
+        "set_blueprint_component_transform",
+        "set_blueprint_function_signature",
+        "set_blueprint_node_properties",
+        "set_blueprint_variable_default",
+        "set_blueprint_variable_metadata",
+        "set_blueprint_variable_replication",
+        "snapshot_blueprint_graph",
+    },
     # PIE start/stop change the editor play mode asynchronously; running them in the
     # headless suite (which never ticks between calls) would leave the editor in PIE.
     # Verified manually through the MCP chain instead.
