@@ -216,34 +216,51 @@ def test_contracts_require_full_unreal_object_paths():
 
 
 def test_mutation_targets_use_stable_ids():
-    from unreal_mcp.blueprint2_action_specs import STABLE_ID
+    from unreal_mcp.blueprint2_action_specs import (
+        FALLBACK_GRAPH_ID,
+        FALLBACK_NODE_ID,
+        FALLBACK_VARIABLE_ID,
+        GRAPH_ID,
+        INTERFACE_ID,
+        NODE_ID,
+        PIN_ID,
+        VARIABLE_ID,
+        COMPONENT_ID,
+    )
 
     target_fields = {
-        "rename_blueprint_function": ["function_id"],
-        "set_blueprint_function_signature": ["function_id"],
-        "delete_blueprint_function": ["function_id"],
-        "delete_blueprint_macro": ["macro_id"],
-        "delete_custom_event": ["event_id"],
-        "remove_event_dispatcher": ["dispatcher_id"],
-        "remove_blueprint_interface": ["interface_id"],
-        "add_reflected_blueprint_node": ["graph_id"],
-        "set_blueprint_node_properties": ["node_id"],
-        "rename_blueprint_variable": ["variable_id"],
-        "remove_blueprint_variable": ["variable_id"],
-        "set_blueprint_variable_default": ["variable_id"],
-        "set_blueprint_variable_metadata": ["variable_id"],
-        "set_blueprint_variable_replication": ["variable_id"],
-        "rename_blueprint_component": ["component_id"],
-        "reparent_blueprint_component": ["component_id", "parent_component_id"],
-        "reorder_blueprint_component": ["component_id"],
-        "set_blueprint_component_transform": ["component_id"],
-        "snapshot_blueprint_graph": ["graph_id"],
+        "rename_blueprint_function": {"function_id": FALLBACK_GRAPH_ID},
+        "set_blueprint_function_signature": {"function_id": FALLBACK_GRAPH_ID},
+        "delete_blueprint_function": {"function_id": FALLBACK_GRAPH_ID},
+        "delete_blueprint_macro": {"macro_id": FALLBACK_GRAPH_ID},
+        "delete_custom_event": {"event_id": FALLBACK_NODE_ID},
+        "remove_event_dispatcher": {"dispatcher_id": FALLBACK_VARIABLE_ID},
+        "remove_blueprint_interface": {"interface_id": INTERFACE_ID},
+        "add_reflected_blueprint_node": {"graph_id": GRAPH_ID},
+        "set_blueprint_node_properties": {"node_id": NODE_ID},
+        "disconnect_blueprint_pins": {
+            "pin_id": PIN_ID,
+            "source_pin_id": PIN_ID,
+            "target_pin_id": PIN_ID,
+        },
+        "rename_blueprint_variable": {"variable_id": FALLBACK_VARIABLE_ID},
+        "remove_blueprint_variable": {"variable_id": FALLBACK_VARIABLE_ID},
+        "set_blueprint_variable_default": {"variable_id": VARIABLE_ID},
+        "set_blueprint_variable_metadata": {"variable_id": VARIABLE_ID},
+        "set_blueprint_variable_replication": {"variable_id": VARIABLE_ID},
+        "rename_blueprint_component": {"component_id": COMPONENT_ID},
+        "reparent_blueprint_component": {
+            "component_id": COMPONENT_ID,
+            "parent_component_id": COMPONENT_ID,
+        },
+        "reorder_blueprint_component": {"component_id": COMPONENT_ID},
+        "set_blueprint_component_transform": {"component_id": COMPONENT_ID},
     }
     specs = _new_specs()
     for action, fields in target_fields.items():
         properties = specs[action]["input_schema"]["properties"]
-        for field in fields:
-            assert properties[field] == STABLE_ID, f"{action}.{field}"
+        for field, expected_schema in fields.items():
+            assert properties[field] == expected_schema, f"{action}.{field}"
 
 
 def test_stable_id_schema_accepts_qualified_fallback_ids():
@@ -284,22 +301,38 @@ def test_fallback_capable_mutations_require_explicit_qualification():
         "rename_blueprint_function": (
             "function_id",
             "fallback:graph:1111111111111111111111111111111111111111",
-            {"function_name": "CalculateScore"},
+            {
+                "function_owner_id": "/Game/BP_Player.BP_Player",
+                "function_name": "CalculateScore",
+                "function_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
         ),
         "set_blueprint_function_signature": (
             "function_id",
             "fallback:graph:2222222222222222222222222222222222222222",
-            {"function_name": "CalculateScore"},
+            {
+                "function_owner_id": "/Game/BP_Player.BP_Player",
+                "function_name": "CalculateScore",
+                "function_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
         ),
         "delete_blueprint_function": (
             "function_id",
             "fallback:graph:3333333333333333333333333333333333333333",
-            {"function_name": "CalculateScore"},
+            {
+                "function_owner_id": "/Game/BP_Player.BP_Player",
+                "function_name": "CalculateScore",
+                "function_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
         ),
         "delete_blueprint_macro": (
             "macro_id",
             "fallback:graph:4444444444444444444444444444444444444444",
-            {"macro_name": "ClampScore"},
+            {
+                "macro_owner_id": "/Game/BP_Player.BP_Player",
+                "macro_name": "ClampScore",
+                "macro_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
         ),
         "delete_custom_event": (
             "event_id",
@@ -307,22 +340,35 @@ def test_fallback_capable_mutations_require_explicit_qualification():
             {
                 "event_name": "OnScoreChanged",
                 "owner_graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "event_type_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
             },
         ),
         "remove_event_dispatcher": (
             "dispatcher_id",
             "fallback:variable:6666666666666666666666666666666666666666",
-            {"dispatcher_name": "ScoreChanged"},
+            {
+                "dispatcher_owner_id": "/Game/BP_Player.BP_Player",
+                "dispatcher_name": "ScoreChanged",
+                "dispatcher_type_path": "category=mcdelegate",
+            },
         ),
         "rename_blueprint_variable": (
             "variable_id",
             "fallback:variable:7777777777777777777777777777777777777777",
-            {"variable_name": "Score"},
+            {
+                "variable_owner_id": "/Game/BP_Player.BP_Player",
+                "variable_name": "Score",
+                "variable_type_path": "category=int\ncontainer=none",
+            },
         ),
         "remove_blueprint_variable": (
             "variable_id",
             "fallback:variable:8888888888888888888888888888888888888888",
-            {"variable_name": "Score"},
+            {
+                "variable_owner_id": "/Game/BP_Player.BP_Player",
+                "variable_name": "Score",
+                "variable_type_path": "category=int\ncontainer=none",
+            },
         ),
     }
 
@@ -343,13 +389,38 @@ def test_fallback_capable_mutations_require_explicit_qualification():
         with pytest.raises(ValidationError):
             validator.validate(params)
 
-        validator.validate(
-            {
-                **params,
-                "allow_name_fallback": True,
-                **qualification,
-            }
-        )
+        qualified = {
+            **params,
+            "allow_name_fallback": True,
+            **qualification,
+        }
+        validator.validate(qualified)
+        for field in qualification:
+            missing_one = dict(qualified)
+            del missing_one[field]
+            with pytest.raises(ValidationError):
+                validator.validate(missing_one)
+
+
+def test_mutation_target_fields_reject_wrong_id_kinds():
+    specs = _new_specs()
+    cases = {
+        "rename_blueprint_function": ("function_id", "pin:33333333-3333-4333-8333-333333333333"),
+        "delete_blueprint_macro": ("macro_id", "node:22222222-2222-4222-8222-222222222222"),
+        "delete_custom_event": ("event_id", "graph:11111111-1111-4111-8111-111111111111"),
+        "remove_event_dispatcher": ("dispatcher_id", "component:55555555-5555-4555-8555-555555555555"),
+        "remove_blueprint_interface": ("interface_id", "variable:44444444-4444-4444-8444-444444444444"),
+        "add_reflected_blueprint_node": ("graph_id", "pin:33333333-3333-4333-8333-333333333333"),
+        "set_blueprint_node_properties": ("node_id", "graph:11111111-1111-4111-8111-111111111111"),
+        "set_blueprint_variable_default": ("variable_id", "component:55555555-5555-4555-8555-555555555555"),
+        "rename_blueprint_component": ("component_id", "variable:44444444-4444-4444-8444-444444444444"),
+    }
+    for action, (field, wrong_id) in cases.items():
+        spec = specs[action]
+        params = dict(spec["examples"][0]["params"])
+        params[field] = wrong_id
+        with pytest.raises(ValidationError):
+            Draft202012Validator(spec["input_schema"]).validate(params)
 
 
 def test_interface_class_paths_accept_all_unreal_mount_roots():

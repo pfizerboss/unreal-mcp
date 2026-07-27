@@ -718,7 +718,9 @@ def ue_create_blueprint_function(asset_path: str = None, function_name: str = No
 def ue_rename_blueprint_function(asset_path: str = None, function_id: str = None,
                                        new_name: str = None,
                                        allow_name_fallback: bool = False,
-                                       function_name: str = "") -> str:
+                                       function_name: str = "",
+                                       function_owner_id: str = "",
+                                       function_type_path: str = "") -> str:
     """Renames a Blueprint function targeted by stable ID."""
     return _blueprint2_unsupported("rename_blueprint_function")
 
@@ -733,7 +735,9 @@ def ue_set_blueprint_function_signature(asset_path: str = None,
                                               category: str = None,
                                               description: str = None,
                                               allow_name_fallback: bool = False,
-                                              function_name: str = "") -> str:
+                                              function_name: str = "",
+                                              function_owner_id: str = "",
+                                              function_type_path: str = "") -> str:
     """Replaces the complete signature and metadata of a Blueprint function."""
     return _blueprint2_unsupported("set_blueprint_function_signature")
 
@@ -741,7 +745,9 @@ def ue_set_blueprint_function_signature(asset_path: str = None,
 def ue_delete_blueprint_function(asset_path: str = None,
                                        function_id: str = None,
                                        allow_name_fallback: bool = False,
-                                       function_name: str = "") -> str:
+                                       function_name: str = "",
+                                       function_owner_id: str = "",
+                                       function_type_path: str = "") -> str:
     """Deletes a Blueprint function targeted by stable ID."""
     return _blueprint2_unsupported("delete_blueprint_function")
 
@@ -754,7 +760,9 @@ def ue_create_blueprint_macro(asset_path: str = None, macro_name: str = None,
 
 def ue_delete_blueprint_macro(asset_path: str = None, macro_id: str = None,
                                     allow_name_fallback: bool = False,
-                                    macro_name: str = "") -> str:
+                                    macro_name: str = "",
+                                    macro_owner_id: str = "",
+                                    macro_type_path: str = "") -> str:
     """Deletes a Blueprint macro targeted by stable ID."""
     return _blueprint2_unsupported("delete_blueprint_macro")
 
@@ -766,9 +774,10 @@ def ue_create_custom_event(asset_path: str = None, event_name: str = None,
 
 
 def ue_delete_custom_event(asset_path: str = None, event_id: str = None,
-                                 allow_name_fallback: bool = False,
-                                 event_name: str = "",
-                                 owner_graph_id: str = "") -> str:
+                                  allow_name_fallback: bool = False,
+                                  event_name: str = "",
+                                  owner_graph_id: str = "",
+                                  event_type_path: str = "") -> str:
     """Deletes a custom event targeted by stable ID."""
     return _blueprint2_unsupported("delete_custom_event")
 
@@ -783,7 +792,9 @@ def ue_add_event_dispatcher(asset_path: str = None,
 def ue_remove_event_dispatcher(asset_path: str = None,
                                      dispatcher_id: str = None,
                                      allow_name_fallback: bool = False,
-                                     dispatcher_name: str = "") -> str:
+                                     dispatcher_name: str = "",
+                                     dispatcher_owner_id: str = "",
+                                     dispatcher_type_path: str = "") -> str:
     """Removes an event dispatcher targeted by stable ID."""
     return _blueprint2_unsupported("remove_event_dispatcher")
 
@@ -823,7 +834,9 @@ def ue_disconnect_blueprint_pins(asset_path: str = None, pin_id: str = "",
 def ue_rename_blueprint_variable(asset_path: str = None, variable_id: str = None,
                                        new_name: str = None,
                                        allow_name_fallback: bool = False,
-                                       variable_name: str = "") -> str:
+                                       variable_name: str = "",
+                                       variable_owner_id: str = "",
+                                       variable_type_path: str = "") -> str:
     """Renames a Blueprint variable targeted by stable ID."""
     return _blueprint2_unsupported("rename_blueprint_variable")
 
@@ -831,7 +844,9 @@ def ue_rename_blueprint_variable(asset_path: str = None, variable_id: str = None
 def ue_remove_blueprint_variable(asset_path: str = None,
                                        variable_id: str = None,
                                        allow_name_fallback: bool = False,
-                                       variable_name: str = "") -> str:
+                                       variable_name: str = "",
+                                       variable_owner_id: str = "",
+                                       variable_type_path: str = "") -> str:
     """Removes a Blueprint variable targeted by stable ID."""
     return _blueprint2_unsupported("remove_blueprint_variable")
 

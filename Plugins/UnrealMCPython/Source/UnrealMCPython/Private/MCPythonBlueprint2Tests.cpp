@@ -333,6 +333,22 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         ResolvedPin.IdKind,
         TEXT("pin_guid"));
 
+    FTargetRef StaleInterfaceTarget;
+    StaleInterfaceTarget.Id =
+        TEXT("interface:/Script/Engine.MissingInterface");
+    const FResolvedTarget ResolvedStaleInterface = ResolveTarget(
+        Blueprint,
+        ETargetKind::Interface,
+        StaleInterfaceTarget,
+        ResolveError);
+    TestFalse(
+        TEXT("Stale interface path does not resolve"),
+        ResolvedStaleInterface.bStable);
+    TestEqualSensitive(
+        TEXT("Stale interface path reports missing stable target"),
+        ResolveError,
+        TEXT("Stable target no longer exists."));
+
     Graph->GraphGuid.Invalidate();
     Node->NodeGuid.Invalidate();
     Pin->PinId.Invalidate();

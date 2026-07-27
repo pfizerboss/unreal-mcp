@@ -208,6 +208,54 @@ class TestBlueprint2Inspection(MCPTestCase):
             ["DefaultSceneRoot", self.ACTOR_COMPONENT],
         )
 
+    def test_list_callable_functions_only_targets_blueprint_owned_graphs(self):
+        local_result = call_action(
+            "blueprint_actions",
+            "ue_list_callable_functions",
+            asset_path=self._actor_path,
+            filter=self.ACTOR_FUNCTION,
+        )
+        self.assertSuccess(local_result)
+        local = next(
+            item
+            for item in local_result["functions"]
+            if item["function_name"] == self.ACTOR_FUNCTION
+        )
+        self.assertTrue(local["targetable"])
+        self.assertEqual(local["function_id"], local["stable_id"])
+        self.assertRegex(
+            local["stable_id"],
+            r"^(?:graph:[0-9a-f-]{36}|fallback:graph:[0-9a-f]{40})$",
+        )
+        self.assertIn(
+            local["id_kind"],
+            ("graph_guid", "qualified_name_fallback"),
+        )
+        self.assertEqual(
+            local["stable"], local["stable_id"].startswith("graph:")
+        )
+        if not local["stable"]:
+            for field in ("owner_id", "name", "type_path"):
+                self.assertTrue(local[field], field)
+
+        native_result = call_action(
+            "blueprint_actions",
+            "ue_list_callable_functions",
+            asset_path=self._actor_path,
+            filter="K2_GetActorLocation",
+        )
+        self.assertSuccess(native_result)
+        native = next(
+            item
+            for item in native_result["functions"]
+            if item["function_name"] == "K2_GetActorLocation"
+        )
+        self.assertFalse(native["targetable"])
+        self.assertFalse(native["stable"])
+        self.assertEqual(native["id_kind"], "unavailable")
+        self.assertNotIn("stable_id", native)
+        self.assertNotIn("function_id", native)
+
     def test_get_blueprint_brief_accepts_interface_blueprint(self):
         if self._interface_path is None:
             self.skipTest("Blueprint interfaces are not exposed in this UE version")

@@ -578,6 +578,11 @@ FResolvedTarget ResolveTarget(
         {
             return Interface;
         }
+        if (Target.Id.StartsWith(TEXT("interface:")))
+        {
+            OutError = TEXT("Stable target no longer exists.");
+            return {};
+        }
     }
 
     FGuid Guid;

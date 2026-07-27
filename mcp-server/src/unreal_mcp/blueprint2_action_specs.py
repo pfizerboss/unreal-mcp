@@ -9,6 +9,30 @@ LOWER_GUID = (
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12}"
 )
+
+
+def _guid_id(kind: str, *, allow_fallback: bool = False) -> dict:
+    persisted = rf"{kind}:{LOWER_GUID}"
+    if allow_fallback:
+        return {
+            "type": "string",
+            "pattern": rf"^(?:{persisted}|fallback:{kind}:[0-9a-f]{{40}})$",
+        }
+    return {"type": "string", "pattern": rf"^{persisted}$"}
+
+
+GRAPH_ID = _guid_id("graph")
+NODE_ID = _guid_id("node")
+PIN_ID = _guid_id("pin")
+VARIABLE_ID = _guid_id("variable")
+COMPONENT_ID = _guid_id("component")
+FALLBACK_GRAPH_ID = _guid_id("graph", allow_fallback=True)
+FALLBACK_NODE_ID = _guid_id("node", allow_fallback=True)
+FALLBACK_VARIABLE_ID = _guid_id("variable", allow_fallback=True)
+INTERFACE_ID = {
+    "type": "string",
+    "pattern": r"^interface:/[A-Za-z][A-Za-z0-9_]*/[^\s:]+\.[^\s/:.]+$",
+}
 STABLE_ID = {
     "type": "string",
     "pattern": (
@@ -528,7 +552,7 @@ def _fallback_capable_target(
     schema: dict,
     id_field: str,
     name_field: str,
-    owner_fields: tuple[str, ...] = (),
+    qualification_fields: dict[str, dict],
 ) -> dict:
     result = deepcopy(schema)
     result["properties"]["allow_name_fallback"] = {
@@ -536,8 +560,8 @@ def _fallback_capable_target(
         "default": False,
     }
     result["properties"][name_field] = deepcopy(NAME)
-    for owner_field in owner_fields:
-        result["properties"][owner_field] = deepcopy(STABLE_ID)
+    for field, field_schema in qualification_fields.items():
+        result["properties"][field] = deepcopy(field_schema)
     result.setdefault("allOf", []).append(
         {
             "if": {
@@ -549,7 +573,7 @@ def _fallback_capable_target(
                 "required": [
                     "allow_name_fallback",
                     name_field,
-                    *owner_fields,
+                    *qualification_fields,
                 ],
             },
         }
@@ -617,11 +641,19 @@ BLUEPRINT2_ACTION_SPECS = {
         "Rename a Blueprint function targeted by stable ID.",
         _fallback_capable_target(
             _object(
-                {"asset_path": ASSET_PATH, "function_id": STABLE_ID, "new_name": NAME},
+                {
+                    "asset_path": ASSET_PATH,
+                    "function_id": FALLBACK_GRAPH_ID,
+                    "new_name": NAME,
+                },
                 ("asset_path", "function_id", "new_name"),
             ),
             "function_id",
             "function_name",
+            {
+                "function_owner_id": INTERFACE_CLASS_PATH,
+                "function_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -636,7 +668,7 @@ BLUEPRINT2_ACTION_SPECS = {
             _object(
                 {
                     "asset_path": ASSET_PATH,
-                    "function_id": STABLE_ID,
+                    "function_id": FALLBACK_GRAPH_ID,
                     "inputs": PARAMETERS,
                     "outputs": PARAMETERS,
                     "pure": {"type": "boolean"},
@@ -659,6 +691,10 @@ BLUEPRINT2_ACTION_SPECS = {
             ),
             "function_id",
             "function_name",
+            {
+                "function_owner_id": INTERFACE_CLASS_PATH,
+                "function_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -678,11 +714,15 @@ BLUEPRINT2_ACTION_SPECS = {
         "Delete a Blueprint function targeted by stable ID.",
         _fallback_capable_target(
             _object(
-                {"asset_path": ASSET_PATH, "function_id": STABLE_ID},
+                {"asset_path": ASSET_PATH, "function_id": FALLBACK_GRAPH_ID},
                 ("asset_path", "function_id"),
             ),
             "function_id",
             "function_name",
+            {
+                "function_owner_id": INTERFACE_CLASS_PATH,
+                "function_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -714,11 +754,15 @@ BLUEPRINT2_ACTION_SPECS = {
         "Delete a Blueprint macro targeted by stable ID.",
         _fallback_capable_target(
             _object(
-                {"asset_path": ASSET_PATH, "macro_id": STABLE_ID},
+                {"asset_path": ASSET_PATH, "macro_id": FALLBACK_GRAPH_ID},
                 ("asset_path", "macro_id"),
             ),
             "macro_id",
             "macro_name",
+            {
+                "macro_owner_id": INTERFACE_CLASS_PATH,
+                "macro_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -748,12 +792,15 @@ BLUEPRINT2_ACTION_SPECS = {
         "Delete a custom event targeted by stable ID.",
         _fallback_capable_target(
             _object(
-                {"asset_path": ASSET_PATH, "event_id": STABLE_ID},
+                {"asset_path": ASSET_PATH, "event_id": FALLBACK_NODE_ID},
                 ("asset_path", "event_id"),
             ),
             "event_id",
             "event_name",
-            ("owner_graph_id",),
+            {
+                "owner_graph_id": FALLBACK_GRAPH_ID,
+                "event_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -783,11 +830,15 @@ BLUEPRINT2_ACTION_SPECS = {
         "Remove an event dispatcher targeted by stable ID.",
         _fallback_capable_target(
             _object(
-                {"asset_path": ASSET_PATH, "dispatcher_id": STABLE_ID},
+                {"asset_path": ASSET_PATH, "dispatcher_id": FALLBACK_VARIABLE_ID},
                 ("asset_path", "dispatcher_id"),
             ),
             "dispatcher_id",
             "dispatcher_name",
+            {
+                "dispatcher_owner_id": INTERFACE_CLASS_PATH,
+                "dispatcher_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -808,7 +859,7 @@ BLUEPRINT2_ACTION_SPECS = {
         "remove_blueprint_interface",
         "Remove an implemented Blueprint interface targeted by stable ID.",
         _object(
-            {"asset_path": ASSET_PATH, "interface_id": STABLE_ID},
+            {"asset_path": ASSET_PATH, "interface_id": INTERFACE_ID},
             ("asset_path", "interface_id"),
         ),
         {"asset_path": "/Game/BP_Player", "interface_id": "interface:/Script/Game.PlayerInterface"},
@@ -819,7 +870,7 @@ BLUEPRINT2_ACTION_SPECS = {
         _object(
             {
                 "asset_path": ASSET_PATH,
-                "graph_id": STABLE_ID,
+                "graph_id": GRAPH_ID,
                 "member_kind": {
                     "type": "string",
                     "enum": ["function", "property", "class", "enum", "struct"],
@@ -844,7 +895,7 @@ BLUEPRINT2_ACTION_SPECS = {
         _object(
             {
                 "asset_path": ASSET_PATH,
-                "node_id": STABLE_ID,
+                "node_id": NODE_ID,
                 "properties": {"type": "object", "minProperties": 1},
             },
             ("asset_path", "node_id", "properties"),
@@ -863,9 +914,9 @@ BLUEPRINT2_ACTION_SPECS = {
             **_object(
                 {
                     "asset_path": ASSET_PATH,
-                    "pin_id": STABLE_ID,
-                    "source_pin_id": STABLE_ID,
-                    "target_pin_id": STABLE_ID,
+                    "pin_id": PIN_ID,
+                    "source_pin_id": PIN_ID,
+                    "target_pin_id": PIN_ID,
                 },
                 ("asset_path",),
             ),
@@ -896,11 +947,19 @@ BLUEPRINT2_ACTION_SPECS = {
         "Rename a Blueprint variable targeted by stable ID.",
         _fallback_capable_target(
             _object(
-                {"asset_path": ASSET_PATH, "variable_id": STABLE_ID, "new_name": NAME},
+                {
+                    "asset_path": ASSET_PATH,
+                    "variable_id": FALLBACK_VARIABLE_ID,
+                    "new_name": NAME,
+                },
                 ("asset_path", "variable_id", "new_name"),
             ),
             "variable_id",
             "variable_name",
+            {
+                "variable_owner_id": INTERFACE_CLASS_PATH,
+                "variable_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -913,11 +972,15 @@ BLUEPRINT2_ACTION_SPECS = {
         "Remove a Blueprint variable targeted by stable ID.",
         _fallback_capable_target(
             _object(
-                {"asset_path": ASSET_PATH, "variable_id": STABLE_ID},
+                {"asset_path": ASSET_PATH, "variable_id": FALLBACK_VARIABLE_ID},
                 ("asset_path", "variable_id"),
             ),
             "variable_id",
             "variable_name",
+            {
+                "variable_owner_id": INTERFACE_CLASS_PATH,
+                "variable_type_path": {"type": "string", "minLength": 1},
+            },
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -928,7 +991,7 @@ BLUEPRINT2_ACTION_SPECS = {
         "set_blueprint_variable_default",
         "Set a Blueprint variable default as a canonical JSON value.",
         _object(
-            {"asset_path": ASSET_PATH, "variable_id": STABLE_ID, "default": {}},
+            {"asset_path": ASSET_PATH, "variable_id": VARIABLE_ID, "default": {}},
             ("asset_path", "variable_id", "default"),
         ),
         {
@@ -944,7 +1007,7 @@ BLUEPRINT2_ACTION_SPECS = {
         _object(
             {
                 "asset_path": ASSET_PATH,
-                "variable_id": STABLE_ID,
+                "variable_id": VARIABLE_ID,
                 "metadata": {
                     **_object(
                         {
@@ -976,7 +1039,7 @@ BLUEPRINT2_ACTION_SPECS = {
             **_object(
                 {
                     "asset_path": ASSET_PATH,
-                    "variable_id": STABLE_ID,
+                    "variable_id": VARIABLE_ID,
                     "mode": {
                         "type": "string",
                         "enum": ["none", "replicated", "rep_notify"],
@@ -1008,7 +1071,7 @@ BLUEPRINT2_ACTION_SPECS = {
         "rename_blueprint_component",
         "Rename an SCS component targeted by stable ID.",
         _object(
-            {"asset_path": ASSET_PATH, "component_id": STABLE_ID, "new_name": NAME},
+            {"asset_path": ASSET_PATH, "component_id": COMPONENT_ID, "new_name": NAME},
             ("asset_path", "component_id", "new_name"),
         ),
         {
@@ -1023,8 +1086,8 @@ BLUEPRINT2_ACTION_SPECS = {
         _object(
             {
                 "asset_path": ASSET_PATH,
-                "component_id": STABLE_ID,
-                "parent_component_id": STABLE_ID,
+                "component_id": COMPONENT_ID,
+                "parent_component_id": COMPONENT_ID,
             },
             ("asset_path", "component_id", "parent_component_id"),
         ),
@@ -1040,7 +1103,7 @@ BLUEPRINT2_ACTION_SPECS = {
         _object(
             {
                 "asset_path": ASSET_PATH,
-                "component_id": STABLE_ID,
+                "component_id": COMPONENT_ID,
                 "sibling_index": {"type": "integer", "minimum": 0, "maximum": 2_147_483_647},
             },
             ("asset_path", "component_id", "sibling_index"),
@@ -1055,7 +1118,11 @@ BLUEPRINT2_ACTION_SPECS = {
         "set_blueprint_component_transform",
         "Set bounded relative transform fields on an SCS component.",
         _object(
-            {"asset_path": ASSET_PATH, "component_id": STABLE_ID, "transform": TRANSFORM},
+            {
+                "asset_path": ASSET_PATH,
+                "component_id": COMPONENT_ID,
+                "transform": TRANSFORM,
+            },
             ("asset_path", "component_id", "transform"),
         ),
         {

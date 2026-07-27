@@ -245,6 +245,14 @@ FString UMCPythonHelper::ListCallableFunctions(UBlueprint* Blueprint, const FStr
 
     TArray<TSharedPtr<FJsonValue>> FuncsArr;
     FString FilterLower = Filter.ToLower();
+    TMap<FName, UEdGraph*> LocalFunctionGraphs;
+    for (UEdGraph* Graph : Blueprint->FunctionGraphs)
+    {
+        if (Graph)
+        {
+            LocalFunctionGraphs.Add(Graph->GetFName(), Graph);
+        }
+    }
 
     // Collect from the generated class and all parent classes
     for (UClass* Cls = GenClass; Cls; Cls = Cls->GetSuperClass())
@@ -269,6 +277,30 @@ FString UMCPythonHelper::ListCallableFunctions(UBlueprint* Blueprint, const FStr
             FuncObj->SetStringField(TEXT("class_name"), ClassName);
             FuncObj->SetBoolField(TEXT("is_pure"), Func->HasAnyFunctionFlags(FUNC_BlueprintPure));
             FuncObj->SetBoolField(TEXT("is_static"), Func->HasAnyFunctionFlags(FUNC_Static));
+
+            UEdGraph* const* LocalGraph = Cls == GenClass
+                ? LocalFunctionGraphs.Find(Func->GetFName())
+                : nullptr;
+            const bool bTargetable = LocalGraph && *LocalGraph;
+            FuncObj->SetBoolField(TEXT("targetable"), bTargetable);
+            if (bTargetable)
+            {
+                const UE::MCPython::Blueprint2::FTargetRef FunctionTarget =
+                    UE::MCPython::Blueprint2::DescribeGraphTarget(
+                        Blueprint,
+                        *LocalGraph);
+                FuncObj->SetStringField(TEXT("stable_id"), FunctionTarget.Id);
+                FuncObj->SetStringField(TEXT("function_id"), FunctionTarget.Id);
+                SetTargetMetadata(
+                    FuncObj,
+                    UE::MCPython::Blueprint2::ETargetKind::Graph,
+                    FunctionTarget);
+            }
+            else
+            {
+                FuncObj->SetStringField(TEXT("id_kind"), TEXT("unavailable"));
+                FuncObj->SetBoolField(TEXT("stable"), false);
+            }
 
             // Parameters
             TArray<TSharedPtr<FJsonValue>> ParamsArr;
