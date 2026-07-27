@@ -11,6 +11,12 @@
 #include "EdGraph/EdGraphPin.h"
 #include "Engine/Blueprint.h"
 
+namespace UE::MCPython
+{
+const FGuid& GetEditorSessionId();
+bool HasActiveWorkflowTransaction();
+}
+
 inline FString MakeJsonError(const FString& Message)
 {
     TSharedPtr<FJsonObject> Obj = MakeShareable(new FJsonObject());

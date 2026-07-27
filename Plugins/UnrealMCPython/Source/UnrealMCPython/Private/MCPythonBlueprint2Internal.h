@@ -1,0 +1,110 @@
+// Copyright (c) 2025 GenOrca. All Rights Reserved.
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Engine/Blueprint.h"
+
+class FScopedTransaction;
+class UEdGraph;
+class UEdGraphNode;
+class UEdGraphPin;
+class USCS_Node;
+
+namespace UE::MCPython::Blueprint2
+{
+enum class ETargetKind : uint8 { Graph, Node, Pin, Variable, Component, Interface };
+
+struct FTargetRef
+{
+    FString Id;
+    FString OwnerId;
+    FString Name;
+    FString TypePath;
+    bool bAllowNameFallback = false;
+};
+
+struct FResolvedTarget
+{
+    UObject* Object = nullptr;
+    UEdGraph* Graph = nullptr;
+    UEdGraphNode* Node = nullptr;
+    UEdGraphPin* Pin = nullptr;
+    FBPVariableDescription* Variable = nullptr;
+    USCS_Node* Component = nullptr;
+    FString Id;
+    FString IdKind;
+    bool bStable = false;
+};
+
+struct FPageRequest
+{
+    int32 Limit = 100;
+    FString LastId;
+    FString QueryDigest;
+};
+
+struct FRollbackResult
+{
+    bool bSucceeded = false;
+    bool bDeferredToWorkflow = false;
+    TArray<TSharedPtr<FJsonValue>> ResidualChanges;
+};
+
+class FMutationScope
+{
+public:
+    explicit FMutationScope(const FText& Description);
+    ~FMutationScope();
+    bool IsValid() const;
+    void Modify(UObject* Object);
+    FRollbackResult Rollback();
+private:
+    TUniquePtr<FScopedTransaction> LocalTransaction;
+    int32 TransactionIndex = INDEX_NONE;
+    FGuid TransactionGuid;
+    bool bWorkflowOwned = false;
+};
+
+FString MakeTargetId(ETargetKind Kind, const FGuid& Guid);
+FString MakeQualifiedFallbackId(
+    ETargetKind Kind,
+    const FString& Owner,
+    const FString& Name,
+    const FString& TypePath);
+bool ParseTargetId(
+    const FString& Id,
+    ETargetKind ExpectedKind,
+    FGuid& OutGuid);
+FResolvedTarget ResolveTarget(
+    UBlueprint* Blueprint,
+    ETargetKind Kind,
+    const FTargetRef& Target,
+    FString& OutError);
+
+FString CanonicalQueryDigest(const TSharedRef<FJsonObject>& Query);
+FString EncodeCursor(
+    const FString& AssetPath,
+    const FPageRequest& Page);
+bool DecodeCursor(
+    const FString& Cursor,
+    const FString& ExpectedAssetPath,
+    const FString& ExpectedQueryDigest,
+    FPageRequest& OutPage,
+    FString& OutError);
+
+TSharedRef<FJsonObject> MakeSuccess(
+    const FString& Summary,
+    const TSharedPtr<FJsonObject>& Data = nullptr);
+TSharedRef<FJsonObject> MakeFailure(
+    const FString& Code,
+    const FString& Path,
+    const FString& Message,
+    bool bRetryable,
+    const FString& Hint,
+    const TSharedPtr<FJsonObject>& Details = nullptr);
+FString SerializeResult(const TSharedRef<FJsonObject>& Result);
+TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint);
+}
+

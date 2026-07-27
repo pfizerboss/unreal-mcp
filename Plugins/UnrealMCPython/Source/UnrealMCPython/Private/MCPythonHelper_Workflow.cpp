@@ -1,6 +1,7 @@
 // Copyright (c) 2025 GenOrca. All Rights Reserved.
 
 #include "MCPythonHelper.h"
+#include "MCPythonHelperInternal.h"
 
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
@@ -331,6 +332,16 @@ namespace
         }
         return Filename;
     }
+}
+
+const FGuid& UE::MCPython::GetEditorSessionId()
+{
+    return GWorkflowEditorSessionId;
+}
+
+bool UE::MCPython::HasActiveWorkflowTransaction()
+{
+    return GActiveWorkflowTransaction.IsValid();
 }
 
 FString UMCPythonHelper::GetWorkflowEditorContext(const TArray<FString>& AssetPaths)
