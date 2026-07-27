@@ -27,6 +27,17 @@ def _target_identity(target_id, guid_kind):
     return guid_kind, bool(target_id)
 
 
+def _add_fallback_qualification(
+    record, target_id, owner_id, name, type_path, prefix=""
+):
+    if not target_id or not target_id.startswith("fallback:"):
+        return
+    field_prefix = f"{prefix}_" if prefix else ""
+    record[f"{field_prefix}owner_id"] = owner_id
+    record[f"{field_prefix}name"] = name
+    record[f"{field_prefix}type_path"] = type_path
+
+
 # ─── Read Actions ─────────────────────────────────────────────────────────────
 
 def ue_get_selected_bp_nodes() -> str:
@@ -40,7 +51,7 @@ def ue_get_selected_bp_nodes() -> str:
                 info.graph_id,
                 "graph_guid",
             )
-            node_infos.append({
+            node_record = {
                 "name": info.node_name,
                 "class": info.node_class,
                 "object_path": info.object_path,
@@ -50,7 +61,23 @@ def ue_get_selected_bp_nodes() -> str:
                 "stable": stable,
                 "graph_id_kind": graph_id_kind,
                 "graph_stable": graph_stable,
-            })
+            }
+            _add_fallback_qualification(
+                node_record,
+                info.stable_id,
+                getattr(info, "owner_id", ""),
+                info.node_name,
+                getattr(info, "type_path", ""),
+            )
+            _add_fallback_qualification(
+                node_record,
+                info.graph_id,
+                getattr(info, "graph_owner_id", ""),
+                getattr(info, "graph_name", ""),
+                getattr(info, "graph_type_path", ""),
+                "graph",
+            )
+            node_infos.append(node_record)
         return json.dumps({
             "success": True,
             "selected_nodes_count": len(node_infos),
@@ -95,6 +122,29 @@ def ue_get_selected_bp_node_infos() -> str:
                 "pin_id_kind": pin_id_kind,
                 "pin_stable": pin_stable,
             }
+            _add_fallback_qualification(
+                d,
+                link.graph_id,
+                getattr(link, "graph_owner_id", ""),
+                getattr(link, "graph_name", ""),
+                getattr(link, "graph_type_path", ""),
+                "graph",
+            )
+            _add_fallback_qualification(
+                d,
+                link.node_id,
+                getattr(link, "node_owner_id", ""),
+                link.node_name,
+                getattr(link, "node_type_path", ""),
+                "node",
+            )
+            _add_fallback_qualification(
+                d,
+                link.pin_id,
+                getattr(link, "owner_id", ""),
+                getattr(link, "name", link.pin_name),
+                getattr(link, "type_path", ""),
+            )
             if link.node_id in stable_to_id:
                 d["node"] = stable_to_id[link.node_id]
             else:
@@ -128,6 +178,18 @@ def ue_get_selected_bp_node_infos() -> str:
                 "node_id_kind": node_id_kind,
                 "node_stable": node_stable,
             }
+            _add_fallback_qualification(
+                d,
+                pin.stable_id,
+                getattr(pin, "owner_id", ""),
+                pin.pin_name,
+                getattr(pin, "type_path", ""),
+            )
+            if (
+                pin.stable_id.startswith("fallback:")
+                and name != pin.pin_name
+            ):
+                d["display_name"] = name
             ptype = pin.pin_type
             if pin.pin_sub_type:
                 ptype += ":" + pin.pin_sub_type
@@ -155,6 +217,21 @@ def ue_get_selected_bp_node_infos() -> str:
                 "graph_id_kind": graph_id_kind,
                 "graph_stable": graph_stable,
             }
+            _add_fallback_qualification(
+                d,
+                node.stable_id,
+                getattr(node, "owner_id", ""),
+                node.node_name,
+                getattr(node, "type_path", ""),
+            )
+            _add_fallback_qualification(
+                d,
+                node.graph_id,
+                getattr(node, "graph_owner_id", ""),
+                getattr(node, "graph_name", ""),
+                getattr(node, "graph_type_path", ""),
+                "graph",
+            )
             if node.node_comment:
                 d["comment"] = node.node_comment
             d["pins"] = [pin_to_dict(p) for p in node.pins]
@@ -639,7 +716,9 @@ def ue_create_blueprint_function(asset_path: str = None, function_name: str = No
 
 
 def ue_rename_blueprint_function(asset_path: str = None, function_id: str = None,
-                                       new_name: str = None) -> str:
+                                       new_name: str = None,
+                                       allow_name_fallback: bool = False,
+                                       function_name: str = "") -> str:
     """Renames a Blueprint function targeted by stable ID."""
     return _blueprint2_unsupported("rename_blueprint_function")
 
@@ -652,13 +731,17 @@ def ue_set_blueprint_function_signature(asset_path: str = None,
                                               const: bool = None,
                                               access: str = None,
                                               category: str = None,
-                                              description: str = None) -> str:
+                                              description: str = None,
+                                              allow_name_fallback: bool = False,
+                                              function_name: str = "") -> str:
     """Replaces the complete signature and metadata of a Blueprint function."""
     return _blueprint2_unsupported("set_blueprint_function_signature")
 
 
 def ue_delete_blueprint_function(asset_path: str = None,
-                                       function_id: str = None) -> str:
+                                       function_id: str = None,
+                                       allow_name_fallback: bool = False,
+                                       function_name: str = "") -> str:
     """Deletes a Blueprint function targeted by stable ID."""
     return _blueprint2_unsupported("delete_blueprint_function")
 
@@ -669,7 +752,9 @@ def ue_create_blueprint_macro(asset_path: str = None, macro_name: str = None,
     return _blueprint2_unsupported("create_blueprint_macro")
 
 
-def ue_delete_blueprint_macro(asset_path: str = None, macro_id: str = None) -> str:
+def ue_delete_blueprint_macro(asset_path: str = None, macro_id: str = None,
+                                    allow_name_fallback: bool = False,
+                                    macro_name: str = "") -> str:
     """Deletes a Blueprint macro targeted by stable ID."""
     return _blueprint2_unsupported("delete_blueprint_macro")
 
@@ -680,7 +765,10 @@ def ue_create_custom_event(asset_path: str = None, event_name: str = None,
     return _blueprint2_unsupported("create_custom_event")
 
 
-def ue_delete_custom_event(asset_path: str = None, event_id: str = None) -> str:
+def ue_delete_custom_event(asset_path: str = None, event_id: str = None,
+                                 allow_name_fallback: bool = False,
+                                 event_name: str = "",
+                                 owner_graph_id: str = "") -> str:
     """Deletes a custom event targeted by stable ID."""
     return _blueprint2_unsupported("delete_custom_event")
 
@@ -693,7 +781,9 @@ def ue_add_event_dispatcher(asset_path: str = None,
 
 
 def ue_remove_event_dispatcher(asset_path: str = None,
-                                     dispatcher_id: str = None) -> str:
+                                     dispatcher_id: str = None,
+                                     allow_name_fallback: bool = False,
+                                     dispatcher_name: str = "") -> str:
     """Removes an event dispatcher targeted by stable ID."""
     return _blueprint2_unsupported("remove_event_dispatcher")
 
@@ -731,13 +821,17 @@ def ue_disconnect_blueprint_pins(asset_path: str = None, pin_id: str = "",
 
 
 def ue_rename_blueprint_variable(asset_path: str = None, variable_id: str = None,
-                                       new_name: str = None) -> str:
+                                       new_name: str = None,
+                                       allow_name_fallback: bool = False,
+                                       variable_name: str = "") -> str:
     """Renames a Blueprint variable targeted by stable ID."""
     return _blueprint2_unsupported("rename_blueprint_variable")
 
 
 def ue_remove_blueprint_variable(asset_path: str = None,
-                                       variable_id: str = None) -> str:
+                                       variable_id: str = None,
+                                       allow_name_fallback: bool = False,
+                                       variable_name: str = "") -> str:
     """Removes a Blueprint variable targeted by stable ID."""
     return _blueprint2_unsupported("remove_blueprint_variable")
 

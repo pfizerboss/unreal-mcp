@@ -387,19 +387,21 @@ def test_graph_node_and_pin_ids_share_deterministic_fallback_helpers():
         "Blueprint->GetPathName()",
         "Graph->GetName()",
         "Graph->GetSchema()->GetClass()->GetPathName()",
-        "MakeGraphTargetId(Blueprint, Node->GetGraph())",
-        "Node->GetClass()->GetPathName()",
-        "MakeNodeTargetId(Blueprint, OwningNode)",
-        "Pin->PinType.PinSubCategoryObject->GetPathName()",
-        "Pin->PinType.PinCategory.ToString()",
-        "MakeQualifiedFallbackId(",
+            "MakeGraphTargetId(Blueprint, Node->GetGraph())",
+            "Node->GetClass()->GetPathName()",
+            "MakeNodeTargetId(Blueprint, OwningNode)",
+            "CanonicalPinType(Pin->PinType)",
+            "PinValueType",
+            "ContainerType",
+            "TerminalSubCategoryObject",
+            "MakeQualifiedFallbackId(",
     ):
         assert token in core
 
     for source in (selected, inspection):
-        assert "MakeGraphTargetId(" in source
-        assert "MakeNodeTargetId(" in source
-        assert "MakePinTargetId(" in source
+        assert "DescribeGraphTarget(" in source
+        assert "DescribeNodeTarget(" in source
+        assert "DescribePinTarget(" in source
 
 
 def test_self_hosted_workflow_builds_and_runs_native_blueprint2_gate():
@@ -412,7 +414,6 @@ def test_self_hosted_workflow_builds_and_runs_native_blueprint2_gate():
         "$buildVersion.MinorVersion -ne 7",
         "UnrealMCPSampleEditor Win64 Development",
         "Automation RunTests UnrealMCPython.Blueprint2",
-        "Found 2 automation tests",
         "UnrealMCPython.Blueprint2.TargetIds",
         "UnrealMCPython.Blueprint2.BriefCounts",
         "Result={Success} Name={TargetIds}",
@@ -420,6 +421,7 @@ def test_self_hosted_workflow_builds_and_runs_native_blueprint2_gate():
         "$editorExit = $LASTEXITCODE",
     ):
         assert contract in workflow
+    assert "Found 2 automation tests" not in workflow
 
 
 def test_editor_runner_fails_closed_when_a_suite_cannot_load():
@@ -440,6 +442,11 @@ def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
             object_path="/Game/A.A:EventGraph.DuplicateName",
             stable_id="fallback:node:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             graph_id="fallback:graph:1111111111111111111111111111111111111111",
+            owner_id="fallback:graph:1111111111111111111111111111111111111111",
+            type_path="/Script/BlueprintGraph.K2Node_CustomEvent",
+            graph_owner_id="/Game/A.A:EventGraph",
+            graph_name="EventGraph",
+            graph_type_path="/Script/BlueprintGraph.EdGraphSchema_K2",
         ),
         SimpleNamespace(
             node_name="DuplicateName",
@@ -477,6 +484,11 @@ def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
                 "stable": False,
                 "graph_id_kind": "qualified_name_fallback",
                 "graph_stable": False,
+                "owner_id": "fallback:graph:1111111111111111111111111111111111111111",
+                "type_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+                "graph_owner_id": "/Game/A.A:EventGraph",
+                "graph_name": "EventGraph",
+                "graph_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
             },
             {
                 "name": "DuplicateName",
@@ -556,6 +568,83 @@ def test_compact_selected_node_links_use_stable_ids_with_duplicate_names(
     assert link["pin_id_kind"] == "pin_guid"
 
 
+def test_selected_fallback_records_expose_replay_qualification(monkeypatch):
+    graph_id = "fallback:graph:1111111111111111111111111111111111111111"
+    node_id = "fallback:node:2222222222222222222222222222222222222222"
+    pin_id = "fallback:pin:3333333333333333333333333333333333333333"
+    linked_node_id = "fallback:node:4444444444444444444444444444444444444444"
+    linked_pin_id = "fallback:pin:5555555555555555555555555555555555555555"
+    link = SimpleNamespace(
+        graph_id=graph_id,
+        graph_owner_id="/Game/BP.BP",
+        graph_name="EventGraph",
+        graph_type_path="/Script/BlueprintGraph.EdGraphSchema_K2",
+        node_id=linked_node_id,
+        node_owner_id=graph_id,
+        node_name="LinkedNodeRaw",
+        node_type_path="/Script/BlueprintGraph.K2Node_CallFunction",
+        pin_id=linked_pin_id,
+        owner_id=linked_node_id,
+        name="LinkedPinRaw",
+        type_path="category=exec\ndirection=1\nordinal=0",
+        node_title="Linked Node",
+        pin_name="Linked Pin Friendly",
+    )
+    pin = SimpleNamespace(
+        friendly_name="Input Friendly",
+        pin_name="InputRaw",
+        direction="In",
+        stable_id=pin_id,
+        pin_id=pin_id,
+        graph_id=graph_id,
+        node_id=node_id,
+        owner_id=node_id,
+        type_path="category=exec\ndirection=0\nordinal=0",
+        pin_type="exec",
+        pin_sub_type="",
+        default_value="",
+        linked_to=[link],
+    )
+    node = SimpleNamespace(
+        node_name="NodeRaw",
+        node_title="Node Title",
+        node_comment="",
+        stable_id=node_id,
+        graph_id=graph_id,
+        owner_id=graph_id,
+        type_path="/Script/BlueprintGraph.K2Node_CustomEvent",
+        graph_owner_id="/Game/BP.BP",
+        graph_name="EventGraph",
+        graph_type_path="/Script/BlueprintGraph.EdGraphSchema_K2",
+        pins=[pin],
+    )
+
+    class Helper:
+        @staticmethod
+        def get_selected_blueprint_node_infos():
+            return [node]
+
+    module = _load_blueprint_actions(monkeypatch, Helper)
+    result = json.loads(module.ue_get_selected_bp_node_infos())
+    node_record = result["nodes"][0]
+    pin_record = node_record["pins"][0]
+    link_record = pin_record["linked"][0]
+
+    assert node_record["owner_id"] == graph_id
+    assert node_record["name"] == "NodeRaw"
+    assert node_record["type_path"] == node.type_path
+    assert node_record["graph_owner_id"] == "/Game/BP.BP"
+    assert pin_record["owner_id"] == node_id
+    assert pin_record["name"] == "InputRaw"
+    assert pin_record["display_name"] == "Input Friendly"
+    assert pin_record["type_path"] == pin.type_path
+    assert link_record["owner_id"] == linked_node_id
+    assert link_record["name"] == "LinkedPinRaw"
+    assert link_record["type_path"] == link.type_path
+    assert link_record["node_owner_id"] == graph_id
+    assert link_record["graph_owner_id"] == "/Game/BP.BP"
+
+
 def test_editor_brief_fixture_has_exact_counts_and_strict_cleanup_contract():
     base = EDITOR_TEST_BASE.read_text(encoding="utf-8")
     support = EDITOR_TEST_SUPPORT.read_text(encoding="utf-8")
@@ -618,6 +707,19 @@ def test_editor_brief_fixture_has_exact_counts_and_strict_cleanup_contract():
     assert "except Exception" not in delete_asset
 
 
+def test_native_blueprint2_fixtures_use_unique_root_and_cleanup_packages():
+    native_tests = (PRIVATE / "MCPythonBlueprint2Tests.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'TEXT("/Game/__MCPTests/Blueprint2_%s")' in native_tests
+    assert "FGuid::NewGuid()" in native_tests
+    assert "CleanupFixturePackages" in native_tests
+    assert "ON_SCOPE_EXIT" in native_tests
+    assert 'TEXT("/MCPythonTests/' not in native_tests
+    assert 'TEXT("/Game/Tests/MCP/Blueprint2Native' not in native_tests
+
+
 def test_compact_inspection_exposes_runtime_helpers_and_stable_selected_ids():
     header = HELPER_HEADER.read_text(encoding="utf-8")
     inspection = INSPECTION_SOURCE.read_text(encoding="utf-8")
@@ -636,9 +738,9 @@ def test_compact_inspection_exposes_runtime_helpers_and_stable_selected_ids():
         assert declaration in header
     for token in (
         "BuildCapabilities(Blueprint)",
-        "MakeGraphTargetId(",
-        "MakeNodeTargetId(",
-        "MakePinTargetId(",
+        "DescribeGraphTarget(",
+        "DescribeNodeTarget(",
+        "DescribePinTarget(",
         "UK2Node_CustomEvent",
         "UEdGraphSchema_K2::PC_MCDelegate",
     ):
@@ -658,6 +760,17 @@ def test_selected_node_helpers_reject_non_blueprint_editors_before_cast():
         body = source.split(f"UMCPythonHelper::{function_name}", 1)[1]
         body = body.split("\n}", 1)[0]
         blueprint_guard = body.index("Cast<UBlueprint>(Asset)")
+        editor_kind_guard = body.index("IsSupportedBlueprintSelectionEditor")
         toolkit_cast = body.index("static_cast<FAssetEditorToolkit*>")
         blueprint_editor_cast = body.index("static_cast<FBlueprintEditor*>")
-        assert blueprint_guard < toolkit_cast < blueprint_editor_cast
+        assert blueprint_guard < editor_kind_guard
+        assert editor_kind_guard < min(toolkit_cast, blueprint_editor_cast)
+        assert "GetAssociatedTabManager" in body
+    core = CORE_SOURCE.read_text(encoding="utf-8")
+    assert "IsSupportedBlueprintSelectionEditor" in core
+    for editor_name in (
+        "BlueprintEditor",
+        "WidgetBlueprintEditor",
+        "AnimationBlueprintEditor",
+    ):
+        assert f'TEXT("{editor_name}")' in core

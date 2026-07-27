@@ -67,6 +67,23 @@ void SetTargetMetadata(
         StableField,
         !Id.IsEmpty() && !Id.StartsWith(TEXT("fallback:")));
 }
+
+void SetTargetMetadata(
+    const TSharedPtr<FJsonObject>& Object,
+    UE::MCPython::Blueprint2::ETargetKind Kind,
+    const UE::MCPython::Blueprint2::FTargetRef& Target,
+    const FString& Prefix = FString())
+{
+    SetTargetMetadata(Object, Kind, Target.Id, Prefix);
+    if (!Target.Id.StartsWith(TEXT("fallback:")))
+    {
+        return;
+    }
+    const FString FieldPrefix = Prefix.IsEmpty() ? FString() : Prefix + TEXT("_");
+    Object->SetStringField(FieldPrefix + TEXT("owner_id"), Target.OwnerId);
+    Object->SetStringField(FieldPrefix + TEXT("name"), Target.Name);
+    Object->SetStringField(FieldPrefix + TEXT("type_path"), Target.TypePath);
+}
 }
 
 FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FString& GraphName)
@@ -78,27 +95,29 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
     if (!Graph)
         return MakeJsonError(FString::Printf(TEXT("Graph '%s' not found in Blueprint."), *GraphName));
 
-    const FString GraphId = UE::MCPython::Blueprint2::MakeGraphTargetId(
-        Blueprint, Graph);
+    const UE::MCPython::Blueprint2::FTargetRef GraphTarget =
+        UE::MCPython::Blueprint2::DescribeGraphTarget(Blueprint, Graph);
+    const FString GraphId = GraphTarget.Id;
     TArray<TSharedPtr<FJsonValue>> NodesArr;
     for (UEdGraphNode* Node : Graph->Nodes)
     {
         if (!Node) continue;
 
         TSharedPtr<FJsonObject> NodeObj = MakeShareable(new FJsonObject());
-        const FString NodeId = UE::MCPython::Blueprint2::MakeNodeTargetId(
-            Blueprint, Node);
+        const UE::MCPython::Blueprint2::FTargetRef NodeTarget =
+            UE::MCPython::Blueprint2::DescribeNodeTarget(Blueprint, Node);
+        const FString NodeId = NodeTarget.Id;
         NodeObj->SetStringField(TEXT("stable_id"), NodeId);
         NodeObj->SetStringField(TEXT("node_id"), NodeId);
         NodeObj->SetStringField(TEXT("graph_id"), GraphId);
         SetTargetMetadata(
             NodeObj,
             UE::MCPython::Blueprint2::ETargetKind::Node,
-            NodeId);
+            NodeTarget);
         SetTargetMetadata(
             NodeObj,
             UE::MCPython::Blueprint2::ETargetKind::Graph,
-            GraphId,
+            GraphTarget,
             TEXT("graph"));
         NodeObj->SetStringField(TEXT("node_name"), Node->GetName());
         NodeObj->SetStringField(TEXT("node_title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
@@ -113,8 +132,9 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
         {
             if (!Pin || Pin->bHidden) continue;
             TSharedPtr<FJsonObject> PinObj = MakeShareable(new FJsonObject());
-            const FString PinId = UE::MCPython::Blueprint2::MakePinTargetId(
-                Blueprint, Pin);
+            const UE::MCPython::Blueprint2::FTargetRef PinTarget =
+                UE::MCPython::Blueprint2::DescribePinTarget(Blueprint, Pin);
+            const FString PinId = PinTarget.Id;
             PinObj->SetStringField(TEXT("stable_id"), PinId);
             PinObj->SetStringField(TEXT("pin_id"), PinId);
             PinObj->SetStringField(TEXT("graph_id"), GraphId);
@@ -122,16 +142,16 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
             SetTargetMetadata(
                 PinObj,
                 UE::MCPython::Blueprint2::ETargetKind::Pin,
-                PinId);
+                PinTarget);
             SetTargetMetadata(
                 PinObj,
                 UE::MCPython::Blueprint2::ETargetKind::Graph,
-                GraphId,
+                GraphTarget,
                 TEXT("graph"));
             SetTargetMetadata(
                 PinObj,
                 UE::MCPython::Blueprint2::ETargetKind::Node,
-                NodeId,
+                NodeTarget,
                 TEXT("node"));
             PinObj->SetStringField(TEXT("pin_name"), Pin->GetName());
             FString Friendly = Pin->PinFriendlyName.ToString();
@@ -156,32 +176,38 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
                     TSharedPtr<FJsonObject> LinkObj = MakeShareable(new FJsonObject());
                     UEdGraphNode* LinkedNode = Linked->GetOwningNode();
                     UEdGraph* LinkedGraph = LinkedNode->GetGraph();
+                    const UE::MCPython::Blueprint2::FTargetRef LinkedGraphTarget =
+                        UE::MCPython::Blueprint2::DescribeGraphTarget(
+                            Blueprint, LinkedGraph);
+                    const UE::MCPython::Blueprint2::FTargetRef LinkedNodeTarget =
+                        UE::MCPython::Blueprint2::DescribeNodeTarget(
+                            Blueprint, LinkedNode);
+                    const UE::MCPython::Blueprint2::FTargetRef LinkedPinTarget =
+                        UE::MCPython::Blueprint2::DescribePinTarget(
+                            Blueprint, Linked);
                     LinkObj->SetStringField(
                         TEXT("graph_id"),
-                        UE::MCPython::Blueprint2::MakeGraphTargetId(
-                            Blueprint, LinkedGraph));
+                        LinkedGraphTarget.Id);
                     LinkObj->SetStringField(
                         TEXT("node_id"),
-                        UE::MCPython::Blueprint2::MakeNodeTargetId(
-                            Blueprint, LinkedNode));
+                        LinkedNodeTarget.Id);
                     LinkObj->SetStringField(
                         TEXT("pin_id"),
-                        UE::MCPython::Blueprint2::MakePinTargetId(
-                            Blueprint, Linked));
+                        LinkedPinTarget.Id);
                     SetTargetMetadata(
                         LinkObj,
                         UE::MCPython::Blueprint2::ETargetKind::Graph,
-                        LinkObj->GetStringField(TEXT("graph_id")),
+                        LinkedGraphTarget,
                         TEXT("graph"));
                     SetTargetMetadata(
                         LinkObj,
                         UE::MCPython::Blueprint2::ETargetKind::Node,
-                        LinkObj->GetStringField(TEXT("node_id")),
+                        LinkedNodeTarget,
                         TEXT("node"));
                     SetTargetMetadata(
                         LinkObj,
                         UE::MCPython::Blueprint2::ETargetKind::Pin,
-                        LinkObj->GetStringField(TEXT("pin_id")),
+                        LinkedPinTarget,
                         TEXT("pin"));
                     LinkObj->SetStringField(TEXT("node_name"), LinkedNode->GetName());
                     LinkObj->SetStringField(TEXT("pin_name"), Linked->GetName());
@@ -202,7 +228,7 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
     SetTargetMetadata(
         Result,
         UE::MCPython::Blueprint2::ETargetKind::Graph,
-        GraphId);
+        GraphTarget);
     Result->SetNumberField(TEXT("node_count"), Graph->Nodes.Num());
     Result->SetArrayField(TEXT("nodes"), NodesArr);
     return SerializeJsonObj(Result);
@@ -277,24 +303,15 @@ FString UMCPythonHelper::ListBlueprintVariables(UBlueprint* Blueprint)
     for (const FBPVariableDescription& Var : Blueprint->NewVariables)
     {
         TSharedPtr<FJsonObject> VarObj = MakeShareable(new FJsonObject());
-        const FString TypePath = Var.VarType.PinSubCategoryObject.IsValid()
-            ? Var.VarType.PinSubCategoryObject->GetPathName()
-            : Var.VarType.PinCategory.ToString();
-        const FString VariableId = Var.VarGuid.IsValid()
-            ? UE::MCPython::Blueprint2::MakeTargetId(
-                UE::MCPython::Blueprint2::ETargetKind::Variable,
-                Var.VarGuid)
-            : UE::MCPython::Blueprint2::MakeQualifiedFallbackId(
-                UE::MCPython::Blueprint2::ETargetKind::Variable,
-                Blueprint->GetPathName(),
-                Var.VarName.ToString(),
-                TypePath);
+        const UE::MCPython::Blueprint2::FTargetRef VariableTarget =
+            UE::MCPython::Blueprint2::DescribeVariableTarget(Blueprint, Var);
+        const FString VariableId = VariableTarget.Id;
         VarObj->SetStringField(TEXT("stable_id"), VariableId);
         VarObj->SetStringField(TEXT("variable_id"), VariableId);
         SetTargetMetadata(
             VarObj,
             UE::MCPython::Blueprint2::ETargetKind::Variable,
-            VariableId);
+            VariableTarget);
         VarObj->SetStringField(TEXT("name"), Var.VarName.ToString());
         VarObj->SetStringField(TEXT("type"), Var.VarType.PinCategory.ToString());
         if (Var.VarType.PinSubCategoryObject.IsValid())
@@ -455,29 +472,15 @@ FString UMCPythonHelper::ListBlueprintComponents(UBlueprint* Blueprint)
     {
         if (!Node) continue;
         TSharedPtr<FJsonObject> Obj = MakeShared<FJsonObject>();
-        const UClass* ComponentClass = Node->ComponentClass
-            ? Node->ComponentClass.Get()
-            : (Node->ComponentTemplate
-                ? Node->ComponentTemplate->GetClass()
-                : nullptr);
-        const FString TypePath = ComponentClass
-            ? ComponentClass->GetPathName()
-            : FString();
-        const FString ComponentId = Node->VariableGuid.IsValid()
-            ? UE::MCPython::Blueprint2::MakeTargetId(
-                UE::MCPython::Blueprint2::ETargetKind::Component,
-                Node->VariableGuid)
-            : UE::MCPython::Blueprint2::MakeQualifiedFallbackId(
-                UE::MCPython::Blueprint2::ETargetKind::Component,
-                Blueprint->GetPathName(),
-                Node->GetVariableName().ToString(),
-                TypePath);
+        const UE::MCPython::Blueprint2::FTargetRef ComponentTarget =
+            UE::MCPython::Blueprint2::DescribeComponentTarget(Blueprint, Node);
+        const FString ComponentId = ComponentTarget.Id;
         Obj->SetStringField(TEXT("stable_id"), ComponentId);
         Obj->SetStringField(TEXT("component_id"), ComponentId);
         SetTargetMetadata(
             Obj,
             UE::MCPython::Blueprint2::ETargetKind::Component,
-            ComponentId);
+            ComponentTarget);
         Obj->SetStringField(TEXT("variable_name"), Node->GetVariableName().ToString());
         if (Node->ComponentTemplate)
         {

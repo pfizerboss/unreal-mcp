@@ -258,6 +258,8 @@ def test_stable_id_schema_accepts_qualified_fallback_ids():
         "component:00112233-4455-6677-8899-aabbccddeeff",
         "interface:/Script/Engine.Interface",
         "interface:/Game/Interfaces/BPI_Test.BPI_Test_C",
+        "interface:/Engine/Interfaces/BPI_Test.BPI_Test_C",
+        "interface:/MyPlugin/API/BPI_Test.BPI_Test_C",
         "fallback:graph:c6afa87de837f324fd224c43d4f24e5fe74ce74d",
     ):
         validator.validate(stable_id)
@@ -268,12 +270,116 @@ def test_stable_id_schema_accepts_qualified_fallback_ids():
         "graph:00112233445566778899aabbccddeeff",
         "graph:00112233-4455-6677-8899-AABBCCDDEEFF",
         "interface:not-a-path",
-        "interface:/Engine/Interface",
+        "interface:/Game/Interfaces/BPI_Test",
         "fallback:graph:not-a-sha1",
         "fallback:interface:c6afa87de837f324fd224c43d4f24e5fe74ce74d",
     ):
         with pytest.raises(ValidationError):
             validator.validate(invalid_id)
+
+
+def test_fallback_capable_mutations_require_explicit_qualification():
+    specs = _new_specs()
+    fallback_ids = {
+        "rename_blueprint_function": (
+            "function_id",
+            "fallback:graph:1111111111111111111111111111111111111111",
+            {"function_name": "CalculateScore"},
+        ),
+        "set_blueprint_function_signature": (
+            "function_id",
+            "fallback:graph:2222222222222222222222222222222222222222",
+            {"function_name": "CalculateScore"},
+        ),
+        "delete_blueprint_function": (
+            "function_id",
+            "fallback:graph:3333333333333333333333333333333333333333",
+            {"function_name": "CalculateScore"},
+        ),
+        "delete_blueprint_macro": (
+            "macro_id",
+            "fallback:graph:4444444444444444444444444444444444444444",
+            {"macro_name": "ClampScore"},
+        ),
+        "delete_custom_event": (
+            "event_id",
+            "fallback:node:5555555555555555555555555555555555555555",
+            {
+                "event_name": "OnScoreChanged",
+                "owner_graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            },
+        ),
+        "remove_event_dispatcher": (
+            "dispatcher_id",
+            "fallback:variable:6666666666666666666666666666666666666666",
+            {"dispatcher_name": "ScoreChanged"},
+        ),
+        "rename_blueprint_variable": (
+            "variable_id",
+            "fallback:variable:7777777777777777777777777777777777777777",
+            {"variable_name": "Score"},
+        ),
+        "remove_blueprint_variable": (
+            "variable_id",
+            "fallback:variable:8888888888888888888888888888888888888888",
+            {"variable_name": "Score"},
+        ),
+    }
+
+    for action, (id_field, fallback_id, qualification) in fallback_ids.items():
+        spec = specs[action]
+        schema = spec["input_schema"]
+        properties = schema["properties"]
+        assert properties["allow_name_fallback"] == {
+            "type": "boolean",
+            "default": False,
+        }, action
+        for field in qualification:
+            assert field in properties, f"{action}.{field}"
+
+        params = dict(spec["examples"][0]["params"])
+        params[id_field] = fallback_id
+        validator = Draft202012Validator(schema)
+        with pytest.raises(ValidationError):
+            validator.validate(params)
+
+        validator.validate(
+            {
+                **params,
+                "allow_name_fallback": True,
+                **qualification,
+            }
+        )
+
+
+def test_interface_class_paths_accept_all_unreal_mount_roots():
+    schema = _new_specs()["add_blueprint_interface"]["input_schema"]
+    validator = Draft202012Validator(schema)
+    for interface_path in (
+        "/Script/CoreUObject.Interface",
+        "/Game/API/BPI_Usable.BPI_Usable_C",
+        "/Engine/API/BPI_Usable.BPI_Usable_C",
+        "/MyPlugin/API/BPI_Usable.BPI_Usable_C",
+    ):
+        validator.validate(
+            {
+                "asset_path": "/Game/BP_Player",
+                "interface_path": interface_path,
+            }
+        )
+
+    for invalid_path in (
+        "Game/API/BPI_Usable.BPI_Usable_C",
+        "/Game/API/BPI_Usable",
+        "/Game/API/BPI_Usable.BPI_Usable_C:Subobject",
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate(
+                {
+                    "asset_path": "/Game/BP_Player",
+                    "interface_path": invalid_path,
+                }
+            )
 
 
 def test_disconnect_blueprint_pins_has_exclusive_target_forms():
@@ -358,7 +464,78 @@ def test_blueprint2_output_envelopes_are_strictly_structured():
     with pytest.raises(ValidationError):
         validator.validate(malformed)
 
-    malformed = dict(specs["get_blueprint_brief"]["error_examples"][0])
+
+def test_blueprint_brief_success_data_schema_is_strict():
+    spec = _new_specs()["get_blueprint_brief"]
+    schema = spec["output_schema"]
+    validator = Draft202012Validator(schema)
+    success = {
+        "success": True,
+        "status": "succeeded",
+        "summary": "Blueprint brief returned.",
+        "data": {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "blueprint_class_path": "/Script/Engine.Blueprint",
+            "parent_class_path": "/Script/Engine.Actor",
+            "generated_class_path": "/Game/BP_Player.BP_Player_C",
+            "skeleton_class_path": "/Game/BP_Player.SKEL_BP_Player_C",
+            "compile_status": "UpToDate",
+            "interfaces": ["/Script/CoreUObject.Interface"],
+            "top_level_components": ["DefaultSceneRoot"],
+            "graphs": ["EventGraph"],
+            "counts": {
+                "variables": 1,
+                "components": 1,
+                "functions": 0,
+                "macros": 0,
+                "events": 1,
+                "dispatchers": 0,
+                "interfaces": 1,
+                "graphs": 1,
+                "nodes": 3,
+            },
+            "capabilities": {
+                "api_version": 2,
+                "engine_version": "5.7.0",
+                "scalar_kinds": ["bool"],
+                "container_kinds": ["array"],
+                "node_families": ["event"],
+                "supports_k2_schema": True,
+                "supports_scs_operations": True,
+                "supports_compiler_tokens": True,
+                "has_k2_graphs": True,
+                "all_graphs_k2_schema": True,
+                "k2_schema": True,
+                "compiler_tokens": True,
+                "has_scs": True,
+                "scs_operations": True,
+            },
+        },
+        "changes": [],
+        "warnings": [],
+        "errors": [],
+        "next_actions": [],
+        "trace_id": "brief-contract",
+    }
+    validator.validate(success)
+    validator.validate(spec["error_examples"][0])
+
+    missing_path = json.loads(json.dumps(success))
+    del missing_path["data"]["asset_path"]
+    with pytest.raises(ValidationError):
+        validator.validate(missing_path)
+
+    missing_count = json.loads(json.dumps(success))
+    del missing_count["data"]["counts"]["nodes"]
+    with pytest.raises(ValidationError):
+        validator.validate(missing_count)
+
+    unknown_field = json.loads(json.dumps(success))
+    unknown_field["data"]["full_nodes"] = []
+    with pytest.raises(ValidationError):
+        validator.validate(unknown_field)
+
+    malformed = dict(spec["error_examples"][0])
     malformed["status"] = "anything-goes"
     with pytest.raises(ValidationError):
         validator.validate(malformed)

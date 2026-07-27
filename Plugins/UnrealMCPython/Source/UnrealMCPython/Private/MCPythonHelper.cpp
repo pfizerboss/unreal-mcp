@@ -93,14 +93,20 @@ TArray<UObject*> UMCPythonHelper::GetSelectedBlueprintNodes()
     {
         if (!Cast<UBlueprint>(Asset)) continue;
         IAssetEditorInstance* AssetEditorInstance = Subsystem->FindEditorForAsset(Asset, false);
-        FAssetEditorToolkit* AssetEditorToolkit = static_cast<FAssetEditorToolkit*>(AssetEditorInstance);
-        if (!AssetEditorToolkit) continue;
-        TSharedPtr<FTabManager> TabManager = AssetEditorToolkit->GetTabManager();
+        if (!AssetEditorInstance ||
+            !UE::MCPython::Blueprint2::IsSupportedBlueprintSelectionEditor(
+                AssetEditorInstance->GetEditorName()))
+        {
+            continue;
+        }
+        TSharedPtr<FTabManager> TabManager =
+            AssetEditorInstance->GetAssociatedTabManager();
         if (!TabManager.IsValid()) continue;
         TSharedPtr<SDockTab> Tab = TabManager->GetOwnerTab();
         if (Tab.IsValid() && Tab->IsForeground())
         {
-            FBlueprintEditor* BlueprintEditor = static_cast<FBlueprintEditor*>(AssetEditorToolkit);
+            FBlueprintEditor* BlueprintEditor = static_cast<FBlueprintEditor*>(
+                static_cast<FAssetEditorToolkit*>(AssetEditorInstance));
             if (BlueprintEditor)
             {
                 FGraphPanelSelectionSet SelectedNodes = BlueprintEditor->GetSelectedNodes();
@@ -123,14 +129,20 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
     {
         if (!Cast<UBlueprint>(Asset)) continue;
         IAssetEditorInstance* AssetEditorInstance = Subsystem->FindEditorForAsset(Asset, false);
-        FAssetEditorToolkit* AssetEditorToolkit = static_cast<FAssetEditorToolkit*>(AssetEditorInstance);
-        if (!AssetEditorToolkit) continue;
-        TSharedPtr<FTabManager> TabManager = AssetEditorToolkit->GetTabManager();
+        if (!AssetEditorInstance ||
+            !UE::MCPython::Blueprint2::IsSupportedBlueprintSelectionEditor(
+                AssetEditorInstance->GetEditorName()))
+        {
+            continue;
+        }
+        TSharedPtr<FTabManager> TabManager =
+            AssetEditorInstance->GetAssociatedTabManager();
         if (!TabManager.IsValid()) continue;
         TSharedPtr<SDockTab> Tab = TabManager->GetOwnerTab();
         if (Tab.IsValid() && Tab->IsForeground())
         {
-            FBlueprintEditor* BlueprintEditor = static_cast<FBlueprintEditor*>(AssetEditorToolkit);
+            FBlueprintEditor* BlueprintEditor = static_cast<FBlueprintEditor*>(
+                static_cast<FAssetEditorToolkit*>(AssetEditorInstance));
             if (BlueprintEditor)
             {
                 FGraphPanelSelectionSet SelectedNodes = BlueprintEditor->GetSelectedNodes();
@@ -141,11 +153,20 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
                     FMCPythonBlueprintNodeInfo NodeInfo;
                     UEdGraph* Graph = Node->GetGraph();
                     UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNode(Node);
-                    NodeInfo.GraphId = UE::MCPython::Blueprint2::MakeGraphTargetId(
-                        Blueprint, Graph);
-                    NodeInfo.StableId = UE::MCPython::Blueprint2::MakeNodeTargetId(
-                        Blueprint, Node);
+                    const UE::MCPython::Blueprint2::FTargetRef GraphTarget =
+                        UE::MCPython::Blueprint2::DescribeGraphTarget(
+                            Blueprint, Graph);
+                    const UE::MCPython::Blueprint2::FTargetRef NodeTarget =
+                        UE::MCPython::Blueprint2::DescribeNodeTarget(
+                            Blueprint, Node);
+                    NodeInfo.GraphId = GraphTarget.Id;
+                    NodeInfo.GraphOwnerId = GraphTarget.OwnerId;
+                    NodeInfo.GraphName = GraphTarget.Name;
+                    NodeInfo.GraphTypePath = GraphTarget.TypePath;
+                    NodeInfo.StableId = NodeTarget.Id;
                     NodeInfo.NodeId = NodeInfo.StableId;
+                    NodeInfo.OwnerId = NodeTarget.OwnerId;
+                    NodeInfo.TypePath = NodeTarget.TypePath;
                     NodeInfo.NodeName = Node->GetName();
                     NodeInfo.NodeTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
                     NodeInfo.NodeClass = Node->GetClass()->GetName();
@@ -157,9 +178,13 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
                         FMCPythonBlueprintPinInfo PinInfo;
                         PinInfo.GraphId = NodeInfo.GraphId;
                         PinInfo.NodeId = NodeInfo.StableId;
-                        PinInfo.StableId = UE::MCPython::Blueprint2::MakePinTargetId(
-                            Blueprint, Pin);
+                        const UE::MCPython::Blueprint2::FTargetRef PinTarget =
+                            UE::MCPython::Blueprint2::DescribePinTarget(
+                                Blueprint, Pin);
+                        PinInfo.StableId = PinTarget.Id;
                         PinInfo.PinId = PinInfo.StableId;
+                        PinInfo.OwnerId = PinTarget.OwnerId;
+                        PinInfo.TypePath = PinTarget.TypePath;
                         FString Friendly = Pin->PinFriendlyName.ToString();
                         PinInfo.PinName = Pin->GetName();
                         PinInfo.FriendlyName = Friendly;
@@ -177,12 +202,26 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
                                 FMCPythonPinLinkInfo LinkInfo;
                                 UEdGraphNode* LinkedNode = LinkedPin->GetOwningNode();
                                 UEdGraph* LinkedGraph = LinkedNode->GetGraph();
-                                LinkInfo.GraphId = UE::MCPython::Blueprint2::MakeGraphTargetId(
-                                    Blueprint, LinkedGraph);
-                                LinkInfo.NodeId = UE::MCPython::Blueprint2::MakeNodeTargetId(
-                                    Blueprint, LinkedNode);
-                                LinkInfo.PinId = UE::MCPython::Blueprint2::MakePinTargetId(
-                                    Blueprint, LinkedPin);
+                                const UE::MCPython::Blueprint2::FTargetRef LinkedGraphTarget =
+                                    UE::MCPython::Blueprint2::DescribeGraphTarget(
+                                        Blueprint, LinkedGraph);
+                                const UE::MCPython::Blueprint2::FTargetRef LinkedNodeTarget =
+                                    UE::MCPython::Blueprint2::DescribeNodeTarget(
+                                        Blueprint, LinkedNode);
+                                const UE::MCPython::Blueprint2::FTargetRef LinkedPinTarget =
+                                    UE::MCPython::Blueprint2::DescribePinTarget(
+                                        Blueprint, LinkedPin);
+                                LinkInfo.GraphId = LinkedGraphTarget.Id;
+                                LinkInfo.GraphOwnerId = LinkedGraphTarget.OwnerId;
+                                LinkInfo.GraphName = LinkedGraphTarget.Name;
+                                LinkInfo.GraphTypePath = LinkedGraphTarget.TypePath;
+                                LinkInfo.NodeId = LinkedNodeTarget.Id;
+                                LinkInfo.NodeOwnerId = LinkedNodeTarget.OwnerId;
+                                LinkInfo.NodeTypePath = LinkedNodeTarget.TypePath;
+                                LinkInfo.PinId = LinkedPinTarget.Id;
+                                LinkInfo.OwnerId = LinkedPinTarget.OwnerId;
+                                LinkInfo.Name = LinkedPinTarget.Name;
+                                LinkInfo.TypePath = LinkedPinTarget.TypePath;
                                 LinkInfo.NodeName = LinkedNode->GetName();
                                 LinkInfo.NodeTitle = LinkedNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
                                 FString LinkedFriendly = LinkedPin->PinFriendlyName.ToString();

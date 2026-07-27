@@ -19,10 +19,23 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/ScopeExit.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/Interface.h"
 #include "UObject/Package.h"
+#include "UObject/UObjectHash.h"
+
+namespace UE::MCPython::Blueprint2
+{
+FTargetRef DescribeGraphTarget(UBlueprint* Blueprint, const UEdGraph* Graph);
+FTargetRef DescribeNodeTarget(UBlueprint* Blueprint, const UEdGraphNode* Node);
+FTargetRef DescribePinTarget(UBlueprint* Blueprint, const UEdGraphPin* Pin);
+FTargetRef DescribeVariableTarget(
+    UBlueprint* Blueprint,
+    const FBPVariableDescription& Variable);
+bool IsSupportedBlueprintSelectionEditor(const FName& EditorName);
+}
 
 namespace
 {
@@ -77,6 +90,28 @@ TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
     const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
     return FJsonSerializer::Deserialize(Reader, Result) ? Result : nullptr;
 }
+
+void CleanupFixturePackages(const TArray<UPackage*>& Packages)
+{
+    for (UPackage* Package : Packages)
+    {
+        if (!Package)
+        {
+            continue;
+        }
+        TArray<UObject*> Objects;
+        GetObjectsWithOuter(Package, Objects, true);
+        for (int32 Index = Objects.Num() - 1; Index >= 0; --Index)
+        {
+            Objects[Index]->ClearFlags(RF_Public | RF_Standalone);
+            Objects[Index]->MarkAsGarbage();
+        }
+        Package->SetDirtyFlag(false);
+        Package->ClearFlags(RF_Public | RF_Standalone);
+        Package->MarkAsGarbage();
+    }
+    CollectGarbage(RF_NoFlags);
+}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -90,7 +125,24 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
 
     (void)Parameters;
 
-    UBlueprint* Blueprint = MakeBlueprintFixture(TEXT("/MCPythonTests/StableIds"));
+    const FString TargetIdsRoot = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    TArray<UPackage*> FixturePackages;
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+    auto MakeTrackedBlueprint = [&TargetIdsRoot, &FixturePackages](
+        const TCHAR* Leaf)
+    {
+        UBlueprint* Result = MakeBlueprintFixture(
+            *FString::Printf(TEXT("%s/%s"), *TargetIdsRoot, Leaf));
+        FixturePackages.AddUnique(Result->GetOutermost());
+        return Result;
+    };
+
+    UBlueprint* Blueprint = MakeTrackedBlueprint(TEXT("StableIds"));
     UEdGraph* Graph = MakeGraphFixture(
         Blueprint,
         TEXT("GraphA"),
@@ -105,10 +157,9 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         TEXT("InputA"),
         UEdGraphSchema_K2::PC_Boolean);
 
-    TestEqualSensitive(
-        TEXT("Blueprint path matches the fallback qualification assumption"),
-        *Blueprint->GetPathName(),
-        TEXT("/MCPythonTests/StableIds.BP_StableIds"));
+    TestTrue(
+        TEXT("Blueprint fixture uses the unique cleanup root"),
+        Blueprint->GetPathName().StartsWith(TargetIdsRoot));
     TestEqualSensitive(
         TEXT("Graph schema class matches the fallback qualification assumption"),
         *Graph->GetSchema()->GetClass()->GetPathName(),
@@ -129,22 +180,21 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
     const FString GraphFallback = MakeGraphTargetId(Blueprint, Graph);
     const FString NodeFallback = MakeNodeTargetId(Blueprint, Node);
     const FString PinFallback = MakePinTargetId(Blueprint, Pin);
+    const FTargetRef GraphDescription = DescribeGraphTarget(Blueprint, Graph);
+    const FTargetRef NodeDescription = DescribeNodeTarget(Blueprint, Node);
+    const FTargetRef PinDescription = DescribePinTarget(Blueprint, Pin);
 
     TestFalse(TEXT("Graph fallback ID is non-empty"), GraphFallback.IsEmpty());
     TestFalse(TEXT("Node fallback ID is non-empty"), NodeFallback.IsEmpty());
     TestFalse(TEXT("Pin fallback ID is non-empty"), PinFallback.IsEmpty());
     TestEqualSensitive(
-        TEXT("Graph fallback ID is independently precomputed"),
-        *GraphFallback,
-        TEXT("fallback:graph:c6afa87de837f324fd224c43d4f24e5fe74ce74d"));
-    TestEqualSensitive(
-        TEXT("Node fallback ID is independently precomputed"),
-        *NodeFallback,
-        TEXT("fallback:node:79bfb622f4b03440dc12fba6a89ae53d44b0e46b"));
-    TestEqualSensitive(
-        TEXT("Pin fallback ID is independently precomputed"),
-        *PinFallback,
-        TEXT("fallback:pin:19239ed3e36212ec138f5c58de68d7e834fff3ca"));
+        TEXT("Qualified fallback hash is independently precomputed"),
+        MakeQualifiedFallbackId(
+            ETargetKind::Graph,
+            TEXT("/Known/Outer"),
+            TEXT("GraphA"),
+            TEXT("/Script/BlueprintGraph.EdGraphSchema_K2")),
+        TEXT("fallback:graph:42f0c59cd6057cfef73fd05111c93550627c06ba"));
     TestEqualSensitive(
         TEXT("Graph fallback ID is deterministic"),
         MakeGraphTargetId(Blueprint, Graph),
@@ -157,6 +207,59 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         TEXT("Pin fallback ID is deterministic"),
         MakePinTargetId(Blueprint, Pin),
         PinFallback);
+
+    TestEqualSensitive(
+        TEXT("Graph fallback description carries its actual outer path"),
+        GraphDescription.OwnerId,
+        Graph->GetOuter()->GetPathName());
+    TestEqualSensitive(
+        TEXT("Node fallback description carries its graph target ID"),
+        NodeDescription.OwnerId,
+        GraphFallback);
+    TestEqualSensitive(
+        TEXT("Pin fallback description carries its node target ID"),
+        PinDescription.OwnerId,
+        NodeFallback);
+
+    FString FallbackResolveError;
+    FTargetRef MissingOwnerGraphTarget = GraphDescription;
+    MissingOwnerGraphTarget.OwnerId.Empty();
+    MissingOwnerGraphTarget.bAllowNameFallback = true;
+    TestFalse(
+        TEXT("Graph fallback rejects a missing owner qualification"),
+        ResolveTarget(
+            Blueprint,
+            ETargetKind::Graph,
+            MissingOwnerGraphTarget,
+            FallbackResolveError).Graph != nullptr);
+
+    FTargetRef QualifiedGraphTarget = GraphDescription;
+    QualifiedGraphTarget.bAllowNameFallback = true;
+    TestTrue(
+        TEXT("Graph fallback replays with complete qualification"),
+        ResolveTarget(
+            Blueprint,
+            ETargetKind::Graph,
+            QualifiedGraphTarget,
+            FallbackResolveError).Graph == Graph);
+    FTargetRef QualifiedNodeTarget = NodeDescription;
+    QualifiedNodeTarget.bAllowNameFallback = true;
+    TestTrue(
+        TEXT("Node fallback replays when its graph owner is also a fallback"),
+        ResolveTarget(
+            Blueprint,
+            ETargetKind::Node,
+            QualifiedNodeTarget,
+            FallbackResolveError).Node == Node);
+    FTargetRef QualifiedPinTarget = PinDescription;
+    QualifiedPinTarget.bAllowNameFallback = true;
+    TestTrue(
+        TEXT("Pin fallback replays when its node owner is also a fallback"),
+        ResolveTarget(
+            Blueprint,
+            ETargetKind::Pin,
+            QualifiedPinTarget,
+            FallbackResolveError).Pin == Pin);
 
     const FGuid FixedGuid(0x00112233, 0x44556677, 0x8899aabb, 0xccddeeff);
     Graph->GraphGuid = FixedGuid;
@@ -235,6 +338,7 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
     Pin->PinId.Invalidate();
     FTargetRef FallbackGraphTarget;
     FallbackGraphTarget.Id = GraphFallback;
+    FallbackGraphTarget.OwnerId = GraphDescription.OwnerId;
     FallbackGraphTarget.Name = Graph->GetName();
     FallbackGraphTarget.TypePath = Graph->GetSchema()->GetClass()->GetPathName();
     FallbackGraphTarget.bAllowNameFallback = true;
@@ -275,6 +379,18 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         TestFalse(
             TEXT("Legacy graph info marks fallback graph unstable"),
             LegacyGraphInfo->GetBoolField(TEXT("stable")));
+        TestEqualSensitive(
+            TEXT("Legacy graph info exposes replay owner"),
+            LegacyGraphInfo->GetStringField(TEXT("owner_id")),
+            GraphDescription.OwnerId);
+        TestEqualSensitive(
+            TEXT("Legacy graph info exposes replay name"),
+            LegacyGraphInfo->GetStringField(TEXT("name")),
+            GraphDescription.Name);
+        TestEqualSensitive(
+            TEXT("Legacy graph info exposes replay type"),
+            LegacyGraphInfo->GetStringField(TEXT("type_path")),
+            GraphDescription.TypePath);
         const TArray<TSharedPtr<FJsonValue>>& LegacyNodes =
             LegacyGraphInfo->GetArrayField(TEXT("nodes"));
         TestTrue(
@@ -290,6 +406,14 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
             TestFalse(
                 TEXT("Legacy node marks fallback ID unstable"),
                 LegacyNode->GetBoolField(TEXT("stable")));
+            TestEqualSensitive(
+                TEXT("Legacy node exposes replay owner"),
+                LegacyNode->GetStringField(TEXT("owner_id")),
+                NodeDescription.OwnerId);
+            TestEqualSensitive(
+                TEXT("Legacy node exposes replay type"),
+                LegacyNode->GetStringField(TEXT("type_path")),
+                NodeDescription.TypePath);
             const TArray<TSharedPtr<FJsonValue>>& LegacyPins =
                 LegacyNode->GetArrayField(TEXT("pins"));
             TestTrue(
@@ -306,12 +430,24 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
                 TestFalse(
                     TEXT("Legacy pin marks fallback ID unstable"),
                     LegacyPin->GetBoolField(TEXT("stable")));
+                TestEqualSensitive(
+                    TEXT("Legacy pin exposes replay owner"),
+                    LegacyPin->GetStringField(TEXT("owner_id")),
+                    PinDescription.OwnerId);
+                TestEqualSensitive(
+                    TEXT("Legacy pin exposes raw replay name"),
+                    LegacyPin->GetStringField(TEXT("name")),
+                    PinDescription.Name);
+                TestEqualSensitive(
+                    TEXT("Legacy pin exposes canonical replay type"),
+                    LegacyPin->GetStringField(TEXT("type_path")),
+                    PinDescription.TypePath);
             }
         }
     }
 
-    UBlueprint* GraphOwnerBlueprint = MakeBlueprintFixture(
-        TEXT("/MCPythonTests/TargetIdsGraphOwner"));
+    UBlueprint* GraphOwnerBlueprint = MakeTrackedBlueprint(
+        TEXT("TargetIdsGraphOwner"));
     UEdGraph* GraphOwnerVariant = MakeGraphFixture(
         GraphOwnerBlueprint,
         TEXT("GraphA"),
@@ -320,8 +456,8 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         Blueprint,
         TEXT("GraphB"),
         UEdGraphSchema_K2::StaticClass());
-    UBlueprint* GraphSchemaBlueprint = MakeBlueprintFixture(
-        TEXT("/MCPythonTests/TargetIdsGraphSchema"));
+    UBlueprint* GraphSchemaBlueprint = MakeTrackedBlueprint(
+        TEXT("TargetIdsGraphSchema"));
     UEdGraph* GraphSchemaVariant = MakeGraphFixture(
         GraphSchemaBlueprint,
         TEXT("GraphA"),
@@ -367,8 +503,8 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         MakeNodeFixture<UK2Node_CustomEvent>(GraphNameVariant, TEXT("NodeA"));
     UK2Node_CustomEvent* NodeNameVariant =
         MakeNodeFixture<UK2Node_CustomEvent>(Graph, TEXT("NodeB"));
-    UBlueprint* NodeClassBlueprint = MakeBlueprintFixture(
-        TEXT("/MCPythonTests/TargetIdsNodeClass"));
+    UBlueprint* NodeClassBlueprint = MakeTrackedBlueprint(
+        TEXT("TargetIdsNodeClass"));
     UEdGraph* NodeClassGraph = MakeGraphFixture(
         NodeClassBlueprint,
         TEXT("GraphA"),
@@ -439,12 +575,52 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         MakePinTargetId(Blueprint, DuplicatePinA),
         MakePinTargetId(Blueprint, DuplicatePinB));
 
+    UEdGraphPin* ScalarContainerPin = MakePinFixture(
+        Node,
+        TEXT("ContainerCollision"),
+        UEdGraphSchema_K2::PC_Int);
+    UEdGraphPin* ArrayContainerPin = MakePinFixture(
+        Node,
+        TEXT("ContainerCollision"),
+        UEdGraphSchema_K2::PC_Int);
+    ArrayContainerPin->PinType.ContainerType = EPinContainerType::Array;
+    TestNotEqualSensitive(
+        TEXT("Pin fallback distinguishes scalar and array types"),
+        MakePinTargetId(Blueprint, ScalarContainerPin),
+        MakePinTargetId(Blueprint, ArrayContainerPin));
+
+    UEdGraphPin* IntMapPin = MakePinFixture(
+        Node,
+        TEXT("MapTerminalCollision"),
+        UEdGraphSchema_K2::PC_Int);
+    IntMapPin->PinType.ContainerType = EPinContainerType::Map;
+    IntMapPin->PinType.PinValueType.TerminalCategory = UEdGraphSchema_K2::PC_Int;
+    UEdGraphPin* BoolMapPin = MakePinFixture(
+        Node,
+        TEXT("MapTerminalCollision"),
+        UEdGraphSchema_K2::PC_Int);
+    BoolMapPin->PinType.ContainerType = EPinContainerType::Map;
+    BoolMapPin->PinType.PinValueType.TerminalCategory = UEdGraphSchema_K2::PC_Boolean;
+    TestNotEqualSensitive(
+        TEXT("Pin fallback distinguishes map terminal types"),
+        MakePinTargetId(Blueprint, IntMapPin),
+        MakePinTargetId(Blueprint, BoolMapPin));
+
+    FBPVariableDescription VariableDescription;
+    VariableDescription.VarName = TEXT("ContainerVariable");
+    VariableDescription.VarGuid.Invalidate();
+    VariableDescription.VarType.PinCategory = UEdGraphSchema_K2::PC_Int;
+    const FString ScalarVariableId =
+        DescribeVariableTarget(Blueprint, VariableDescription).Id;
+    VariableDescription.VarType.ContainerType = EPinContainerType::Array;
+    TestNotEqualSensitive(
+        TEXT("Variable fallback changes when its container type changes"),
+        DescribeVariableTarget(Blueprint, VariableDescription).Id,
+        ScalarVariableId);
+
     Node->NodeGuid = FixedGuid;
     FTargetRef PinFallbackTarget;
-    PinFallbackTarget.Id = MakePinTargetId(Blueprint, Pin);
-    PinFallbackTarget.OwnerId = MakeNodeTargetId(Blueprint, Node);
-    PinFallbackTarget.Name = Pin->GetName();
-    PinFallbackTarget.TypePath = Pin->PinType.PinCategory.ToString();
+    PinFallbackTarget = DescribePinTarget(Blueprint, Pin);
     PinFallbackTarget.bAllowNameFallback = true;
     const FResolvedTarget ResolvedFallbackPin = ResolveTarget(
         Blueprint,
@@ -458,6 +634,19 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         TEXT("Resolved pin fallback uses qualified_name_fallback id kind"),
         ResolvedFallbackPin.IdKind,
         TEXT("qualified_name_fallback"));
+
+    TestTrue(
+        TEXT("Standard Blueprint editor is accepted for selection"),
+        IsSupportedBlueprintSelectionEditor(TEXT("BlueprintEditor")));
+    TestTrue(
+        TEXT("Widget Blueprint editor is accepted for selection"),
+        IsSupportedBlueprintSelectionEditor(TEXT("WidgetBlueprintEditor")));
+    TestTrue(
+        TEXT("Animation Blueprint editor is accepted for selection"),
+        IsSupportedBlueprintSelectionEditor(TEXT("AnimationBlueprintEditor")));
+    TestFalse(
+        TEXT("Control Rig Blueprint editor is rejected before casting"),
+        IsSupportedBlueprintSelectionEditor(TEXT("ControlRigEditor")));
 
     const TSharedRef<FJsonObject> GlobalCapabilities = BuildCapabilities(nullptr);
     bool bSupportsK2Schema = false;
@@ -499,8 +688,16 @@ bool FMCPythonBlueprint2BriefCountsTest::RunTest(const FString& Parameters)
 
     (void)Parameters;
 
+    const FString BriefRoot = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
     UPackage* BriefPackage = CreatePackage(
-        TEXT("/Game/Tests/MCP/Blueprint2NativeBriefCounts"));
+        *FString::Printf(TEXT("%s/BriefCounts"), *BriefRoot));
+    const TArray<UPackage*> FixturePackages = {BriefPackage};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
     UBlueprint* BriefBlueprint = FKismetEditorUtilities::CreateBlueprint(
         AActor::StaticClass(),
         BriefPackage,

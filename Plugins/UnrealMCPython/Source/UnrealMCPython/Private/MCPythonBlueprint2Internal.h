@@ -73,6 +73,13 @@ FString MakeQualifiedFallbackId(
     const FString& Owner,
     const FString& Name,
     const FString& TypePath);
+FTargetRef DescribeGraphTarget(UBlueprint* Blueprint, const UEdGraph* Graph);
+FTargetRef DescribeNodeTarget(UBlueprint* Blueprint, const UEdGraphNode* Node);
+FTargetRef DescribePinTarget(UBlueprint* Blueprint, const UEdGraphPin* Pin);
+FTargetRef DescribeVariableTarget(
+    UBlueprint* Blueprint,
+    const FBPVariableDescription& Variable);
+FTargetRef DescribeComponentTarget(UBlueprint* Blueprint, const USCS_Node* Component);
 FString MakeGraphTargetId(UBlueprint* Blueprint, const UEdGraph* Graph);
 FString MakeNodeTargetId(UBlueprint* Blueprint, const UEdGraphNode* Node);
 FString MakePinTargetId(UBlueprint* Blueprint, const UEdGraphPin* Pin);
@@ -109,4 +116,5 @@ TSharedRef<FJsonObject> MakeFailure(
     const TSharedPtr<FJsonObject>& Details = nullptr);
 FString SerializeResult(const TSharedRef<FJsonObject>& Result);
 TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint);
+bool IsSupportedBlueprintSelectionEditor(const FName& EditorName);
 }

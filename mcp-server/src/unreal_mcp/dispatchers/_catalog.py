@@ -432,15 +432,15 @@ CATALOG = {
             'doc': 'Creates a custom event with ordered parameters.',
         },
         'delete_blueprint_function': {
-            'params': 'asset_path, function_id',
+            'params': "asset_path, function_id, allow_name_fallback=False, function_name=''",
             'doc': 'Deletes a Blueprint function targeted by stable ID.',
         },
         'delete_blueprint_macro': {
-            'params': 'asset_path, macro_id',
+            'params': "asset_path, macro_id, allow_name_fallback=False, macro_name=''",
             'doc': 'Deletes a Blueprint macro targeted by stable ID.',
         },
         'delete_custom_event': {
-            'params': 'asset_path, event_id',
+            'params': "asset_path, event_id, allow_name_fallback=False, event_name='', owner_graph_id=''",
             'doc': 'Deletes a custom event targeted by stable ID.',
         },
         'diff_blueprint_graphs': {
@@ -496,7 +496,7 @@ CATALOG = {
             'doc': 'Removes a node from a Blueprint graph.',
         },
         'remove_blueprint_variable': {
-            'params': 'asset_path, variable_id',
+            'params': "asset_path, variable_id, allow_name_fallback=False, variable_name=''",
             'doc': 'Removes a Blueprint variable targeted by stable ID.',
         },
         'remove_component_from_blueprint': {
@@ -504,7 +504,7 @@ CATALOG = {
             'doc': "Removes a component by variable name from a Blueprint's SCS.",
         },
         'remove_event_dispatcher': {
-            'params': 'asset_path, dispatcher_id',
+            'params': "asset_path, dispatcher_id, allow_name_fallback=False, dispatcher_name=''",
             'doc': 'Removes an event dispatcher targeted by stable ID.',
         },
         'rename_blueprint_component': {
@@ -512,11 +512,11 @@ CATALOG = {
             'doc': 'Renames an SCS component targeted by stable ID.',
         },
         'rename_blueprint_function': {
-            'params': 'asset_path, function_id, new_name',
+            'params': "asset_path, function_id, new_name, allow_name_fallback=False, function_name=''",
             'doc': 'Renames a Blueprint function targeted by stable ID.',
         },
         'rename_blueprint_variable': {
-            'params': 'asset_path, variable_id, new_name',
+            'params': "asset_path, variable_id, new_name, allow_name_fallback=False, variable_name=''",
             'doc': 'Renames a Blueprint variable targeted by stable ID.',
         },
         'reorder_blueprint_component': {
@@ -532,7 +532,7 @@ CATALOG = {
             'doc': 'Sets bounded relative transform fields on an SCS component.',
         },
         'set_blueprint_function_signature': {
-            'params': 'asset_path, function_id, inputs, outputs, pure, const, access, category, description',
+            'params': "asset_path, function_id, inputs, outputs, pure, const, access, category, description, allow_name_fallback=False, function_name=''",
             'doc': 'Replaces the complete signature and metadata of a Blueprint function.',
         },
         'set_blueprint_node_position': {

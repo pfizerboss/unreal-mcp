@@ -13,7 +13,7 @@ STABLE_ID = {
     "type": "string",
     "pattern": (
         rf"^(?:(?:graph|node|pin|variable|component):{LOWER_GUID}"
-        r"|interface:/(?:Script|Game)/[^\s:]+"
+        r"|interface:/[A-Za-z][A-Za-z0-9_]*/[^\s:]+\.[^\s/:.]+"
         r"|fallback:(?:graph|node|pin|variable|component):[0-9a-f]{40})$"
     ),
 }
@@ -133,6 +133,11 @@ FULL_UNREAL_PATH = {
     "pattern": r"^/Script/",
     "minLength": 9,
 }
+INTERFACE_CLASS_PATH = {
+    "type": "string",
+    "pattern": r"^/[A-Za-z][A-Za-z0-9_]*/[^\s:]+\.[^\s/:.]+$",
+    "minLength": 5,
+}
 VECTOR = _array(
     {
         "type": "number",
@@ -232,6 +237,120 @@ OUTPUT_SCHEMA = {
     "additionalProperties": False,
 }
 
+CAPABILITIES_DATA = _object(
+    {
+        "api_version": {"type": "integer", "const": 2},
+        "engine_version": {"type": "string", "minLength": 1},
+        "scalar_kinds": _array({"type": "string"}),
+        "container_kinds": _array({"type": "string"}),
+        "node_families": _array({"type": "string"}),
+        "supports_k2_schema": {"type": "boolean"},
+        "supports_scs_operations": {"type": "boolean"},
+        "supports_compiler_tokens": {"type": "boolean"},
+        "has_k2_graphs": {"type": "boolean"},
+        "all_graphs_k2_schema": {"type": "boolean"},
+        "k2_schema": {"type": "boolean"},
+        "compiler_tokens": {"type": "boolean"},
+        "has_scs": {"type": "boolean"},
+        "scs_operations": {"type": "boolean"},
+    },
+    (
+        "api_version",
+        "engine_version",
+        "scalar_kinds",
+        "container_kinds",
+        "node_families",
+        "supports_k2_schema",
+        "supports_scs_operations",
+        "supports_compiler_tokens",
+        "has_k2_graphs",
+        "all_graphs_k2_schema",
+        "k2_schema",
+        "compiler_tokens",
+        "has_scs",
+        "scs_operations",
+    ),
+)
+BLUEPRINT_BRIEF_COUNTS = _object(
+    {
+        name: {"type": "integer", "minimum": 0}
+        for name in (
+            "variables",
+            "components",
+            "functions",
+            "macros",
+            "events",
+            "dispatchers",
+            "interfaces",
+            "graphs",
+            "nodes",
+        )
+    },
+    (
+        "variables",
+        "components",
+        "functions",
+        "macros",
+        "events",
+        "dispatchers",
+        "interfaces",
+        "graphs",
+        "nodes",
+    ),
+)
+BLUEPRINT_BRIEF_DATA = _object(
+    {
+        "asset_path": {"type": "string", "minLength": 1},
+        "blueprint_class_path": {"type": "string", "minLength": 1},
+        "parent_class_path": {"type": "string"},
+        "generated_class_path": {"type": "string"},
+        "skeleton_class_path": {"type": "string"},
+        "compile_status": {
+            "type": "string",
+            "enum": [
+                "Unknown",
+                "Dirty",
+                "Error",
+                "UpToDate",
+                "BeingCreated",
+                "UpToDateWithWarnings",
+            ],
+        },
+        "interfaces": _array({"type": "string", "minLength": 1}),
+        "top_level_components": _array({"type": "string", "minLength": 1}),
+        "graphs": _array({"type": "string", "minLength": 1}),
+        "counts": BLUEPRINT_BRIEF_COUNTS,
+        "capabilities": CAPABILITIES_DATA,
+    },
+    (
+        "asset_path",
+        "blueprint_class_path",
+        "parent_class_path",
+        "generated_class_path",
+        "skeleton_class_path",
+        "compile_status",
+        "interfaces",
+        "top_level_components",
+        "graphs",
+        "counts",
+        "capabilities",
+    ),
+)
+
+
+def _output_with_success_data(data_schema: dict) -> dict:
+    schema = deepcopy(OUTPUT_SCHEMA)
+    schema["allOf"] = [
+        {
+            "if": {
+                "properties": {"success": {"const": True}},
+                "required": ["success"],
+            },
+            "then": {"properties": {"data": deepcopy(data_schema)}},
+        }
+    ]
+    return schema
+
 
 def _unsupported_error(action: str) -> dict:
     return {
@@ -272,13 +391,18 @@ def _spec(
     supports_preview: bool,
     supports_undo: bool,
     requires_confirmation: bool,
+    success_data_schema: dict | None = None,
 ) -> dict:
     return {
         "title": action.replace("_", " ").title(),
         "description": description,
         "result_kind": "json",
         "input_schema": deepcopy(input_schema),
-        "output_schema": deepcopy(OUTPUT_SCHEMA),
+        "output_schema": (
+            _output_with_success_data(success_data_schema)
+            if success_data_schema is not None
+            else deepcopy(OUTPUT_SCHEMA)
+        ),
         "effect": effect,
         "risk": risk,
         "idempotent": idempotent,
@@ -293,7 +417,12 @@ def _spec(
 
 
 def _read(
-    action: str, description: str, input_schema: dict, example_params: dict
+    action: str,
+    description: str,
+    input_schema: dict,
+    example_params: dict,
+    *,
+    success_data_schema: dict | None = None,
 ) -> dict:
     return _spec(
         action,
@@ -306,6 +435,7 @@ def _read(
         supports_preview=False,
         supports_undo=False,
         requires_confirmation=False,
+        success_data_schema=success_data_schema,
     )
 
 
@@ -393,6 +523,39 @@ INSPECT_QUERY = _object(
     ("op",),
 )
 
+
+def _fallback_capable_target(
+    schema: dict,
+    id_field: str,
+    name_field: str,
+    owner_fields: tuple[str, ...] = (),
+) -> dict:
+    result = deepcopy(schema)
+    result["properties"]["allow_name_fallback"] = {
+        "type": "boolean",
+        "default": False,
+    }
+    result["properties"][name_field] = deepcopy(NAME)
+    for owner_field in owner_fields:
+        result["properties"][owner_field] = deepcopy(STABLE_ID)
+    result.setdefault("allOf", []).append(
+        {
+            "if": {
+                "properties": {id_field: {"pattern": r"^fallback:"}},
+                "required": [id_field],
+            },
+            "then": {
+                "properties": {"allow_name_fallback": {"const": True}},
+                "required": [
+                    "allow_name_fallback",
+                    name_field,
+                    *owner_fields,
+                ],
+            },
+        }
+    )
+    return result
+
 FUNCTION_PROPERTIES = {
     "asset_path": ASSET_PATH,
     "function_name": NAME,
@@ -422,6 +585,7 @@ BLUEPRINT2_ACTION_SPECS = {
         "Return a bounded orientation summary for one Blueprint.",
         _object({"asset_path": ASSET_PATH}, ("asset_path",)),
         {"asset_path": "/Game/BP_Player"},
+        success_data_schema=BLUEPRINT_BRIEF_DATA,
     ),
     "inspect_blueprint": _read(
         "inspect_blueprint",
@@ -451,9 +615,13 @@ BLUEPRINT2_ACTION_SPECS = {
     "rename_blueprint_function": _destructive(
         "rename_blueprint_function",
         "Rename a Blueprint function targeted by stable ID.",
-        _object(
-            {"asset_path": ASSET_PATH, "function_id": STABLE_ID, "new_name": NAME},
-            ("asset_path", "function_id", "new_name"),
+        _fallback_capable_target(
+            _object(
+                {"asset_path": ASSET_PATH, "function_id": STABLE_ID, "new_name": NAME},
+                ("asset_path", "function_id", "new_name"),
+            ),
+            "function_id",
+            "function_name",
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -464,29 +632,33 @@ BLUEPRINT2_ACTION_SPECS = {
     "set_blueprint_function_signature": _write(
         "set_blueprint_function_signature",
         "Replace the complete signature and metadata of a Blueprint function.",
-        _object(
-            {
-                "asset_path": ASSET_PATH,
-                "function_id": STABLE_ID,
-                "inputs": PARAMETERS,
-                "outputs": PARAMETERS,
-                "pure": {"type": "boolean"},
-                "const": {"type": "boolean"},
-                "access": {"type": "string", "enum": ["public", "protected", "private"]},
-                "category": {"type": "string"},
-                "description": {"type": "string"},
-            },
-            (
-                "asset_path",
-                "function_id",
-                "inputs",
-                "outputs",
-                "pure",
-                "const",
-                "access",
-                "category",
-                "description",
+        _fallback_capable_target(
+            _object(
+                {
+                    "asset_path": ASSET_PATH,
+                    "function_id": STABLE_ID,
+                    "inputs": PARAMETERS,
+                    "outputs": PARAMETERS,
+                    "pure": {"type": "boolean"},
+                    "const": {"type": "boolean"},
+                    "access": {"type": "string", "enum": ["public", "protected", "private"]},
+                    "category": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                (
+                    "asset_path",
+                    "function_id",
+                    "inputs",
+                    "outputs",
+                    "pure",
+                    "const",
+                    "access",
+                    "category",
+                    "description",
+                ),
             ),
+            "function_id",
+            "function_name",
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -504,9 +676,13 @@ BLUEPRINT2_ACTION_SPECS = {
     "delete_blueprint_function": _destructive(
         "delete_blueprint_function",
         "Delete a Blueprint function targeted by stable ID.",
-        _object(
-            {"asset_path": ASSET_PATH, "function_id": STABLE_ID},
-            ("asset_path", "function_id"),
+        _fallback_capable_target(
+            _object(
+                {"asset_path": ASSET_PATH, "function_id": STABLE_ID},
+                ("asset_path", "function_id"),
+            ),
+            "function_id",
+            "function_name",
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -536,9 +712,13 @@ BLUEPRINT2_ACTION_SPECS = {
     "delete_blueprint_macro": _destructive(
         "delete_blueprint_macro",
         "Delete a Blueprint macro targeted by stable ID.",
-        _object(
-            {"asset_path": ASSET_PATH, "macro_id": STABLE_ID},
-            ("asset_path", "macro_id"),
+        _fallback_capable_target(
+            _object(
+                {"asset_path": ASSET_PATH, "macro_id": STABLE_ID},
+                ("asset_path", "macro_id"),
+            ),
+            "macro_id",
+            "macro_name",
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -566,9 +746,14 @@ BLUEPRINT2_ACTION_SPECS = {
     "delete_custom_event": _destructive(
         "delete_custom_event",
         "Delete a custom event targeted by stable ID.",
-        _object(
-            {"asset_path": ASSET_PATH, "event_id": STABLE_ID},
-            ("asset_path", "event_id"),
+        _fallback_capable_target(
+            _object(
+                {"asset_path": ASSET_PATH, "event_id": STABLE_ID},
+                ("asset_path", "event_id"),
+            ),
+            "event_id",
+            "event_name",
+            ("owner_graph_id",),
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -596,9 +781,13 @@ BLUEPRINT2_ACTION_SPECS = {
     "remove_event_dispatcher": _destructive(
         "remove_event_dispatcher",
         "Remove an event dispatcher targeted by stable ID.",
-        _object(
-            {"asset_path": ASSET_PATH, "dispatcher_id": STABLE_ID},
-            ("asset_path", "dispatcher_id"),
+        _fallback_capable_target(
+            _object(
+                {"asset_path": ASSET_PATH, "dispatcher_id": STABLE_ID},
+                ("asset_path", "dispatcher_id"),
+            ),
+            "dispatcher_id",
+            "dispatcher_name",
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -609,7 +798,7 @@ BLUEPRINT2_ACTION_SPECS = {
         "add_blueprint_interface",
         "Add a Blueprint interface by full Unreal object path.",
         _object(
-            {"asset_path": ASSET_PATH, "interface_path": FULL_UNREAL_PATH},
+            {"asset_path": ASSET_PATH, "interface_path": INTERFACE_CLASS_PATH},
             ("asset_path", "interface_path"),
         ),
         {"asset_path": "/Game/BP_Player", "interface_path": "/Script/Game.PlayerInterface"},
@@ -705,9 +894,13 @@ BLUEPRINT2_ACTION_SPECS = {
     "rename_blueprint_variable": _destructive(
         "rename_blueprint_variable",
         "Rename a Blueprint variable targeted by stable ID.",
-        _object(
-            {"asset_path": ASSET_PATH, "variable_id": STABLE_ID, "new_name": NAME},
-            ("asset_path", "variable_id", "new_name"),
+        _fallback_capable_target(
+            _object(
+                {"asset_path": ASSET_PATH, "variable_id": STABLE_ID, "new_name": NAME},
+                ("asset_path", "variable_id", "new_name"),
+            ),
+            "variable_id",
+            "variable_name",
         ),
         {
             "asset_path": "/Game/BP_Player",
@@ -718,9 +911,13 @@ BLUEPRINT2_ACTION_SPECS = {
     "remove_blueprint_variable": _destructive(
         "remove_blueprint_variable",
         "Remove a Blueprint variable targeted by stable ID.",
-        _object(
-            {"asset_path": ASSET_PATH, "variable_id": STABLE_ID},
-            ("asset_path", "variable_id"),
+        _fallback_capable_target(
+            _object(
+                {"asset_path": ASSET_PATH, "variable_id": STABLE_ID},
+                ("asset_path", "variable_id"),
+            ),
+            "variable_id",
+            "variable_name",
         ),
         {
             "asset_path": "/Game/BP_Player",

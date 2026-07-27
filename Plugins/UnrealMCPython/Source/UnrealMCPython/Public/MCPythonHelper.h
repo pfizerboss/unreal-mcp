@@ -16,9 +16,25 @@ struct FMCPythonPinLinkInfo
 {
     GENERATED_BODY()
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString OwnerId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString TypePath;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString Name;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString GraphId;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphOwnerId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphName;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphTypePath;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString NodeId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString NodeOwnerId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString NodeTypePath;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString PinId;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
@@ -33,6 +49,10 @@ USTRUCT(BlueprintType)
 struct FMCPythonBlueprintPinInfo
 {
     GENERATED_BODY()
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString OwnerId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString TypePath;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString StableId;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
@@ -62,9 +82,19 @@ struct FMCPythonBlueprintNodeInfo
 {
     GENERATED_BODY()
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString OwnerId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString TypePath;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString StableId;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString GraphId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphOwnerId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphName;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphTypePath;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString NodeId;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
