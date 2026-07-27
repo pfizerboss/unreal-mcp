@@ -39,22 +39,16 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
     if (!Graph)
         return MakeJsonError(FString::Printf(TEXT("Graph '%s' not found in Blueprint."), *GraphName));
 
-    const FString GraphId = Graph->GraphGuid.IsValid()
-        ? UE::MCPython::Blueprint2::MakeTargetId(
-            UE::MCPython::Blueprint2::ETargetKind::Graph,
-            Graph->GraphGuid)
-        : FString();
+    const FString GraphId = UE::MCPython::Blueprint2::MakeGraphTargetId(
+        Blueprint, Graph);
     TArray<TSharedPtr<FJsonValue>> NodesArr;
     for (UEdGraphNode* Node : Graph->Nodes)
     {
         if (!Node) continue;
 
         TSharedPtr<FJsonObject> NodeObj = MakeShareable(new FJsonObject());
-        const FString NodeId = Node->NodeGuid.IsValid()
-            ? UE::MCPython::Blueprint2::MakeTargetId(
-                UE::MCPython::Blueprint2::ETargetKind::Node,
-                Node->NodeGuid)
-            : FString();
+        const FString NodeId = UE::MCPython::Blueprint2::MakeNodeTargetId(
+            Blueprint, Node);
         NodeObj->SetStringField(TEXT("stable_id"), NodeId);
         NodeObj->SetStringField(TEXT("node_id"), NodeId);
         NodeObj->SetStringField(TEXT("graph_id"), GraphId);
@@ -71,11 +65,8 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
         {
             if (!Pin || Pin->bHidden) continue;
             TSharedPtr<FJsonObject> PinObj = MakeShareable(new FJsonObject());
-            const FString PinId = Pin->PinId.IsValid()
-                ? UE::MCPython::Blueprint2::MakeTargetId(
-                    UE::MCPython::Blueprint2::ETargetKind::Pin,
-                    Pin->PinId)
-                : FString();
+            const FString PinId = UE::MCPython::Blueprint2::MakePinTargetId(
+                Blueprint, Pin);
             PinObj->SetStringField(TEXT("stable_id"), PinId);
             PinObj->SetStringField(TEXT("pin_id"), PinId);
             PinObj->SetStringField(TEXT("graph_id"), GraphId);
@@ -105,25 +96,16 @@ FString UMCPythonHelper::GetBlueprintGraphInfo(UBlueprint* Blueprint, const FStr
                     UEdGraph* LinkedGraph = LinkedNode->GetGraph();
                     LinkObj->SetStringField(
                         TEXT("graph_id"),
-                        LinkedGraph && LinkedGraph->GraphGuid.IsValid()
-                            ? UE::MCPython::Blueprint2::MakeTargetId(
-                                UE::MCPython::Blueprint2::ETargetKind::Graph,
-                                LinkedGraph->GraphGuid)
-                            : FString());
+                        UE::MCPython::Blueprint2::MakeGraphTargetId(
+                            Blueprint, LinkedGraph));
                     LinkObj->SetStringField(
                         TEXT("node_id"),
-                        LinkedNode->NodeGuid.IsValid()
-                            ? UE::MCPython::Blueprint2::MakeTargetId(
-                                UE::MCPython::Blueprint2::ETargetKind::Node,
-                                LinkedNode->NodeGuid)
-                            : FString());
+                        UE::MCPython::Blueprint2::MakeNodeTargetId(
+                            Blueprint, LinkedNode));
                     LinkObj->SetStringField(
                         TEXT("pin_id"),
-                        Linked->PinId.IsValid()
-                            ? UE::MCPython::Blueprint2::MakeTargetId(
-                                UE::MCPython::Blueprint2::ETargetKind::Pin,
-                                Linked->PinId)
-                            : FString());
+                        UE::MCPython::Blueprint2::MakePinTargetId(
+                            Blueprint, Linked));
                     LinkObj->SetStringField(TEXT("node_name"), LinkedNode->GetName());
                     LinkObj->SetStringField(TEXT("pin_name"), Linked->GetName());
                     LinksArr.Add(MakeShareable(new FJsonValueObject(LinkObj)));

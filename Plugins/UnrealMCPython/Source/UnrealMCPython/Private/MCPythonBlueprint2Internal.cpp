@@ -349,6 +349,63 @@ FString MakeQualifiedFallbackId(
         *Sha1(Owner + TEXT("\n") + Name + TEXT("\n") + TypePath));
 }
 
+FString MakeGraphTargetId(UBlueprint* Blueprint, const UEdGraph* Graph)
+{
+    if (!Graph)
+    {
+        return {};
+    }
+    if (Graph->GraphGuid.IsValid())
+    {
+        return MakeTargetId(ETargetKind::Graph, Graph->GraphGuid);
+    }
+    const FString SchemaClassPath = Graph->GetSchema()
+        ? Graph->GetSchema()->GetClass()->GetPathName()
+        : FString();
+    return MakeQualifiedFallbackId(
+        ETargetKind::Graph,
+        Blueprint ? Blueprint->GetPathName() : FString(),
+        Graph->GetName(),
+        SchemaClassPath);
+}
+
+FString MakeNodeTargetId(UBlueprint* Blueprint, const UEdGraphNode* Node)
+{
+    if (!Node)
+    {
+        return {};
+    }
+    if (Node->NodeGuid.IsValid())
+    {
+        return MakeTargetId(ETargetKind::Node, Node->NodeGuid);
+    }
+    return MakeQualifiedFallbackId(
+        ETargetKind::Node,
+        MakeGraphTargetId(Blueprint, Node->GetGraph()),
+        Node->GetName(),
+        Node->GetClass()->GetPathName());
+}
+
+FString MakePinTargetId(UBlueprint* Blueprint, const UEdGraphPin* Pin)
+{
+    if (!Pin)
+    {
+        return {};
+    }
+    if (Pin->PinId.IsValid())
+    {
+        return MakeTargetId(ETargetKind::Pin, Pin->PinId);
+    }
+    const FString PinTypePath = Pin->PinType.PinSubCategoryObject.IsValid()
+        ? Pin->PinType.PinSubCategoryObject->GetPathName()
+        : Pin->PinType.PinCategory.ToString();
+    return MakeQualifiedFallbackId(
+        ETargetKind::Pin,
+        MakeNodeTargetId(Blueprint, Pin->GetOwningNode()),
+        Pin->GetName(),
+        PinTypePath);
+}
+
 bool ParseTargetId(
     const FString& Id,
     ETargetKind ExpectedKind,

@@ -138,21 +138,16 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
                     if (!Node) continue;
                     FMCPythonBlueprintNodeInfo NodeInfo;
                     UEdGraph* Graph = Node->GetGraph();
-                    if (Graph && Graph->GraphGuid.IsValid())
-                    {
-                        NodeInfo.GraphId = UE::MCPython::Blueprint2::MakeTargetId(
-                            UE::MCPython::Blueprint2::ETargetKind::Graph,
-                            Graph->GraphGuid);
-                    }
-                    if (Node->NodeGuid.IsValid())
-                    {
-                        NodeInfo.StableId = UE::MCPython::Blueprint2::MakeTargetId(
-                            UE::MCPython::Blueprint2::ETargetKind::Node,
-                            Node->NodeGuid);
-                        NodeInfo.NodeId = NodeInfo.StableId;
-                    }
+                    UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForNode(Node);
+                    NodeInfo.GraphId = UE::MCPython::Blueprint2::MakeGraphTargetId(
+                        Blueprint, Graph);
+                    NodeInfo.StableId = UE::MCPython::Blueprint2::MakeNodeTargetId(
+                        Blueprint, Node);
+                    NodeInfo.NodeId = NodeInfo.StableId;
                     NodeInfo.NodeName = Node->GetName();
                     NodeInfo.NodeTitle = Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
+                    NodeInfo.NodeClass = Node->GetClass()->GetName();
+                    NodeInfo.ObjectPath = Node->GetPathName();
                     NodeInfo.NodeComment = Node->NodeComment;
                     for (UEdGraphPin* Pin : Node->Pins)
                     {
@@ -160,13 +155,9 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
                         FMCPythonBlueprintPinInfo PinInfo;
                         PinInfo.GraphId = NodeInfo.GraphId;
                         PinInfo.NodeId = NodeInfo.StableId;
-                        if (Pin->PinId.IsValid())
-                        {
-                            PinInfo.StableId = UE::MCPython::Blueprint2::MakeTargetId(
-                                UE::MCPython::Blueprint2::ETargetKind::Pin,
-                                Pin->PinId);
-                            PinInfo.PinId = PinInfo.StableId;
-                        }
+                        PinInfo.StableId = UE::MCPython::Blueprint2::MakePinTargetId(
+                            Blueprint, Pin);
+                        PinInfo.PinId = PinInfo.StableId;
                         FString Friendly = Pin->PinFriendlyName.ToString();
                         PinInfo.PinName = Pin->GetName();
                         PinInfo.FriendlyName = Friendly;
@@ -184,24 +175,12 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
                                 FMCPythonPinLinkInfo LinkInfo;
                                 UEdGraphNode* LinkedNode = LinkedPin->GetOwningNode();
                                 UEdGraph* LinkedGraph = LinkedNode->GetGraph();
-                                if (LinkedGraph && LinkedGraph->GraphGuid.IsValid())
-                                {
-                                    LinkInfo.GraphId = UE::MCPython::Blueprint2::MakeTargetId(
-                                        UE::MCPython::Blueprint2::ETargetKind::Graph,
-                                        LinkedGraph->GraphGuid);
-                                }
-                                if (LinkedNode->NodeGuid.IsValid())
-                                {
-                                    LinkInfo.NodeId = UE::MCPython::Blueprint2::MakeTargetId(
-                                        UE::MCPython::Blueprint2::ETargetKind::Node,
-                                        LinkedNode->NodeGuid);
-                                }
-                                if (LinkedPin->PinId.IsValid())
-                                {
-                                    LinkInfo.PinId = UE::MCPython::Blueprint2::MakeTargetId(
-                                        UE::MCPython::Blueprint2::ETargetKind::Pin,
-                                        LinkedPin->PinId);
-                                }
+                                LinkInfo.GraphId = UE::MCPython::Blueprint2::MakeGraphTargetId(
+                                    Blueprint, LinkedGraph);
+                                LinkInfo.NodeId = UE::MCPython::Blueprint2::MakeNodeTargetId(
+                                    Blueprint, LinkedNode);
+                                LinkInfo.PinId = UE::MCPython::Blueprint2::MakePinTargetId(
+                                    Blueprint, LinkedPin);
                                 LinkInfo.NodeName = LinkedNode->GetName();
                                 LinkInfo.NodeTitle = LinkedNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString();
                                 FString LinkedFriendly = LinkedPin->PinFriendlyName.ToString();

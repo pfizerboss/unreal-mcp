@@ -73,6 +73,9 @@ FString MakeQualifiedFallbackId(
     const FString& Owner,
     const FString& Name,
     const FString& TypePath);
+FString MakeGraphTargetId(UBlueprint* Blueprint, const UEdGraph* Graph);
+FString MakeNodeTargetId(UBlueprint* Blueprint, const UEdGraphNode* Node);
+FString MakePinTargetId(UBlueprint* Blueprint, const UEdGraphPin* Pin);
 bool ParseTargetId(
     const FString& Id,
     ETargetKind ExpectedKind,
@@ -107,4 +110,3 @@ TSharedRef<FJsonObject> MakeFailure(
 FString SerializeResult(const TSharedRef<FJsonObject>& Result);
 TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint);
 }
-

@@ -72,6 +72,10 @@ struct FMCPythonBlueprintNodeInfo
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString NodeTitle;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString NodeClass;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString ObjectPath;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString NodeComment;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     TArray<FMCPythonBlueprintPinInfo> Pins;

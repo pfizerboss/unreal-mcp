@@ -29,6 +29,7 @@ CORE_HEADER = PRIVATE / "MCPythonBlueprint2Internal.h"
 CORE_SOURCE = PRIVATE / "MCPythonBlueprint2Internal.cpp"
 SHARED_HEADER = PRIVATE / "MCPythonHelperInternal.h"
 WORKFLOW_SOURCE = PRIVATE / "MCPythonHelper_Workflow.cpp"
+HELPER_SOURCE = PRIVATE / "MCPythonHelper.cpp"
 HELPER_HEADER = (
     ROOT
     / "Plugins"
@@ -40,6 +41,30 @@ HELPER_HEADER = (
 )
 INSPECTION_SOURCE = PRIVATE / "MCPythonHelper_BlueprintInspection.cpp"
 BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
+EDITOR_TESTS = (
+    ROOT
+    / "Plugins"
+    / "UnrealMCPython"
+    / "Content"
+    / "Python"
+    / "UnrealMCPython"
+    / "tests"
+)
+EDITOR_TEST_BASE = EDITOR_TESTS / "base.py"
+INSPECTION_EDITOR_TEST = EDITOR_TESTS / "test_blueprint2_inspection.py"
+
+
+def _load_blueprint_actions(monkeypatch, helper):
+    monkeypatch.setitem(
+        sys.modules, "unreal", SimpleNamespace(MCPythonHelper=helper)
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_blueprint_actions_test", BLUEPRINT_ACTIONS
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _load(monkeypatch, asset=None, helper_result='{"success":true}'):
@@ -251,6 +276,140 @@ def test_cpp_core_uses_persisted_guids_bounded_owners_and_guarded_undo():
     assert "bool UE::MCPython::HasActiveWorkflowTransaction()" in workflow
 
 
+def test_graph_node_and_pin_ids_share_deterministic_fallback_helpers():
+    header = CORE_HEADER.read_text(encoding="utf-8")
+    core = CORE_SOURCE.read_text(encoding="utf-8")
+    selected = HELPER_SOURCE.read_text(encoding="utf-8")
+    inspection = INSPECTION_SOURCE.read_text(encoding="utf-8")
+
+    for declaration in (
+        "FString MakeGraphTargetId(UBlueprint* Blueprint, const UEdGraph* Graph);",
+        "FString MakeNodeTargetId(UBlueprint* Blueprint, const UEdGraphNode* Node);",
+        "FString MakePinTargetId(UBlueprint* Blueprint, const UEdGraphPin* Pin);",
+    ):
+        assert declaration in header
+
+    for token in (
+        "Graph->GraphGuid.IsValid()",
+        "Node->NodeGuid.IsValid()",
+        "Pin->PinId.IsValid()",
+        "MakeTargetId(ETargetKind::Graph, Graph->GraphGuid)",
+        "MakeTargetId(ETargetKind::Node, Node->NodeGuid)",
+        "MakeTargetId(ETargetKind::Pin, Pin->PinId)",
+        "Blueprint->GetPathName()",
+        "Graph->GetName()",
+        "Graph->GetSchema()->GetClass()->GetPathName()",
+        "MakeGraphTargetId(Blueprint, Node->GetGraph())",
+        "Node->GetClass()->GetPathName()",
+        "MakeNodeTargetId(Blueprint, Pin->GetOwningNode())",
+        "Pin->PinType.PinSubCategoryObject->GetPathName()",
+        "Pin->PinType.PinCategory.ToString()",
+        "MakeQualifiedFallbackId(",
+    ):
+        assert token in core
+
+    for source in (selected, inspection):
+        assert "MakeGraphTargetId(" in source
+        assert "MakeNodeTargetId(" in source
+        assert "MakePinTargetId(" in source
+
+
+def test_selected_node_wrapper_does_not_join_duplicate_names(monkeypatch):
+    calls = []
+    infos = [
+        SimpleNamespace(
+            node_name="DuplicateName",
+            node_class="K2Node_CustomEvent",
+            object_path="/Game/A.A:EventGraph.DuplicateName",
+            stable_id="node:aaaaaaaa",
+            graph_id="graph:11111111",
+        ),
+        SimpleNamespace(
+            node_name="DuplicateName",
+            node_class="K2Node_CallFunction",
+            object_path="/Game/B.B:OtherGraph.DuplicateName",
+            stable_id="node:bbbbbbbb",
+            graph_id="graph:22222222",
+        ),
+    ]
+
+    class Helper:
+        @staticmethod
+        def get_selected_blueprint_node_infos():
+            calls.append("infos")
+            return infos
+
+        @staticmethod
+        def get_selected_blueprint_nodes():
+            raise AssertionError("raw selected nodes must not be queried")
+
+    module = _load_blueprint_actions(monkeypatch, Helper)
+    result = json.loads(module.ue_get_selected_bp_nodes())
+
+    assert result == {
+        "success": True,
+        "selected_nodes_count": 2,
+        "selected_nodes": [
+            {
+                "name": "DuplicateName",
+                "class": "K2Node_CustomEvent",
+                "object_path": "/Game/A.A:EventGraph.DuplicateName",
+                "stable_id": "node:aaaaaaaa",
+                "graph_id": "graph:11111111",
+            },
+            {
+                "name": "DuplicateName",
+                "class": "K2Node_CallFunction",
+                "object_path": "/Game/B.B:OtherGraph.DuplicateName",
+                "stable_id": "node:bbbbbbbb",
+                "graph_id": "graph:22222222",
+            },
+        ],
+    }
+    assert calls == ["infos"]
+
+
+def test_editor_brief_fixture_has_exact_counts_and_strict_cleanup_contract():
+    base = EDITOR_TEST_BASE.read_text(encoding="utf-8")
+    inspection_test = INSPECTION_EDITOR_TEST.read_text(encoding="utf-8")
+
+    for fixture_name in (
+        "BriefEnabled",
+        "BriefLight",
+        "BriefFunction",
+        "BriefCustomEvent",
+        "BriefInterfaceFunction",
+        "BlueprintMacroFactory",
+        "BlueprintInterfaceFactory",
+    ):
+        assert fixture_name in inspection_test
+    for assertion in (
+        '"variables": 1',
+        '"components": 2',
+        '"functions": 2',
+        '"macros": 0',
+        '"events": 1',
+        '"dispatchers": 0',
+        '"interfaces": 0',
+        '"graphs": 3',
+        '"nodes": 6',
+        'data["capabilities"]["k2_schema"]',
+        'data["capabilities"]["has_scs"]',
+        "self.assertSuccess(created)",
+        "def tearDownClass(cls):",
+        "unreal.EditorAssetLibrary.list_assets(",
+    ):
+        assert assertion in inspection_test
+    assert 'self.skipTest(f"Widget Blueprint fixture unavailable' not in inspection_test
+
+    delete_asset = base.split("def delete_asset", 1)[1].split(
+        "def delete_actor_by_label", 1
+    )[0]
+    assert "self.assertTrue(deleted" in delete_asset
+    assert "self.assertFalse(" in delete_asset
+    assert "except Exception" not in delete_asset
+
+
 def test_compact_inspection_exposes_runtime_helpers_and_stable_selected_ids():
     header = HELPER_HEADER.read_text(encoding="utf-8")
     inspection = INSPECTION_SOURCE.read_text(encoding="utf-8")
@@ -261,16 +420,17 @@ def test_compact_inspection_exposes_runtime_helpers_and_stable_selected_ids():
         "FString NodeId;",
         "FString PinId;",
         "FString StableId;",
+        "FString NodeClass;",
+        "FString ObjectPath;",
         "static FString GetBlueprintBrief(UBlueprint* Blueprint);",
         "static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);",
     ):
         assert declaration in header
     for token in (
         "BuildCapabilities(Blueprint)",
-        "MakeTargetId(",
-        "ETargetKind::Graph",
-        "ETargetKind::Node",
-        "ETargetKind::Pin",
+        "MakeGraphTargetId(",
+        "MakeNodeTargetId(",
+        "MakePinTargetId(",
         "UK2Node_CustomEvent",
         "UEdGraphSchema_K2::PC_MCDelegate",
     ):

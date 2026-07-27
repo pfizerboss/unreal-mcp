@@ -26,21 +26,17 @@ def _load_asset(asset_path, expected_class=None):
 def ue_get_selected_bp_nodes() -> str:
     """Returns information about currently selected blueprint nodes in the editor."""
     try:
-        nodes = unreal.MCPythonHelper.get_selected_blueprint_nodes()
-        stable_infos = unreal.MCPythonHelper.get_selected_blueprint_node_infos()
-        stable_by_name = {info.node_name: info for info in stable_infos}
-        node_infos = []
-        for node in nodes:
-            node_name = node.get_name() if hasattr(node, 'get_name') else str(node)
-            stable = stable_by_name.get(node_name)
-            node_info = {
-                "name": node_name,
-                "class": node.get_class().get_name() if hasattr(node, 'get_class') else str(type(node)),
-                "object_path": node.get_path_name() if hasattr(node, 'get_path_name') else None,
-                "stable_id": stable.stable_id if stable else "",
-                "graph_id": stable.graph_id if stable else "",
+        reflected_infos = unreal.MCPythonHelper.get_selected_blueprint_node_infos()
+        node_infos = [
+            {
+                "name": info.node_name,
+                "class": info.node_class,
+                "object_path": info.object_path,
+                "stable_id": info.stable_id,
+                "graph_id": info.graph_id,
             }
-            node_infos.append(node_info)
+            for info in reflected_infos
+        ]
         return json.dumps({
             "success": True,
             "selected_nodes_count": len(node_infos),

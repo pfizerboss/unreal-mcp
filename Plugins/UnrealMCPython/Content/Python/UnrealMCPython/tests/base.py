@@ -17,11 +17,14 @@ class MCPTestCase(unittest.TestCase):
         self.assertTrue(result.get("success"), msg or f"Expected success=True: {result}")
 
     def delete_asset(self, path):
-        try:
-            if unreal.EditorAssetLibrary.does_asset_exist(path):
-                unreal.EditorAssetLibrary.delete_asset(path)
-        except Exception:
-            pass
+        if not unreal.EditorAssetLibrary.does_asset_exist(path):
+            return
+        deleted = unreal.EditorAssetLibrary.delete_asset(path)
+        self.assertTrue(deleted, f"Failed to delete test asset: {path}")
+        self.assertFalse(
+            unreal.EditorAssetLibrary.does_asset_exist(path),
+            f"Test asset still exists after deletion: {path}",
+        )
 
     def delete_actor_by_label(self, label):
         try:
