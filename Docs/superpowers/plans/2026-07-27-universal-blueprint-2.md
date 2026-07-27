@@ -31,8 +31,8 @@ those pre-existing actions. New actions reject an unstable fallback unless
 `allow_name_fallback=true` and the request also supplies owner, name, and type
 constraints that resolve exactly one object.
 
-The release adds 29 Blueprint actions, taking the Blueprint domain from 18 to
-47 actions and the complete catalog from 263 to 290 actions after the two
+The release adds 29 Blueprint actions, taking the Blueprint domain from 19 to
+48 actions and the complete catalog from 263 to 290 actions after the two
 workflow placeholders are removed.
 
 ## Verified Unreal API baseline
@@ -562,7 +562,7 @@ def test_blueprint2_action_set_and_total_are_exact():
     registry = build_registry()
     assert NEW_BLUEPRINT2_ACTIONS <= set(catalog["blueprint"])
     assert set(catalog["blueprint"]) == set(registry["blueprint"])
-    assert len(catalog["blueprint"]) == 47
+    assert len(catalog["blueprint"]) == 48
     assert sum(map(len, catalog.values())) == 290
 ```
 
@@ -1922,7 +1922,7 @@ def _referenced(domain: str) -> set[str]:
     return set(re.findall(r"ue_(\w+)", source))
 ```
 
-Add a test that all 47 Blueprint actions are referenced and none are added to
+Add a test that all 48 Blueprint actions are referenced and none are added to
 `KNOWN_UNTESTED`.
 
 - [ ] **Step 2: Assert workflow policy for every Blueprint mutation**
