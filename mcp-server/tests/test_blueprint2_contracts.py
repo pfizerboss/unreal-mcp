@@ -470,7 +470,7 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
     assert module_spec is not None and module_spec.loader is not None
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
-    for action in NEW_BLUEPRINT2_ACTIONS:
+    for action in NEW_BLUEPRINT2_ACTIONS - {"get_blueprint_brief"}:
         result = asyncio.run(getattr(module, f"ue_{action}")())
         payload = json.loads(result)
         ToolResult.model_validate(payload)

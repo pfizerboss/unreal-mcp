@@ -29,6 +29,17 @@ CORE_HEADER = PRIVATE / "MCPythonBlueprint2Internal.h"
 CORE_SOURCE = PRIVATE / "MCPythonBlueprint2Internal.cpp"
 SHARED_HEADER = PRIVATE / "MCPythonHelperInternal.h"
 WORKFLOW_SOURCE = PRIVATE / "MCPythonHelper_Workflow.cpp"
+HELPER_HEADER = (
+    ROOT
+    / "Plugins"
+    / "UnrealMCPython"
+    / "Source"
+    / "UnrealMCPython"
+    / "Public"
+    / "MCPythonHelper.h"
+)
+INSPECTION_SOURCE = PRIVATE / "MCPythonHelper_BlueprintInspection.cpp"
+BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
 
 
 def _load(monkeypatch, asset=None, helper_result='{"success":true}'):
@@ -49,6 +60,11 @@ def _load(monkeypatch, asset=None, helper_result='{"success":true}'):
             return loaded
 
     class Helper:
+        @staticmethod
+        def get_blueprint_brief(blueprint):
+            calls.append(("asset_helper_unary", blueprint))
+            return helper_result
+
         @staticmethod
         def inspect_blueprint_v2(blueprint, request_json):
             calls.append(("asset_helper", blueprint, request_json))
@@ -98,6 +114,19 @@ def test_call_asset_helper_copies_request_and_passes_compact_unicode_json(monkey
             loaded,
             '{"query":"café","nested":{"value":1}}',
         ),
+    ]
+
+
+def test_call_asset_helper_without_request_uses_unary_reflected_signature(monkeypatch):
+    passthrough = '{"success":true,"data":{"counts":{}}}'
+    module, calls, loaded, _ = _load(monkeypatch, helper_result=passthrough)
+
+    result = module.call_asset_helper("get_blueprint_brief", "/Game/BP.BP")
+
+    assert result == passthrough
+    assert calls == [
+        ("load", "/Game/BP.BP"),
+        ("asset_helper_unary", loaded),
     ]
 
 
@@ -221,3 +250,31 @@ def test_cpp_core_uses_persisted_guids_bounded_owners_and_guarded_undo():
     assert "const FGuid& UE::MCPython::GetEditorSessionId()" in workflow
     assert "bool UE::MCPython::HasActiveWorkflowTransaction()" in workflow
 
+
+def test_compact_inspection_exposes_runtime_helpers_and_stable_selected_ids():
+    header = HELPER_HEADER.read_text(encoding="utf-8")
+    inspection = INSPECTION_SOURCE.read_text(encoding="utf-8")
+    actions = BLUEPRINT_ACTIONS.read_text(encoding="utf-8")
+
+    for declaration in (
+        "FString GraphId;",
+        "FString NodeId;",
+        "FString PinId;",
+        "FString StableId;",
+        "static FString GetBlueprintBrief(UBlueprint* Blueprint);",
+        "static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);",
+    ):
+        assert declaration in header
+    for token in (
+        "BuildCapabilities(Blueprint)",
+        "MakeTargetId(",
+        "ETargetKind::Graph",
+        "ETargetKind::Node",
+        "ETargetKind::Pin",
+        "UK2Node_CustomEvent",
+        "UEdGraphSchema_K2::PC_MCDelegate",
+    ):
+        assert token in inspection
+    assert '"stable_id"' in actions
+    assert '"graph_id"' in actions
+    assert 'return blueprint2.call_asset_helper("get_blueprint_brief", asset_path)' in actions

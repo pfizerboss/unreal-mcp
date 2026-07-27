@@ -105,13 +105,23 @@ def test_project_info_reports_concrete_availability_flags(monkeypatch):
             checked_plugins.append(name)
             return name in {"EnhancedInput", "PythonScriptPlugin"}
 
+    class MCPythonHelper:
+        @staticmethod
+        def get_blueprint2_capabilities(_blueprint):
+            return json.dumps({
+                "api_version": 2,
+                "engine_version": "5.6.0",
+                "k2_schema": False,
+                "has_scs": False,
+            })
+
     fake_unreal = SimpleNamespace(
         PluginBlueprintLibrary=PluginBlueprintLibrary,
         InputAction=object(),
         InputMappingContext=object(),
         WidgetBlueprint=object(),
         PythonScriptLibrary=object(),
-        MCPythonHelper=object(),
+        MCPythonHelper=MCPythonHelper,
         SystemLibrary=SimpleNamespace(
             get_game_name=lambda: "TestGame",
             get_engine_version=lambda: "5.6.0",
@@ -140,6 +150,12 @@ def test_project_info_reports_concrete_availability_flags(monkeypatch):
 
     assert result["project_name"] == "TestGame"
     assert result["engine_version"] == "5.6.0"
+    assert result["blueprint2"] == {
+        "api_version": 2,
+        "engine_version": "5.6.0",
+        "k2_schema": False,
+        "has_scs": False,
+    }
     assert result["availability"] == {
         "enhanced_input": True,
         "umg": True,
@@ -147,3 +163,41 @@ def test_project_info_reports_concrete_availability_flags(monkeypatch):
         "live_coding": True,
     }
     assert {"EnhancedInput", "PythonScriptPlugin"}.issubset(checked_plugins)
+
+
+def test_project_info_reports_malformed_blueprint2_capabilities(monkeypatch):
+    fake_unreal = SimpleNamespace(
+        PluginBlueprintLibrary=SimpleNamespace(
+            is_plugin_enabled=lambda _name: False
+        ),
+        MCPythonHelper=SimpleNamespace(
+            get_blueprint2_capabilities=lambda _blueprint: "not-json"
+        ),
+        SystemLibrary=SimpleNamespace(
+            get_game_name=lambda: "TestGame",
+            get_engine_version=lambda: "5.7.0",
+        ),
+        Paths=SimpleNamespace(
+            project_dir=lambda: "/Project/",
+            project_content_dir=lambda: "/Project/Content/",
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
+    action_file = (
+        Path(__file__).parents[2]
+        / "Plugins"
+        / "UnrealMCPython"
+        / "Content"
+        / "Python"
+        / "UnrealMCPython"
+        / "util_actions.py"
+    )
+    spec = importlib.util.spec_from_file_location("_test_bad_util_actions", action_file)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    result = json.loads(module.ue_get_project_info())
+
+    assert result["success"] is False
+    assert "traceback" in result

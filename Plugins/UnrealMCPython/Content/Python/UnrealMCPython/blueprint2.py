@@ -55,12 +55,13 @@ def call_asset_helper(
             "Provide the full object path of an existing Blueprint asset.",
             {"asset_path": asset_path},
         )
+    helper = getattr(unreal.MCPythonHelper, helper_name)
+    if request is None:
+        return helper(blueprint)
     payload = json.dumps(
-        deepcopy(request) if request is not None else {},
-        separators=(",", ":"),
-        ensure_ascii=False,
+        deepcopy(request), separators=(",", ":"), ensure_ascii=False
     )
-    return getattr(unreal.MCPythonHelper, helper_name)(blueprint, payload)
+    return helper(blueprint, payload)
 
 
 def call_json_helper(helper_name: str, request: dict) -> str:
@@ -87,4 +88,3 @@ def target_request(
         "name": name,
         "type_path": type_path,
     }
-

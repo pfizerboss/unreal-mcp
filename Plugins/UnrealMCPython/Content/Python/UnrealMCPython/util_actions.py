@@ -303,12 +303,16 @@ def ue_get_project_info() -> str:
         python_plugin = _is_plugin_enabled("PythonScriptPlugin") or hasattr(
             unreal, "PythonScriptLibrary"
         )
+        blueprint2 = json.loads(
+            unreal.MCPythonHelper.get_blueprint2_capabilities(None)
+        )
         return json.dumps({
             "success": True,
             "project_name": unreal.SystemLibrary.get_game_name(),
             "project_dir": unreal.Paths.project_dir(),
             "content_dir": unreal.Paths.project_content_dir(),
             "engine_version": unreal.SystemLibrary.get_engine_version(),
+            "blueprint2": blueprint2,
             "availability": {
                 "enhanced_input": enhanced_input,
                 "umg": umg,

@@ -5,7 +5,6 @@ import json
 import traceback
 from collections import deque
 
-
 def _load_asset(asset_path, expected_class=None):
     """Load an asset and optionally verify its class. Returns (asset, error_json_str)."""
     asset = unreal.EditorAssetLibrary.load_asset(asset_path)
@@ -28,12 +27,18 @@ def ue_get_selected_bp_nodes() -> str:
     """Returns information about currently selected blueprint nodes in the editor."""
     try:
         nodes = unreal.MCPythonHelper.get_selected_blueprint_nodes()
+        stable_infos = unreal.MCPythonHelper.get_selected_blueprint_node_infos()
+        stable_by_name = {info.node_name: info for info in stable_infos}
         node_infos = []
         for node in nodes:
+            node_name = node.get_name() if hasattr(node, 'get_name') else str(node)
+            stable = stable_by_name.get(node_name)
             node_info = {
-                "name": node.get_name() if hasattr(node, 'get_name') else str(node),
+                "name": node_name,
                 "class": node.get_class().get_name() if hasattr(node, 'get_class') else str(type(node)),
-                "object_path": node.get_path_name() if hasattr(node, 'get_path_name') else None
+                "object_path": node.get_path_name() if hasattr(node, 'get_path_name') else None,
+                "stable_id": stable.stable_id if stable else "",
+                "graph_id": stable.graph_id if stable else "",
             }
             node_infos.append(node_info)
         return json.dumps({
@@ -55,7 +60,11 @@ def ue_get_selected_bp_node_infos() -> str:
             name_to_id[n.node_name] = i
 
         def link_to_dict(link):
-            d = {}
+            d = {
+                "graph_id": link.graph_id,
+                "node_id": link.node_id,
+                "pin_id": link.pin_id,
+            }
             if link.node_name in name_to_id:
                 d["node"] = name_to_id[link.node_name]
             else:
@@ -66,7 +75,14 @@ def ue_get_selected_bp_node_infos() -> str:
 
         def pin_to_dict(pin):
             name = pin.friendly_name if pin.friendly_name else pin.pin_name
-            d = {"name": name, "dir": pin.direction}
+            d = {
+                "name": name,
+                "dir": pin.direction,
+                "stable_id": pin.stable_id,
+                "pin_id": pin.pin_id,
+                "graph_id": pin.graph_id,
+                "node_id": pin.node_id,
+            }
             ptype = pin.pin_type
             if pin.pin_sub_type:
                 ptype += ":" + pin.pin_sub_type
@@ -79,7 +95,12 @@ def ue_get_selected_bp_node_infos() -> str:
             return d
 
         def node_to_dict(node, idx):
-            d = {"id": idx, "title": node.node_title}
+            d = {
+                "id": idx,
+                "stable_id": node.stable_id,
+                "graph_id": node.graph_id,
+                "title": node.node_title,
+            }
             if node.node_comment:
                 d["comment"] = node.node_comment
             d["pins"] = [pin_to_dict(p) for p in node.pins]
@@ -543,7 +564,9 @@ def _blueprint2_unsupported(action: str) -> str:
 
 async def ue_get_blueprint_brief(asset_path: str = None) -> str:
     """Returns a bounded orientation summary for one Blueprint."""
-    return _blueprint2_unsupported("get_blueprint_brief")
+    from UnrealMCPython import blueprint2
+
+    return blueprint2.call_asset_helper("get_blueprint_brief", asset_path)
 
 
 async def ue_inspect_blueprint(asset_path: str = None, queries: list = None,

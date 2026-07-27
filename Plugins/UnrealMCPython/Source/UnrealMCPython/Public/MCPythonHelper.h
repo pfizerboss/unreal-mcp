@@ -16,6 +16,12 @@ struct FMCPythonPinLinkInfo
 {
     GENERATED_BODY()
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString NodeId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString PinId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString NodeName;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString NodeTitle;
@@ -27,6 +33,14 @@ USTRUCT(BlueprintType)
 struct FMCPythonBlueprintPinInfo
 {
     GENERATED_BODY()
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString StableId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString NodeId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString PinId;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString PinName;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
@@ -47,6 +61,12 @@ USTRUCT(BlueprintType)
 struct FMCPythonBlueprintNodeInfo
 {
     GENERATED_BODY()
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString StableId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString GraphId;
+    UPROPERTY(BlueprintReadOnly, Category="MCPython")
+    FString NodeId;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
     FString NodeName;
     UPROPERTY(BlueprintReadOnly, Category="MCPython")
@@ -139,6 +159,14 @@ public:
     /** List all variables defined in a Blueprint */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString ListBlueprintVariables(UBlueprint* Blueprint);
+
+    /** Return a compact, bounded orientation summary for a Blueprint asset. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString GetBlueprintBrief(UBlueprint* Blueprint);
+
+    /** Return Blueprint 2 runtime or asset-specific capability data. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);
 
     /** Add a single node to a Blueprint graph from JSON description */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
