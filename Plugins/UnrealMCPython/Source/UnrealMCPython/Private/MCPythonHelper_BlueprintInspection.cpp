@@ -892,11 +892,29 @@ TArray<TSharedPtr<FJsonValue>> SerializeUserPins(
         }
         const TSharedRef<FJsonObject> Parameter = MakeShared<FJsonObject>();
         Parameter->SetStringField(TEXT("name"), Pin->PinName.ToString());
-        Parameter->SetObjectField(TEXT("type"), PinTypeSummary(Pin->PinType));
-        SetNullableString(
-            Parameter,
-            TEXT("default"),
-            Pin->PinDefaultValue);
+        const UEdGraphPin* GraphPin = Node->FindPin(Pin->PinName);
+        const FEdGraphPinType& Type = GraphPin
+            ? GraphPin->PinType
+            : Pin->PinType;
+        Parameter->SetObjectField(
+            TEXT("type"),
+            UE::MCPython::Blueprint2::SerializeTypeSpec(Type));
+        if (Pin->PinDefaultValue.IsEmpty())
+        {
+            Parameter->SetField(TEXT("default"), MakeShared<FJsonValueNull>());
+        }
+        else
+        {
+            TSharedPtr<FJsonValue> Default =
+                UE::MCPython::Blueprint2::SerializeDefaultValue(
+                Type,
+                GraphPin ? GraphPin->DefaultValue : Pin->PinDefaultValue,
+                GraphPin ? GraphPin->DefaultObject.Get() : nullptr,
+                GraphPin ? GraphPin->DefaultTextValue : FText::GetEmpty());
+            Parameter->SetField(
+                TEXT("default"),
+                Default.IsValid() ? Default : MakeShared<FJsonValueNull>());
+        }
         Parameters.Add(MakeShared<FJsonValueObject>(Parameter));
     }
     return Parameters;

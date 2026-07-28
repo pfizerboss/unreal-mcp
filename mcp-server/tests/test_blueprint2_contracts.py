@@ -210,6 +210,39 @@ def test_canonical_blueprint_type_refs_resolve_inside_action_schema():
         )
 
 
+def test_blueprint_member_parameter_lists_match_the_native_bound():
+    specs = _new_specs()
+    parameter_fields = (
+        ("create_blueprint_function", "inputs"),
+        ("create_blueprint_function", "outputs"),
+        ("set_blueprint_function_signature", "inputs"),
+        ("set_blueprint_function_signature", "outputs"),
+        ("create_blueprint_macro", "inputs"),
+        ("create_blueprint_macro", "outputs"),
+        ("create_custom_event", "parameters"),
+        ("add_event_dispatcher", "parameters"),
+    )
+
+    for action, field in parameter_fields:
+        schema = specs[action]["input_schema"]["properties"][field]
+        assert schema["maxItems"] == 128, (action, field)
+
+
+def test_blueprint_member_names_match_the_ue57_validator_bound():
+    specs = _new_specs()
+    create_schema = specs["create_blueprint_function"]["input_schema"]
+    rename_schema = specs["rename_blueprint_function"]["input_schema"]
+
+    assert create_schema["properties"]["function_name"]["maxLength"] == 100
+    assert rename_schema["properties"]["new_name"]["maxLength"] == 100
+    assert (
+        create_schema["properties"]["inputs"]["items"]["properties"]["name"][
+            "maxLength"
+        ]
+        == 100
+    )
+
+
 def test_inspect_queries_are_bounded_and_independently_pageable():
     schema = _new_specs()["inspect_blueprint"]["input_schema"]
     assert schema["required"] == ["asset_path"]
@@ -801,7 +834,14 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
     assert module_spec is not None and module_spec.loader is not None
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
-    active_actions = {"get_blueprint_brief", "inspect_blueprint"}
+    active_actions = {
+        "get_blueprint_brief",
+        "inspect_blueprint",
+        "create_blueprint_function",
+        "rename_blueprint_function",
+        "set_blueprint_function_signature",
+        "delete_blueprint_function",
+    }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()
         payload = json.loads(result)

@@ -6,6 +6,8 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).parents[2]
 ADAPTER_FILE = (
@@ -309,6 +311,147 @@ def test_inspect_blueprint(monkeypatch):
         )
     ]
     assert queries == [{"op": "nodes", "limit": 7}]
+
+
+@pytest.mark.parametrize(
+    ("action", "params", "expected_request"),
+    (
+        (
+            "create_blueprint_function",
+            {
+                "asset_path": "/Game/BP.BP",
+                "function_name": "ComputeScore",
+                "inputs": [{"name": "Actor", "type": {"kind": "object"}}],
+                "outputs": [{"name": "Score", "type": {"kind": "int"}}],
+                "pure": True,
+                "const": True,
+                "access": "private",
+                "category": "Scoring",
+                "description": "Computes a score.",
+            },
+            {
+                "function_name": "ComputeScore",
+                "inputs": [{"name": "Actor", "type": {"kind": "object"}}],
+                "outputs": [{"name": "Score", "type": {"kind": "int"}}],
+                "pure": True,
+                "const": True,
+                "access": "private",
+                "category": "Scoring",
+                "description": "Computes a score.",
+            },
+        ),
+        (
+            "rename_blueprint_function",
+            {
+                "asset_path": "/Game/BP.BP",
+                "function_id": "graph:11111111-1111-4111-8111-111111111111",
+                "new_name": "ComputeFinalScore",
+                "allow_name_fallback": True,
+                "function_name": "ComputeScore",
+                "function_owner_id": "/Game/BP.BP",
+                "function_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
+            {
+                "function_id": "graph:11111111-1111-4111-8111-111111111111",
+                "new_name": "ComputeFinalScore",
+                "allow_name_fallback": True,
+                "function_name": "ComputeScore",
+                "function_owner_id": "/Game/BP.BP",
+                "function_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
+        ),
+        (
+            "set_blueprint_function_signature",
+            {
+                "asset_path": "/Game/BP.BP",
+                "function_id": "graph:11111111-1111-4111-8111-111111111111",
+                "inputs": [{"name": "Value", "type": {"kind": "real"}}],
+                "outputs": [{"name": "Result", "type": {"kind": "bool"}}],
+                "pure": False,
+                "const": True,
+                "access": "protected",
+                "category": "Scoring",
+                "description": "Updated.",
+                "allow_name_fallback": False,
+                "function_name": "",
+                "function_owner_id": "",
+                "function_type_path": "",
+            },
+            {
+                "function_id": "graph:11111111-1111-4111-8111-111111111111",
+                "inputs": [{"name": "Value", "type": {"kind": "real"}}],
+                "outputs": [{"name": "Result", "type": {"kind": "bool"}}],
+                "pure": False,
+                "const": True,
+                "access": "protected",
+                "category": "Scoring",
+                "description": "Updated.",
+                "allow_name_fallback": False,
+                "function_name": "",
+                "function_owner_id": "",
+                "function_type_path": "",
+            },
+        ),
+        (
+            "delete_blueprint_function",
+            {
+                "asset_path": "/Game/BP.BP",
+                "function_id": "graph:11111111-1111-4111-8111-111111111111",
+                "allow_name_fallback": True,
+                "function_name": "ComputeScore",
+                "function_owner_id": "/Game/BP.BP",
+                "function_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
+            {
+                "function_id": "graph:11111111-1111-4111-8111-111111111111",
+                "allow_name_fallback": True,
+                "function_name": "ComputeScore",
+                "function_owner_id": "/Game/BP.BP",
+                "function_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
+        ),
+    ),
+)
+def test_blueprint_function_wrappers_forward_exact_copied_requests(
+    monkeypatch, action, params, expected_request
+):
+    calls = []
+
+    class Blueprint:
+        pass
+
+    blueprint = Blueprint()
+
+    def helper(asset, request_json):
+        calls.append((asset, json.loads(request_json)))
+        return '{"success":true}'
+
+    fake_unreal = SimpleNamespace(
+        Blueprint=Blueprint,
+        EditorAssetLibrary=SimpleNamespace(load_asset=lambda _path: blueprint),
+        MCPythonHelper=SimpleNamespace(**{action: helper}),
+    )
+    monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
+    monkeypatch.syspath_prepend(str(PLUGIN_PYTHON))
+    for module_name in (
+        "UnrealMCPython.blueprint2",
+        "UnrealMCPython.blueprint_actions",
+    ):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    package = sys.modules.get("UnrealMCPython")
+    if package is not None:
+        for attribute in ("blueprint2", "blueprint_actions"):
+            monkeypatch.delattr(package, attribute, raising=False)
+
+    actions = __import__(
+        "UnrealMCPython.blueprint_actions", fromlist=[f"ue_{action}"]
+    )
+    original = json.loads(json.dumps(params))
+    result = getattr(actions, f"ue_{action}")(**params)
+
+    assert json.loads(result)["success"] is True
+    assert params == original
+    assert calls == [(blueprint, expected_request)]
 
 
 def test_call_json_helper_copies_request_and_passes_result_through(monkeypatch):

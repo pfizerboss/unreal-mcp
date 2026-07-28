@@ -1177,6 +1177,284 @@ bool ValidateDefaultRecursively(
     return ValidateScalarDefaultWithSchema(
         Type, JsonValue, Owner, Path, OutError);
 }
+
+FString UnquoteImportString(const FString& Value)
+{
+    const FString Trimmed = Value.TrimStartAndEnd();
+    if (Trimmed.Len() < 2 || Trimmed[0] != TEXT('"') ||
+        Trimmed[Trimmed.Len() - 1] != TEXT('"'))
+    {
+        return Trimmed;
+    }
+
+    FString Result;
+    Result.Reserve(Trimmed.Len() - 2);
+    bool bEscaped = false;
+    for (int32 Index = 1; Index < Trimmed.Len() - 1; ++Index)
+    {
+        const TCHAR Character = Trimmed[Index];
+        if (bEscaped)
+        {
+            switch (Character)
+            {
+            case TEXT('n'): Result.AppendChar(TEXT('\n')); break;
+            case TEXT('r'): Result.AppendChar(TEXT('\r')); break;
+            case TEXT('t'): Result.AppendChar(TEXT('\t')); break;
+            default: Result.AppendChar(Character); break;
+            }
+            bEscaped = false;
+        }
+        else if (Character == TEXT('\\'))
+        {
+            bEscaped = true;
+        }
+        else
+        {
+            Result.AppendChar(Character);
+        }
+    }
+    if (bEscaped)
+    {
+        Result.AppendChar(TEXT('\\'));
+    }
+    return Result;
+}
+
+TArray<FString> SplitTopLevelImportText(
+    const FString& Value,
+    const TCHAR Delimiter)
+{
+    TArray<FString> Parts;
+    int32 Depth = 0;
+    int32 Start = 0;
+    bool bInQuotes = false;
+    bool bEscaped = false;
+    for (int32 Index = 0; Index < Value.Len(); ++Index)
+    {
+        const TCHAR Character = Value[Index];
+        if (bInQuotes)
+        {
+            if (bEscaped)
+            {
+                bEscaped = false;
+            }
+            else if (Character == TEXT('\\'))
+            {
+                bEscaped = true;
+            }
+            else if (Character == TEXT('"'))
+            {
+                bInQuotes = false;
+            }
+            continue;
+        }
+        if (Character == TEXT('"'))
+        {
+            bInQuotes = true;
+        }
+        else if (Character == TEXT('('))
+        {
+            ++Depth;
+        }
+        else if (Character == TEXT(')'))
+        {
+            --Depth;
+        }
+        else if (Character == Delimiter && Depth == 0)
+        {
+            Parts.Add(Value.Mid(Start, Index - Start).TrimStartAndEnd());
+            Start = Index + 1;
+        }
+    }
+    if (Start < Value.Len())
+    {
+        Parts.Add(Value.Mid(Start).TrimStartAndEnd());
+    }
+    else if (Start == 0 && Value.IsEmpty())
+    {
+        return Parts;
+    }
+    return Parts;
+}
+
+bool StripOuterImportParentheses(
+    const FString& Value,
+    FString& OutInner)
+{
+    const FString Trimmed = Value.TrimStartAndEnd();
+    if (Trimmed.Len() < 2 || Trimmed[0] != TEXT('(') ||
+        Trimmed[Trimmed.Len() - 1] != TEXT(')'))
+    {
+        return false;
+    }
+    OutInner = Trimmed.Mid(1, Trimmed.Len() - 2);
+    return true;
+}
+
+TSharedPtr<FJsonValue> ImportTextToJson(
+    const FEdGraphPinType& Type,
+    const FString& DefaultValue,
+    UObject* DefaultObject,
+    const FText& DefaultTextValue,
+    const bool bNested)
+{
+    if (Type.ContainerType == EPinContainerType::Array ||
+        Type.ContainerType == EPinContainerType::Set)
+    {
+        FString Inner;
+        if (!StripOuterImportParentheses(DefaultValue, Inner))
+        {
+            return nullptr;
+        }
+        FEdGraphPinType ItemType = Type;
+        ItemType.ContainerType = EPinContainerType::None;
+        TArray<TSharedPtr<FJsonValue>> Items;
+        for (const FString& Item : SplitTopLevelImportText(Inner, TEXT(',')))
+        {
+            const TSharedPtr<FJsonValue> Json = ImportTextToJson(
+                ItemType, Item, nullptr, FText::GetEmpty(), true);
+            if (!Json.IsValid())
+            {
+                return nullptr;
+            }
+            Items.Add(Json);
+        }
+        return MakeShared<FJsonValueArray>(Items);
+    }
+
+    if (Type.ContainerType == EPinContainerType::Map)
+    {
+        FString Inner;
+        if (!StripOuterImportParentheses(DefaultValue, Inner))
+        {
+            return nullptr;
+        }
+        FEdGraphPinType KeyType = Type;
+        KeyType.ContainerType = EPinContainerType::None;
+        const FEdGraphPinType ValueType =
+            FEdGraphPinType::GetPinTypeForTerminalType(Type.PinValueType);
+        TArray<TSharedPtr<FJsonValue>> Entries;
+        for (const FString& EntryText :
+             SplitTopLevelImportText(Inner, TEXT(',')))
+        {
+            FString EntryInner;
+            if (!StripOuterImportParentheses(EntryText, EntryInner))
+            {
+                return nullptr;
+            }
+            const TArray<FString> Pair =
+                SplitTopLevelImportText(EntryInner, TEXT(','));
+            if (Pair.Num() != 2)
+            {
+                return nullptr;
+            }
+            const TSharedPtr<FJsonValue> Key = ImportTextToJson(
+                KeyType, Pair[0], nullptr, FText::GetEmpty(), true);
+            const TSharedPtr<FJsonValue> Value = ImportTextToJson(
+                ValueType, Pair[1], nullptr, FText::GetEmpty(), true);
+            if (!Key.IsValid() || !Value.IsValid())
+            {
+                return nullptr;
+            }
+            const TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+            Entry->SetField(TEXT("key"), Key);
+            Entry->SetField(TEXT("value"), Value);
+            Entries.Add(MakeShared<FJsonValueObject>(Entry));
+        }
+        return MakeShared<FJsonValueArray>(Entries);
+    }
+
+    const FString Text = DefaultValue.TrimStartAndEnd();
+    const FName Category = Type.PinCategory;
+    if (Category == UEdGraphSchema_K2::PC_Boolean)
+    {
+        return MakeShared<FJsonValueBoolean>(Text.Equals(
+            TEXT("true"), ESearchCase::IgnoreCase));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Byte ||
+        Category == UEdGraphSchema_K2::PC_Enum)
+    {
+        if (Type.PinSubCategoryObject.IsValid())
+        {
+            return MakeShared<FJsonValueString>(UnquoteImportString(Text));
+        }
+        return MakeShared<FJsonValueNumber>(FCString::Atod(*Text));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Int ||
+        Category == UEdGraphSchema_K2::PC_Int64 ||
+        Category == UEdGraphSchema_K2::PC_Real)
+    {
+        return MakeShared<FJsonValueNumber>(FCString::Atod(*Text));
+    }
+    if (Category == UEdGraphSchema_K2::PC_String ||
+        Category == UEdGraphSchema_K2::PC_Name)
+    {
+        return MakeShared<FJsonValueString>(UnquoteImportString(Text));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Text)
+    {
+        const FString Display = !DefaultTextValue.IsEmpty() && !bNested
+            ? DefaultTextValue.ToString()
+            : UnquoteImportString(Text);
+        return MakeShared<FJsonValueString>(Display);
+    }
+    if (Category == UEdGraphSchema_K2::PC_Struct)
+    {
+        FString Inner;
+        const UScriptStruct* Struct =
+            Cast<UScriptStruct>(Type.PinSubCategoryObject.Get());
+        if (!Struct || !StripOuterImportParentheses(Text, Inner))
+        {
+            return nullptr;
+        }
+        const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+        const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+        for (const FString& FieldText :
+             SplitTopLevelImportText(Inner, TEXT(',')))
+        {
+            const TArray<FString> Pair =
+                SplitTopLevelImportText(FieldText, TEXT('='));
+            if (Pair.Num() != 2)
+            {
+                return nullptr;
+            }
+            const FProperty* Property =
+                FindFProperty<FProperty>(Struct, FName(*Pair[0]));
+            FEdGraphPinType FieldType;
+            if (!Property || !Schema->ConvertPropertyToPinType(
+                    Property, FieldType))
+            {
+                return nullptr;
+            }
+            const TSharedPtr<FJsonValue> FieldValue = ImportTextToJson(
+                FieldType, Pair[1], nullptr, FText::GetEmpty(), true);
+            if (!FieldValue.IsValid())
+            {
+                return nullptr;
+            }
+            Object->SetField(Pair[0], FieldValue);
+        }
+        return MakeShared<FJsonValueObject>(Object);
+    }
+    if (Category == UEdGraphSchema_K2::PC_Object ||
+        Category == UEdGraphSchema_K2::PC_Class ||
+        Category == UEdGraphSchema_K2::PC_Interface ||
+        Category == UEdGraphSchema_K2::PC_SoftObject ||
+        Category == UEdGraphSchema_K2::PC_SoftClass)
+    {
+        if (DefaultObject && !bNested)
+        {
+            return MakeShared<FJsonValueString>(DefaultObject->GetPathName());
+        }
+        const FString Path = UnquoteImportString(Text);
+        if (Path.IsEmpty() || Path == TEXT("None"))
+        {
+            return MakeShared<FJsonValueNull>();
+        }
+        return MakeShared<FJsonValueString>(Path);
+    }
+    return nullptr;
+}
 }
 
 FString MakeTargetId(ETargetKind Kind, const FGuid& Guid)
@@ -1979,6 +2257,16 @@ TSharedRef<FJsonObject> SerializeTypeSpec(const FEdGraphPinType& Type)
     return Result;
 }
 
+TSharedPtr<FJsonValue> SerializeDefaultValue(
+    const FEdGraphPinType& Type,
+    const FString& DefaultValue,
+    UObject* DefaultObject,
+    const FText& DefaultTextValue)
+{
+    return ImportTextToJson(
+        Type, DefaultValue, DefaultObject, DefaultTextValue, false);
+}
+
 bool NormalizeDefaultValue(
     const FEdGraphPinType& Type,
     const TSharedPtr<FJsonValue>& JsonValue,
@@ -2137,6 +2425,10 @@ FMutationScope::FMutationScope(const FText& Description)
     if (bWorkflowOwned)
     {
         return;
+    }
+    if (GEditor && !GEditor->Trans)
+    {
+        GEditor->Trans = GEditor->CreateTrans();
     }
     if (!GEditor || !GEditor->Trans || GEditor->Trans->IsActive())
     {

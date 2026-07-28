@@ -370,6 +370,50 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
     TestFalse(
         TEXT("Resolved graph fallback remains unstable"),
         ResolvedFallbackGraph.bStable);
+
+    Blueprint->FunctionGraphs.Add(Graph);
+    Blueprint->FunctionGraphs.Add(Graph);
+    const FString AmbiguousDeleteRequest = FString::Printf(
+        TEXT("{\"function_id\":\"%s\",\"allow_name_fallback\":true,")
+        TEXT("\"function_name\":\"%s\",\"function_owner_id\":\"%s\",")
+        TEXT("\"function_type_path\":\"%s\"}"),
+        *GraphDescription.Id,
+        *GraphDescription.Name,
+        *GraphDescription.OwnerId,
+        *GraphDescription.TypePath);
+    const TSharedPtr<FJsonObject> AmbiguousDelete = ParseJsonObject(
+        UMCPythonHelper::DeleteBlueprintFunction(
+            Blueprint, AmbiguousDeleteRequest));
+    TestTrue(
+        TEXT("Ambiguous function fallback returns valid JSON"),
+        AmbiguousDelete.IsValid());
+    if (AmbiguousDelete)
+    {
+        TestFalse(
+            TEXT("Ambiguous function fallback is rejected"),
+            AmbiguousDelete->GetBoolField(TEXT("success")));
+        const TArray<TSharedPtr<FJsonValue>>& Errors =
+            AmbiguousDelete->GetArrayField(TEXT("errors"));
+        TestEqual(
+            TEXT("Ambiguous function fallback returns one error"),
+            Errors.Num(),
+            1);
+        if (!Errors.IsEmpty())
+        {
+            const TSharedPtr<FJsonObject> AmbiguousError =
+                Errors[0]->AsObject();
+            TestEqualSensitive(
+                TEXT("Ambiguous function fallback uses the conflict code"),
+                AmbiguousError->GetStringField(TEXT("code")),
+                TEXT("CONFLICT"));
+            TestEqualSensitive(
+                TEXT("Ambiguous function fallback identifies function_id"),
+                AmbiguousError->GetStringField(TEXT("path")),
+                TEXT("function_id"));
+        }
+    }
+    Blueprint->FunctionGraphs.Remove(Graph);
+
     TestEqualSensitive(
         TEXT("Graph fallback is restored after clearing its GUID"),
         MakeGraphTargetId(Blueprint, Graph),

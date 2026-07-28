@@ -140,6 +140,11 @@ bool ParseTypeSpec(
     const FString& Path = TEXT("params.type"),
     int32 Depth = 0);
 TSharedRef<FJsonObject> SerializeTypeSpec(const FEdGraphPinType& Type);
+TSharedPtr<FJsonValue> SerializeDefaultValue(
+    const FEdGraphPinType& Type,
+    const FString& DefaultValue,
+    UObject* DefaultObject,
+    const FText& DefaultTextValue);
 bool NormalizeDefaultValue(
     const FEdGraphPinType& Type,
     const TSharedPtr<FJsonValue>& JsonValue,

@@ -202,6 +202,22 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString InspectBlueprint(UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Create a user-authored function with a complete ordered signature. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString CreateBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Rename a user-authored function targeted by graph identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString RenameBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Replace a user-authored function's complete signature and metadata. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SetBlueprintFunctionSignature(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Delete a user-authored function targeted by graph identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString DeleteBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Return Blueprint 2 runtime or asset-specific capability data. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);

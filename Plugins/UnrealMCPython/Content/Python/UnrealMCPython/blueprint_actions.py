@@ -3,6 +3,7 @@
 import unreal
 import json
 import traceback
+from copy import deepcopy
 from collections import deque
 
 def _load_asset(asset_path, expected_class=None):
@@ -717,7 +718,21 @@ def ue_create_blueprint_function(asset_path: str = None, function_name: str = No
                                        access: str = "public", category: str = "",
                                        description: str = "") -> str:
     """Creates a Blueprint function with a complete ordered signature."""
-    return _blueprint2_unsupported("create_blueprint_function")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "function_name": function_name,
+        "inputs": inputs,
+        "outputs": outputs,
+        "pure": pure,
+        "const": const,
+        "access": access,
+        "category": category,
+        "description": description,
+    })
+    return blueprint2.call_asset_helper(
+        "create_blueprint_function", asset_path, request
+    )
 
 
 def ue_rename_blueprint_function(asset_path: str = None, function_id: str = None,
@@ -727,7 +742,19 @@ def ue_rename_blueprint_function(asset_path: str = None, function_id: str = None
                                        function_owner_id: str = "",
                                        function_type_path: str = "") -> str:
     """Renames a Blueprint function targeted by stable ID."""
-    return _blueprint2_unsupported("rename_blueprint_function")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "function_id": function_id,
+        "new_name": new_name,
+        "allow_name_fallback": allow_name_fallback,
+        "function_name": function_name,
+        "function_owner_id": function_owner_id,
+        "function_type_path": function_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "rename_blueprint_function", asset_path, request
+    )
 
 
 def ue_set_blueprint_function_signature(asset_path: str = None,
@@ -744,7 +771,25 @@ def ue_set_blueprint_function_signature(asset_path: str = None,
                                               function_owner_id: str = "",
                                               function_type_path: str = "") -> str:
     """Replaces the complete signature and metadata of a Blueprint function."""
-    return _blueprint2_unsupported("set_blueprint_function_signature")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "function_id": function_id,
+        "inputs": inputs,
+        "outputs": outputs,
+        "pure": pure,
+        "const": const,
+        "access": access,
+        "category": category,
+        "description": description,
+        "allow_name_fallback": allow_name_fallback,
+        "function_name": function_name,
+        "function_owner_id": function_owner_id,
+        "function_type_path": function_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "set_blueprint_function_signature", asset_path, request
+    )
 
 
 def ue_delete_blueprint_function(asset_path: str = None,
@@ -754,7 +799,18 @@ def ue_delete_blueprint_function(asset_path: str = None,
                                        function_owner_id: str = "",
                                        function_type_path: str = "") -> str:
     """Deletes a Blueprint function targeted by stable ID."""
-    return _blueprint2_unsupported("delete_blueprint_function")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "function_id": function_id,
+        "allow_name_fallback": allow_name_fallback,
+        "function_name": function_name,
+        "function_owner_id": function_owner_id,
+        "function_type_path": function_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "delete_blueprint_function", asset_path, request
+    )
 
 
 def ue_create_blueprint_macro(asset_path: str = None, macro_name: str = None,

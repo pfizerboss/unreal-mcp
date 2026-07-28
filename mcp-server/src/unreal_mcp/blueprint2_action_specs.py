@@ -44,7 +44,7 @@ STABLE_ID = {
 NAME = {
     "type": "string",
     "pattern": r"^[A-Za-z_][A-Za-z0-9_]*$",
-    "maxLength": 1024,
+    "maxLength": 100,
 }
 
 
@@ -493,7 +493,7 @@ def _destructive(
     )
 
 
-PARAMETERS = _array(PARAMETER)
+PARAMETERS = _array(PARAMETER, maxItems=128)
 PARAMETERS_WITH_DEFAULT = {**deepcopy(PARAMETERS), "default": []}
 ACCESS = {
     "type": "string",
