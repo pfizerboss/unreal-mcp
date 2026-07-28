@@ -63,7 +63,7 @@ def _array(items: dict, **keywords: Any) -> dict:
     return {"type": "array", "items": deepcopy(items), **deepcopy(keywords)}
 
 
-def _type_choices(depth: int, nested: dict | None = None) -> list[dict]:
+def _type_choices(scalar: dict | None = None) -> list[dict]:
     choices = [
         _object({"kind": {"const": kind}}, ("kind",))
         for kind in ("bool", "byte", "int", "int64", "string", "name", "text")
@@ -97,20 +97,25 @@ def _type_choices(depth: int, nested: dict | None = None) -> list[dict]:
                 ("kind", "class_path"),
             )
         )
-    if depth < 8 and nested is not None:
-        for kind in ("array", "set"):
-            choices.append(
-                _object(
-                    {"kind": {"const": kind}, "item": nested},
-                    ("kind", "item"),
-                )
+    if scalar is not None:
+        choices.append(
+            _object(
+                {"kind": {"const": "array"}, "item": scalar},
+                ("kind", "item"),
             )
+        )
+        choices.append(
+            _object(
+                {"kind": {"const": "set"}, "item": scalar},
+                ("kind", "item"),
+            )
+        )
         choices.append(
             _object(
                 {
                     "kind": {"const": "map"},
-                    "key": nested,
-                    "value": nested,
+                    "key": scalar,
+                    "value": scalar,
                 },
                 ("kind", "key", "value"),
             )
@@ -118,30 +123,16 @@ def _type_choices(depth: int, nested: dict | None = None) -> list[dict]:
     return choices
 
 
-def type_spec(depth: int = 0) -> dict:
-    """Return the bounded recursive canonical Blueprint type schema."""
-    if depth >= 8:
-        return {"oneOf": _type_choices(depth)}
-
-    resource_id = f"urn:unreal-mcp:blueprint2:type-spec:{depth}"
-    definitions: dict[str, dict] = {}
-    for nested_depth in range(8, depth, -1):
-        next_schema = None
-        if nested_depth < 8:
-            next_schema = {
-                "$ref": f"{resource_id}#/$defs/type_{nested_depth + 1}"
-            }
-        definitions[f"type_{nested_depth}"] = {
-            "oneOf": _type_choices(nested_depth, next_schema)
-        }
-
-    nested = {"$ref": f"{resource_id}#/$defs/type_{depth + 1}"}
-    choices = _type_choices(depth, nested)
+def type_spec() -> dict:
+    """Return canonical Blueprint types without implicit nested containers."""
+    resource_id = "urn:unreal-mcp:blueprint2:type-spec"
+    scalar = {"$ref": f"{resource_id}#/$defs/scalar"}
+    choices = _type_choices(scalar)
     # Keep the public primitive exactly {"oneOf": choices}. The first choice is
     # an embedded schema resource so references remain valid after TYPE_SPEC is
     # deep-copied into a larger action input schema.
     choices[0]["$id"] = resource_id
-    choices[0]["$defs"] = definitions
+    choices[0]["$defs"] = {"scalar": {"oneOf": _type_choices()}}
     return {"oneOf": choices}
 
 

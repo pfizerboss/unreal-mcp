@@ -143,16 +143,51 @@ def test_canonical_blueprint_type_schema_is_exact_and_bounded():
         assert choice["additionalProperties"] is False
         assert "kind" in choice["required"]
 
-    nested = {"kind": "bool"}
-    for _ in range(8):
-        nested = {"kind": "array", "item": nested}
     validator = Draft202012Validator(TYPE_SPEC)
-    validator.validate(nested)
     with pytest.raises(ValidationError):
-        validator.validate({"kind": "array", "item": nested})
+        validator.validate(
+            {
+                "kind": "array",
+                "item": {"kind": "array", "item": {"kind": "bool"}},
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                "kind": "set",
+                "item": {"kind": "array", "item": {"kind": "int"}},
+            }
+        )
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                "kind": "map",
+                "key": {"kind": "set", "item": {"kind": "name"}},
+                "value": {"kind": "string"},
+            }
+        )
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                "kind": "map",
+                "key": {"kind": "string"},
+                "value": {"kind": "array", "item": {"kind": "int"}},
+            }
+        )
+
+    validator.validate(
+        {
+            "kind": "array",
+            "item": {
+                "kind": "struct",
+                "type_path": "/Script/CoreUObject.Vector",
+            },
+        }
+    )
 
 
-def test_canonical_blueprint_type_recursion_resolves_inside_action_schema():
+def test_canonical_blueprint_type_refs_resolve_inside_action_schema():
     schema = _new_specs()["create_blueprint_function"]["input_schema"]
     validator = Draft202012Validator(schema)
 
@@ -164,12 +199,15 @@ def test_canonical_blueprint_type_recursion_resolves_inside_action_schema():
         }
 
     validator.validate(params({"kind": "array", "item": {"kind": "int"}}))
-    nested = {"kind": "int"}
-    for _ in range(8):
-        nested = {"kind": "array", "item": nested}
-    validator.validate(params(nested))
     with pytest.raises(ValidationError):
-        validator.validate(params({"kind": "array", "item": nested}))
+        validator.validate(
+            params(
+                {
+                    "kind": "array",
+                    "item": {"kind": "array", "item": {"kind": "int"}},
+                }
+            )
+        )
 
 
 def test_inspect_queries_are_bounded_and_independently_pageable():

@@ -15,11 +15,14 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Misc/Base64.h"
 #include "Misc/EngineVersion.h"
+#include "Misc/PackageName.h"
 #include "Misc/SecureHash.h"
 #include "ScopedTransaction.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "UObject/UnrealType.h"
+#include "UObject/UObjectGlobals.h"
 
 namespace UE::MCPython::Blueprint2
 {
@@ -384,6 +387,795 @@ FResolvedTarget StableInterface(UBlueprint* Blueprint, const FString& Id)
 TSharedPtr<FJsonValue> EmptyArrayValue()
 {
     return MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>());
+}
+
+bool InvalidInput(
+    FError& OutError,
+    const FString& Path,
+    const FString& Message,
+    const FString& Hint = TEXT("Use the canonical Blueprint type schema."))
+{
+    OutError.Code = TEXT("INVALID_INPUT");
+    OutError.Path = Path;
+    OutError.Message = Message;
+    OutError.Hint = Hint;
+    return false;
+}
+
+bool ValidateClosedObject(
+    const TSharedRef<FJsonObject>& Object,
+    std::initializer_list<const TCHAR*> AllowedFields,
+    const FString& Path,
+    FError& OutError)
+{
+    TSet<FString> Allowed;
+    for (const TCHAR* Field : AllowedFields)
+    {
+        Allowed.Add(Field);
+    }
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+    {
+        if (!Allowed.Contains(Field.Key))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".") + Field.Key,
+                FString::Printf(TEXT("Unknown field '%s'."), *Field.Key));
+        }
+    }
+    return true;
+}
+
+bool TryGetRequiredString(
+    const TSharedRef<FJsonObject>& Object,
+    const TCHAR* Field,
+    const FString& Path,
+    FString& OutValue,
+    FError& OutError)
+{
+    if (!Object->TryGetStringField(Field, OutValue) || OutValue.IsEmpty())
+    {
+        return InvalidInput(
+            OutError,
+            Path + TEXT(".") + Field,
+            FString::Printf(TEXT("'%s' must be a non-empty string."), Field));
+    }
+    return true;
+}
+
+bool TryGetRequiredObject(
+    const TSharedRef<FJsonObject>& Object,
+    const TCHAR* Field,
+    const FString& Path,
+    TSharedRef<FJsonObject>& OutValue,
+    FError& OutError)
+{
+    const TSharedPtr<FJsonValue>* Value = Object->Values.Find(Field);
+    if (!Value || !Value->IsValid() || (*Value)->Type != EJson::Object)
+    {
+        return InvalidInput(
+            OutError,
+            Path + TEXT(".") + Field,
+            FString::Printf(TEXT("'%s' must be a type object."), Field));
+    }
+    OutValue = (*Value)->AsObject().ToSharedRef();
+    return true;
+}
+
+bool IsContainerKind(const FString& Kind)
+{
+    return Kind == TEXT("array") || Kind == TEXT("set") ||
+        Kind == TEXT("map");
+}
+
+bool TryGetKind(
+    const TSharedRef<FJsonObject>& Spec,
+    const FString& Path,
+    FString& OutKind,
+    FError& OutError)
+{
+    return TryGetRequiredString(
+        Spec, TEXT("kind"), Path, OutKind, OutError);
+}
+
+bool ValidateContainerDepth(
+    const TSharedRef<FJsonObject>& Spec,
+    const FString& Path,
+    int32 Depth,
+    FError& OutError)
+{
+    FString Kind;
+    if (!TryGetKind(Spec, Path, Kind, OutError))
+    {
+        return false;
+    }
+    if (!IsContainerKind(Kind))
+    {
+        return true;
+    }
+    if (Depth >= 8)
+    {
+        return InvalidInput(
+            OutError,
+            Path + TEXT(".kind"),
+            TEXT("Container nesting cannot exceed eight levels."));
+    }
+
+    if (Kind == TEXT("array") || Kind == TEXT("set"))
+    {
+        TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+        return TryGetRequiredObject(
+                Spec, TEXT("item"), Path, Item, OutError) &&
+            ValidateContainerDepth(
+                Item, Path + TEXT(".item"), Depth + 1, OutError);
+    }
+
+    TSharedRef<FJsonObject> Key = MakeShared<FJsonObject>();
+    TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+    return TryGetRequiredObject(Spec, TEXT("key"), Path, Key, OutError) &&
+        TryGetRequiredObject(Spec, TEXT("value"), Path, Value, OutError) &&
+        ValidateContainerDepth(
+            Key, Path + TEXT(".key"), Depth + 1, OutError) &&
+        ValidateContainerDepth(
+            Value, Path + TEXT(".value"), Depth + 1, OutError);
+}
+
+UObject* FindOrLoadTypeObject(const FString& ObjectPath)
+{
+    if (UObject* Existing = StaticFindObject(
+        UObject::StaticClass(), nullptr, *ObjectPath))
+    {
+        return Existing;
+    }
+    return LoadObject<UObject>(nullptr, *ObjectPath);
+}
+
+TSharedRef<FJsonObject> MakeKindObject(const TCHAR* Kind)
+{
+    const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("kind"), Kind);
+    return Result;
+}
+
+TSharedRef<FJsonObject> SerializeScalarType(const FEdGraphPinType& Type)
+{
+    const FName Category = Type.PinCategory;
+    if (Category == UEdGraphSchema_K2::PC_Boolean)
+    {
+        return MakeKindObject(TEXT("bool"));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Byte)
+    {
+        if (Cast<UEnum>(Type.PinSubCategoryObject.Get()))
+        {
+            const TSharedRef<FJsonObject> Result = MakeKindObject(TEXT("enum"));
+            Result->SetStringField(
+                TEXT("type_path"),
+                GetPathNameSafe(Type.PinSubCategoryObject.Get()));
+            return Result;
+        }
+        return MakeKindObject(TEXT("byte"));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Int)
+    {
+        return MakeKindObject(TEXT("int"));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Int64)
+    {
+        return MakeKindObject(TEXT("int64"));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Real)
+    {
+        const TSharedRef<FJsonObject> Result = MakeKindObject(TEXT("real"));
+        Result->SetStringField(
+            TEXT("precision"),
+            Type.PinSubCategory == UEdGraphSchema_K2::PC_Float
+                ? TEXT("float")
+                : TEXT("double"));
+        return Result;
+    }
+    if (Category == UEdGraphSchema_K2::PC_String)
+    {
+        return MakeKindObject(TEXT("string"));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Name)
+    {
+        return MakeKindObject(TEXT("name"));
+    }
+    if (Category == UEdGraphSchema_K2::PC_Text)
+    {
+        return MakeKindObject(TEXT("text"));
+    }
+
+    const TCHAR* Kind = TEXT("unknown");
+    const TCHAR* PathField = TEXT("class_path");
+    if (Category == UEdGraphSchema_K2::PC_Enum)
+    {
+        Kind = TEXT("enum");
+        PathField = TEXT("type_path");
+    }
+    else if (Category == UEdGraphSchema_K2::PC_Struct)
+    {
+        Kind = TEXT("struct");
+        PathField = TEXT("type_path");
+    }
+    else if (Category == UEdGraphSchema_K2::PC_Object)
+    {
+        Kind = TEXT("object");
+    }
+    else if (Category == UEdGraphSchema_K2::PC_Class)
+    {
+        Kind = TEXT("class");
+    }
+    else if (Category == UEdGraphSchema_K2::PC_Interface)
+    {
+        Kind = TEXT("interface");
+    }
+    else if (Category == UEdGraphSchema_K2::PC_SoftObject)
+    {
+        Kind = TEXT("soft_object");
+    }
+    else if (Category == UEdGraphSchema_K2::PC_SoftClass)
+    {
+        Kind = TEXT("soft_class");
+    }
+
+    const TSharedRef<FJsonObject> Result = MakeKindObject(Kind);
+    if (FCString::Strcmp(Kind, TEXT("unknown")) != 0)
+    {
+        Result->SetStringField(
+            PathField,
+            GetPathNameSafe(Type.PinSubCategoryObject.Get()));
+    }
+    return Result;
+}
+
+FString QuoteImportString(const FString& Value)
+{
+    FString Escaped = Value.Replace(TEXT("\\"), TEXT("\\\\"));
+    Escaped = Escaped.Replace(TEXT("\""), TEXT("\\\""));
+    Escaped = Escaped.Replace(TEXT("\n"), TEXT("\\n"));
+    Escaped = Escaped.Replace(TEXT("\r"), TEXT("\\r"));
+    Escaped = Escaped.Replace(TEXT("\t"), TEXT("\\t"));
+    return TEXT("\"") + Escaped + TEXT("\"");
+}
+
+bool LosslessIntegerText(
+    const TSharedPtr<FJsonValue>& Value,
+    double Minimum,
+    double Maximum,
+    const FString& Path,
+    FString& OutText,
+    FError& OutError)
+{
+    if (!Value.IsValid() || Value->Type != EJson::Number)
+    {
+        return InvalidInput(
+            OutError, Path, TEXT("Expected a JSON integer."));
+    }
+    const double Number = Value->AsNumber();
+    if (!FMath::IsFinite(Number) || FMath::TruncToDouble(Number) != Number ||
+        Number < Minimum || Number > Maximum)
+    {
+        return InvalidInput(
+            OutError,
+            Path,
+            TEXT("Integer default cannot be represented losslessly."));
+    }
+    OutText = FString::Printf(TEXT("%.0f"), Number);
+    return true;
+}
+
+bool JsonToImportText(
+    const FEdGraphPinType& Type,
+    const TSharedPtr<FJsonValue>& Value,
+    const FString& Path,
+    bool bNested,
+    FString& OutText,
+    FError& OutError)
+{
+    const FName Category = Type.PinCategory;
+    if (!Value.IsValid())
+    {
+        return InvalidInput(OutError, Path, TEXT("Default value is missing."));
+    }
+
+    if (Value->IsNull())
+    {
+        if (Category == UEdGraphSchema_K2::PC_Object ||
+            Category == UEdGraphSchema_K2::PC_Class ||
+            Category == UEdGraphSchema_K2::PC_Interface ||
+            Category == UEdGraphSchema_K2::PC_SoftObject ||
+            Category == UEdGraphSchema_K2::PC_SoftClass)
+        {
+            const bool bSoftReference =
+                Category == UEdGraphSchema_K2::PC_SoftObject ||
+                Category == UEdGraphSchema_K2::PC_SoftClass;
+            OutText = bSoftReference && !bNested ? TEXT("") : TEXT("None");
+            return true;
+        }
+        return InvalidInput(
+            OutError,
+            Path,
+            TEXT("Null is only valid for object and class references."));
+    }
+
+    if (Type.ContainerType == EPinContainerType::Array ||
+        Type.ContainerType == EPinContainerType::Set)
+    {
+        if (Value->Type != EJson::Array)
+        {
+            return InvalidInput(
+                OutError, Path, TEXT("Array and set defaults must be JSON arrays."));
+        }
+        FEdGraphPinType ItemType = Type;
+        ItemType.ContainerType = EPinContainerType::None;
+        TArray<FString> Items;
+        const TArray<TSharedPtr<FJsonValue>>& JsonItems = Value->AsArray();
+        for (int32 Index = 0; Index < JsonItems.Num(); ++Index)
+        {
+            FString ItemText;
+            if (!JsonToImportText(
+                ItemType,
+                JsonItems[Index],
+                FString::Printf(TEXT("%s[%d]"), *Path, Index),
+                true,
+                ItemText,
+                OutError))
+            {
+                return false;
+            }
+            Items.Add(MoveTemp(ItemText));
+        }
+        OutText = TEXT("(") + FString::Join(Items, TEXT(",")) + TEXT(")");
+        return true;
+    }
+
+    if (Type.ContainerType == EPinContainerType::Map)
+    {
+        if (Value->Type != EJson::Array)
+        {
+            return InvalidInput(
+                OutError,
+                Path,
+                TEXT("Map defaults must be an ordered JSON array of key/value objects."));
+        }
+        FEdGraphPinType KeyType = Type;
+        KeyType.ContainerType = EPinContainerType::None;
+        const FEdGraphPinType ValueType =
+            FEdGraphPinType::GetPinTypeForTerminalType(Type.PinValueType);
+        TArray<FString> Entries;
+        const TArray<TSharedPtr<FJsonValue>>& JsonEntries = Value->AsArray();
+        for (int32 Index = 0; Index < JsonEntries.Num(); ++Index)
+        {
+            const FString EntryPath =
+                FString::Printf(TEXT("%s[%d]"), *Path, Index);
+            if (!JsonEntries[Index].IsValid() ||
+                JsonEntries[Index]->Type != EJson::Object)
+            {
+                return InvalidInput(
+                    OutError,
+                    EntryPath,
+                    TEXT("Map entries must be key/value objects."));
+            }
+            const TSharedPtr<FJsonObject> Entry = JsonEntries[Index]->AsObject();
+            for (const TPair<FString, TSharedPtr<FJsonValue>>& Field :
+                Entry->Values)
+            {
+                if (Field.Key != TEXT("key") && Field.Key != TEXT("value"))
+                {
+                    return InvalidInput(
+                        OutError,
+                        EntryPath + TEXT(".") + Field.Key,
+                        TEXT("Map entries only allow key and value."));
+                }
+            }
+            const TSharedPtr<FJsonValue>* KeyValue =
+                Entry->Values.Find(TEXT("key"));
+            const TSharedPtr<FJsonValue>* MappedValue =
+                Entry->Values.Find(TEXT("value"));
+            if (!KeyValue)
+            {
+                return InvalidInput(
+                    OutError,
+                    EntryPath + TEXT(".key"),
+                    TEXT("Map entry key is required."));
+            }
+            if (!MappedValue)
+            {
+                return InvalidInput(
+                    OutError,
+                    EntryPath + TEXT(".value"),
+                    TEXT("Map entry value is required."));
+            }
+            FString KeyText;
+            FString ValueText;
+            if (!JsonToImportText(
+                    KeyType,
+                    *KeyValue,
+                    EntryPath + TEXT(".key"),
+                    true,
+                    KeyText,
+                    OutError) ||
+                !JsonToImportText(
+                    ValueType,
+                    *MappedValue,
+                    EntryPath + TEXT(".value"),
+                    true,
+                    ValueText,
+                    OutError))
+            {
+                return false;
+            }
+            Entries.Add(TEXT("(") + KeyText + TEXT(",") +
+                ValueText + TEXT(")"));
+        }
+        OutText = TEXT("(") + FString::Join(Entries, TEXT(",")) + TEXT(")");
+        return true;
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Boolean)
+    {
+        if (Value->Type != EJson::Boolean)
+        {
+            return InvalidInput(OutError, Path, TEXT("Expected a JSON boolean."));
+        }
+        OutText = Value->AsBool() ? TEXT("true") : TEXT("false");
+        return true;
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Byte)
+    {
+        if (const UEnum* Enum = Cast<UEnum>(Type.PinSubCategoryObject.Get()))
+        {
+            if (Value->Type != EJson::String ||
+                Enum->GetIndexByNameString(Value->AsString()) == INDEX_NONE)
+            {
+                return InvalidInput(
+                    OutError, Path, TEXT("Expected a valid enum name."));
+            }
+            OutText = Value->AsString();
+            return true;
+        }
+        return LosslessIntegerText(
+            Value, 0.0, 255.0, Path, OutText, OutError);
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Int)
+    {
+        return LosslessIntegerText(
+            Value,
+            static_cast<double>(MIN_int32),
+            static_cast<double>(MAX_int32),
+            Path,
+            OutText,
+            OutError);
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Int64)
+    {
+        constexpr double MaxLosslessJsonInteger = 9007199254740991.0;
+        return LosslessIntegerText(
+            Value,
+            -MaxLosslessJsonInteger,
+            MaxLosslessJsonInteger,
+            Path,
+            OutText,
+            OutError);
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Real)
+    {
+        if (Value->Type != EJson::Number ||
+            !FMath::IsFinite(Value->AsNumber()))
+        {
+            return InvalidInput(OutError, Path, TEXT("Expected a finite JSON number."));
+        }
+        const double Number = Value->AsNumber();
+        if (Type.PinSubCategory == UEdGraphSchema_K2::PC_Float &&
+            FMath::Abs(Number) > static_cast<double>(MAX_flt))
+        {
+            return InvalidInput(
+                OutError, Path, TEXT("Number is outside the float range."));
+        }
+        if (Type.PinSubCategory == UEdGraphSchema_K2::PC_Float &&
+            Number != 0.0 && static_cast<float>(Number) == 0.0f)
+        {
+            return InvalidInput(
+                OutError,
+                Path,
+                TEXT("Number underflows the float range and would become zero."));
+        }
+        OutText = Type.PinSubCategory == UEdGraphSchema_K2::PC_Float
+            ? FString::SanitizeFloat(static_cast<float>(Number), 0)
+            : FString::SanitizeFloat(Number, 0);
+        return true;
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_String ||
+        Category == UEdGraphSchema_K2::PC_Name ||
+        Category == UEdGraphSchema_K2::PC_Text)
+    {
+        if (Value->Type != EJson::String)
+        {
+            return InvalidInput(OutError, Path, TEXT("Expected a JSON string."));
+        }
+        OutText = bNested ? QuoteImportString(Value->AsString()) : Value->AsString();
+        return true;
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Enum)
+    {
+        const UEnum* Enum = Cast<UEnum>(Type.PinSubCategoryObject.Get());
+        if (!Enum || Value->Type != EJson::String ||
+            Enum->GetIndexByNameString(Value->AsString()) == INDEX_NONE)
+        {
+            return InvalidInput(
+                OutError, Path, TEXT("Expected a valid enum name."));
+        }
+        OutText = Value->AsString();
+        return true;
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Struct)
+    {
+        if (Value->Type != EJson::Object)
+        {
+            return InvalidInput(
+                OutError, Path, TEXT("Struct defaults must be JSON objects."));
+        }
+        const UScriptStruct* Struct =
+            Cast<UScriptStruct>(Type.PinSubCategoryObject.Get());
+        if (!Struct)
+        {
+            return InvalidInput(
+                OutError, Path, TEXT("Blueprint struct type is unresolved."));
+        }
+        const TSharedPtr<FJsonObject> JsonObject = Value->AsObject();
+        TMap<FString, const FProperty*> Properties;
+        for (TFieldIterator<FProperty> It(
+            Struct, EFieldIteratorFlags::IncludeSuper); It; ++It)
+        {
+            Properties.Add(It->GetName(), *It);
+        }
+        for (const TPair<FString, TSharedPtr<FJsonValue>>& Field :
+            JsonObject->Values)
+        {
+            if (!Properties.Contains(Field.Key))
+            {
+                return InvalidInput(
+                    OutError,
+                    Path + TEXT(".") + Field.Key,
+                    FString::Printf(
+                        TEXT("Unknown field '%s' for struct %s."),
+                        *Field.Key,
+                        *Struct->GetName()));
+            }
+        }
+        TArray<FString> Fields;
+        const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+        for (TFieldIterator<FProperty> It(
+            Struct, EFieldIteratorFlags::IncludeSuper); It; ++It)
+        {
+            const FProperty* Property = *It;
+            const FString FieldName = Property->GetName();
+            const TSharedPtr<FJsonValue>* FieldValue =
+                JsonObject->Values.Find(FieldName);
+            if (!FieldValue)
+            {
+                continue;
+            }
+            FEdGraphPinType FieldType;
+            if (!Schema->ConvertPropertyToPinType(Property, FieldType))
+            {
+                return InvalidInput(
+                    OutError,
+                    Path + TEXT(".") + FieldName,
+                    TEXT("Struct field type is not supported by Blueprint."));
+            }
+            FString FieldText;
+            if (!JsonToImportText(
+                FieldType,
+                *FieldValue,
+                Path + TEXT(".") + FieldName,
+                true,
+                FieldText,
+                OutError))
+            {
+                return false;
+            }
+            Fields.Add(FieldName + TEXT("=") + FieldText);
+        }
+        OutText = TEXT("(") + FString::Join(Fields, TEXT(",")) + TEXT(")");
+        return true;
+    }
+
+    if (Category == UEdGraphSchema_K2::PC_Object ||
+        Category == UEdGraphSchema_K2::PC_Class ||
+        Category == UEdGraphSchema_K2::PC_Interface ||
+        Category == UEdGraphSchema_K2::PC_SoftObject ||
+        Category == UEdGraphSchema_K2::PC_SoftClass)
+    {
+        if (Value->Type != EJson::String || Value->AsString().IsEmpty())
+        {
+            return InvalidInput(
+                OutError, Path, TEXT("Expected a full Unreal object path."));
+        }
+        const FString ObjectPath = Value->AsString();
+        FText PathReason;
+        if (!FPackageName::IsValidObjectPath(ObjectPath, &PathReason))
+        {
+            return InvalidInput(
+                OutError,
+                Path,
+                FString::Printf(
+                    TEXT("Invalid Unreal object path: %s"),
+                    *PathReason.ToString()));
+        }
+        OutText = ObjectPath;
+        return true;
+    }
+
+    return InvalidInput(
+        OutError, Path, TEXT("Blueprint default type is not supported."));
+}
+
+bool ValidateScalarDefaultWithSchema(
+    const FEdGraphPinType& Type,
+    const TSharedPtr<FJsonValue>& JsonValue,
+    UObject* Owner,
+    const FString& Path,
+    FError& OutError)
+{
+    FString ImportText;
+    const bool bNullSoftReference = JsonValue->IsNull() &&
+        (Type.PinCategory == UEdGraphSchema_K2::PC_SoftObject ||
+         Type.PinCategory == UEdGraphSchema_K2::PC_SoftClass);
+    if (!bNullSoftReference &&
+        !JsonToImportText(
+            Type, JsonValue, Path, true, ImportText, OutError))
+    {
+        return false;
+    }
+
+    FString DefaultValue;
+    TObjectPtr<UObject> DefaultObject = nullptr;
+    FText DefaultTextValue;
+    const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+    Schema->GetPinDefaultValuesFromString(
+        Type,
+        Owner,
+        ImportText,
+        DefaultValue,
+        DefaultObject,
+        DefaultTextValue);
+
+    const bool bHardReference =
+        Type.PinCategory == UEdGraphSchema_K2::PC_Object ||
+        Type.PinCategory == UEdGraphSchema_K2::PC_Class ||
+        Type.PinCategory == UEdGraphSchema_K2::PC_Interface;
+    if (bHardReference && !JsonValue->IsNull() && !DefaultObject)
+    {
+        return InvalidInput(
+            OutError, Path, TEXT("Unreal object path could not be resolved."));
+    }
+
+    FEdGraphPinType ValidationType = Type;
+    if (ValidationType.PinCategory == UEdGraphSchema_K2::PC_Enum)
+    {
+        ValidationType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+    }
+    FString ValidationMessage;
+    if (!Schema->DefaultValueSimpleValidation(
+            ValidationType,
+            NAME_None,
+            DefaultValue,
+            DefaultObject,
+            DefaultTextValue,
+            &ValidationMessage))
+    {
+        return InvalidInput(OutError, Path, ValidationMessage);
+    }
+    return true;
+}
+
+bool ValidateDefaultRecursively(
+    const FEdGraphPinType& Type,
+    const TSharedPtr<FJsonValue>& JsonValue,
+    UObject* Owner,
+    const FString& Path,
+    FError& OutError)
+{
+    if (Type.ContainerType == EPinContainerType::Array ||
+        Type.ContainerType == EPinContainerType::Set)
+    {
+        FEdGraphPinType ItemType = Type;
+        ItemType.ContainerType = EPinContainerType::None;
+        const TArray<TSharedPtr<FJsonValue>>& Items = JsonValue->AsArray();
+        for (int32 Index = 0; Index < Items.Num(); ++Index)
+        {
+            if (!ValidateDefaultRecursively(
+                    ItemType,
+                    Items[Index],
+                    Owner,
+                    FString::Printf(TEXT("%s[%d]"), *Path, Index),
+                    OutError))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (Type.ContainerType == EPinContainerType::Map)
+    {
+        FEdGraphPinType KeyType = Type;
+        KeyType.ContainerType = EPinContainerType::None;
+        const FEdGraphPinType ValueType =
+            FEdGraphPinType::GetPinTypeForTerminalType(Type.PinValueType);
+        const TArray<TSharedPtr<FJsonValue>>& Entries = JsonValue->AsArray();
+        for (int32 Index = 0; Index < Entries.Num(); ++Index)
+        {
+            const FString EntryPath =
+                FString::Printf(TEXT("%s[%d]"), *Path, Index);
+            const TSharedPtr<FJsonObject> Entry = Entries[Index]->AsObject();
+            if (!ValidateDefaultRecursively(
+                    KeyType,
+                    Entry->Values[TEXT("key")],
+                    Owner,
+                    EntryPath + TEXT(".key"),
+                    OutError) ||
+                !ValidateDefaultRecursively(
+                    ValueType,
+                    Entry->Values[TEXT("value")],
+                    Owner,
+                    EntryPath + TEXT(".value"),
+                    OutError))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (Type.PinCategory == UEdGraphSchema_K2::PC_Struct)
+    {
+        const UScriptStruct* Struct =
+            CastChecked<UScriptStruct>(Type.PinSubCategoryObject.Get());
+        const TSharedPtr<FJsonObject> Object = JsonValue->AsObject();
+        const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+        for (TFieldIterator<FProperty> It(
+            Struct, EFieldIteratorFlags::IncludeSuper); It; ++It)
+        {
+            const FString FieldName = It->GetName();
+            const TSharedPtr<FJsonValue>* FieldValue =
+                Object->Values.Find(FieldName);
+            if (!FieldValue)
+            {
+                continue;
+            }
+            FEdGraphPinType FieldType;
+            if (!Schema->ConvertPropertyToPinType(*It, FieldType))
+            {
+                return InvalidInput(
+                    OutError,
+                    Path + TEXT(".") + FieldName,
+                    TEXT("Struct field type is not supported by Blueprint."));
+            }
+            if (!ValidateDefaultRecursively(
+                    FieldType,
+                    *FieldValue,
+                    Owner,
+                    Path + TEXT(".") + FieldName,
+                    OutError))
+            {
+                return false;
+            }
+        }
+    }
+
+    return ValidateScalarDefaultWithSchema(
+        Type, JsonValue, Owner, Path, OutError);
 }
 }
 
@@ -901,6 +1693,365 @@ FString SerializeResult(const TSharedRef<FJsonObject>& Result)
     const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Serialized);
     FJsonSerializer::Serialize(Result, Writer);
     return Serialized;
+}
+
+bool ParseTypeSpec(
+    const TSharedRef<FJsonObject>& Spec,
+    FEdGraphPinType& OutType,
+    FError& OutError,
+    const FString& Path,
+    int32 Depth)
+{
+    OutType.ResetToDefaults();
+    OutError = FError{};
+
+    if (Depth == 0 && !ValidateContainerDepth(Spec, Path, 0, OutError))
+    {
+        return false;
+    }
+
+    FString Kind;
+    if (!TryGetKind(Spec, Path, Kind, OutError))
+    {
+        return false;
+    }
+
+    if (IsContainerKind(Kind) && Depth >= 8)
+    {
+        return InvalidInput(
+            OutError,
+            Path + TEXT(".kind"),
+            TEXT("Container nesting cannot exceed eight levels."));
+    }
+
+    auto SetPrimitive = [&OutType](const FName Category)
+    {
+        OutType.PinCategory = Category;
+    };
+    if (Kind == TEXT("bool") || Kind == TEXT("byte") ||
+        Kind == TEXT("int") || Kind == TEXT("int64") ||
+        Kind == TEXT("string") || Kind == TEXT("name") ||
+        Kind == TEXT("text"))
+    {
+        if (!ValidateClosedObject(Spec, {TEXT("kind")}, Path, OutError))
+        {
+            return false;
+        }
+        if (Kind == TEXT("bool")) SetPrimitive(UEdGraphSchema_K2::PC_Boolean);
+        else if (Kind == TEXT("byte")) SetPrimitive(UEdGraphSchema_K2::PC_Byte);
+        else if (Kind == TEXT("int")) SetPrimitive(UEdGraphSchema_K2::PC_Int);
+        else if (Kind == TEXT("int64")) SetPrimitive(UEdGraphSchema_K2::PC_Int64);
+        else if (Kind == TEXT("string")) SetPrimitive(UEdGraphSchema_K2::PC_String);
+        else if (Kind == TEXT("name")) SetPrimitive(UEdGraphSchema_K2::PC_Name);
+        else SetPrimitive(UEdGraphSchema_K2::PC_Text);
+        return true;
+    }
+
+    if (Kind == TEXT("real"))
+    {
+        if (!ValidateClosedObject(
+            Spec, {TEXT("kind"), TEXT("precision")}, Path, OutError))
+        {
+            return false;
+        }
+        FString Precision;
+        if (!TryGetRequiredString(
+            Spec, TEXT("precision"), Path, Precision, OutError))
+        {
+            return false;
+        }
+        if (Precision != TEXT("float") && Precision != TEXT("double"))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".precision"),
+                TEXT("Real precision must be 'float' or 'double'."));
+        }
+        OutType.PinCategory = UEdGraphSchema_K2::PC_Real;
+        OutType.PinSubCategory = Precision == TEXT("float")
+            ? UEdGraphSchema_K2::PC_Float
+            : UEdGraphSchema_K2::PC_Double;
+        return true;
+    }
+
+    if (Kind == TEXT("enum") || Kind == TEXT("struct"))
+    {
+        if (!ValidateClosedObject(
+            Spec, {TEXT("kind"), TEXT("type_path")}, Path, OutError))
+        {
+            return false;
+        }
+        FString TypePath;
+        if (!TryGetRequiredString(
+            Spec, TEXT("type_path"), Path, TypePath, OutError))
+        {
+            return false;
+        }
+        UObject* TypeObject = FindOrLoadTypeObject(TypePath);
+        if (Kind == TEXT("enum") && !Cast<UEnum>(TypeObject))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".type_path"),
+                TEXT("Enum type_path must resolve to a UEnum."));
+        }
+        if (Kind == TEXT("struct") && !Cast<UScriptStruct>(TypeObject))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".type_path"),
+                TEXT("Struct type_path must resolve to a UScriptStruct."));
+        }
+        OutType.PinCategory = Kind == TEXT("enum")
+            ? UEdGraphSchema_K2::PC_Byte
+            : UEdGraphSchema_K2::PC_Struct;
+        OutType.PinSubCategoryObject = TypeObject;
+        return true;
+    }
+
+    if (Kind == TEXT("object") || Kind == TEXT("class") ||
+        Kind == TEXT("interface") || Kind == TEXT("soft_object") ||
+        Kind == TEXT("soft_class"))
+    {
+        if (!ValidateClosedObject(
+            Spec, {TEXT("kind"), TEXT("class_path")}, Path, OutError))
+        {
+            return false;
+        }
+        FString ClassPath;
+        if (!TryGetRequiredString(
+            Spec, TEXT("class_path"), Path, ClassPath, OutError))
+        {
+            return false;
+        }
+        UClass* Class = Cast<UClass>(FindOrLoadTypeObject(ClassPath));
+        if (!Class)
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".class_path"),
+                TEXT("class_path must resolve to a UClass."));
+        }
+        if (Kind == TEXT("interface") &&
+            !Class->HasAnyClassFlags(CLASS_Interface))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".class_path"),
+                TEXT("Interface class_path must resolve to an interface class."));
+        }
+        if (Kind == TEXT("object")) OutType.PinCategory = UEdGraphSchema_K2::PC_Object;
+        else if (Kind == TEXT("class")) OutType.PinCategory = UEdGraphSchema_K2::PC_Class;
+        else if (Kind == TEXT("interface")) OutType.PinCategory = UEdGraphSchema_K2::PC_Interface;
+        else if (Kind == TEXT("soft_object")) OutType.PinCategory = UEdGraphSchema_K2::PC_SoftObject;
+        else OutType.PinCategory = UEdGraphSchema_K2::PC_SoftClass;
+        OutType.PinSubCategoryObject = Class;
+        return true;
+    }
+
+    if (Kind == TEXT("array") || Kind == TEXT("set"))
+    {
+        if (!ValidateClosedObject(
+            Spec, {TEXT("kind"), TEXT("item")}, Path, OutError))
+        {
+            return false;
+        }
+        TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+        if (!TryGetRequiredObject(
+            Spec, TEXT("item"), Path, Item, OutError))
+        {
+            return false;
+        }
+        FString ItemKind;
+        if (!TryGetKind(Item, Path + TEXT(".item"), ItemKind, OutError))
+        {
+            return false;
+        }
+        if (IsContainerKind(ItemKind))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".item.kind"),
+                TEXT("Unreal pin types cannot contain implicit nested containers."),
+                TEXT("Wrap the nested container in a Blueprint struct."));
+        }
+        if (!ParseTypeSpec(
+            Item, OutType, OutError, Path + TEXT(".item"), Depth + 1))
+        {
+            return false;
+        }
+        OutType.ContainerType = Kind == TEXT("array")
+            ? EPinContainerType::Array
+            : EPinContainerType::Set;
+        return true;
+    }
+
+    if (Kind == TEXT("map"))
+    {
+        if (!ValidateClosedObject(
+            Spec,
+            {TEXT("kind"), TEXT("key"), TEXT("value")},
+            Path,
+            OutError))
+        {
+            return false;
+        }
+        TSharedRef<FJsonObject> Key = MakeShared<FJsonObject>();
+        TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        if (!TryGetRequiredObject(Spec, TEXT("key"), Path, Key, OutError) ||
+            !TryGetRequiredObject(Spec, TEXT("value"), Path, Value, OutError))
+        {
+            return false;
+        }
+        FString KeyKind;
+        if (!TryGetKind(Key, Path + TEXT(".key"), KeyKind, OutError))
+        {
+            return false;
+        }
+        if (IsContainerKind(KeyKind))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".key.kind"),
+                TEXT("Map keys cannot be containers."));
+        }
+        FString ValueKind;
+        if (!TryGetKind(Value, Path + TEXT(".value"), ValueKind, OutError))
+        {
+            return false;
+        }
+        if (IsContainerKind(ValueKind))
+        {
+            return InvalidInput(
+                OutError,
+                Path + TEXT(".value.kind"),
+                TEXT("Unreal pin types cannot contain implicit nested containers."),
+                TEXT("Wrap the nested container in a Blueprint struct."));
+        }
+        FEdGraphPinType KeyType;
+        FEdGraphPinType ValueType;
+        if (!ParseTypeSpec(
+                Key, KeyType, OutError, Path + TEXT(".key"), Depth + 1) ||
+            !ParseTypeSpec(
+                Value, ValueType, OutError, Path + TEXT(".value"), Depth + 1))
+        {
+            return false;
+        }
+        OutType = KeyType;
+        OutType.ContainerType = EPinContainerType::Map;
+        OutType.PinValueType = FEdGraphTerminalType::FromPinType(ValueType);
+        return true;
+    }
+
+    return InvalidInput(
+        OutError,
+        Path + TEXT(".kind"),
+        FString::Printf(TEXT("Unknown Blueprint type kind '%s'."), *Kind));
+}
+
+TSharedRef<FJsonObject> SerializeTypeSpec(const FEdGraphPinType& Type)
+{
+    if (Type.ContainerType == EPinContainerType::None)
+    {
+        return SerializeScalarType(Type);
+    }
+
+    if (Type.ContainerType == EPinContainerType::Array ||
+        Type.ContainerType == EPinContainerType::Set)
+    {
+        FEdGraphPinType ItemType = Type;
+        ItemType.ContainerType = EPinContainerType::None;
+        const TCHAR* Kind = Type.ContainerType == EPinContainerType::Array
+            ? TEXT("array")
+            : TEXT("set");
+        const TSharedRef<FJsonObject> Result = MakeKindObject(Kind);
+        Result->SetObjectField(TEXT("item"), SerializeScalarType(ItemType));
+        return Result;
+    }
+
+    FEdGraphPinType KeyType = Type;
+    KeyType.ContainerType = EPinContainerType::None;
+    const FEdGraphPinType ValueType =
+        FEdGraphPinType::GetPinTypeForTerminalType(Type.PinValueType);
+    const TSharedRef<FJsonObject> Result = MakeKindObject(TEXT("map"));
+    Result->SetObjectField(TEXT("key"), SerializeScalarType(KeyType));
+    Result->SetObjectField(TEXT("value"), SerializeScalarType(ValueType));
+    return Result;
+}
+
+bool NormalizeDefaultValue(
+    const FEdGraphPinType& Type,
+    const TSharedPtr<FJsonValue>& JsonValue,
+    UObject* Owner,
+    FNormalizedDefault& OutDefault,
+    FError& OutError,
+    const FString& Path)
+{
+    OutDefault = FNormalizedDefault{};
+    OutError = FError{};
+    FString ImportText;
+    if (!JsonToImportText(
+        Type,
+        JsonValue,
+        Path,
+        false,
+        ImportText,
+        OutError))
+    {
+        return false;
+    }
+
+    if (!ValidateDefaultRecursively(
+            Type, JsonValue, Owner, Path, OutError))
+    {
+        return false;
+    }
+
+    const UEdGraphSchema_K2* Schema = GetDefault<UEdGraphSchema_K2>();
+    Schema->GetPinDefaultValuesFromString(
+        Type,
+        Owner,
+        ImportText,
+        OutDefault.DefaultValue,
+        OutDefault.DefaultObject,
+        OutDefault.DefaultTextValue);
+
+    if (Type.IsContainer())
+    {
+        OutDefault.DefaultValue = ImportText;
+        OutDefault.DefaultObject = nullptr;
+        OutDefault.DefaultTextValue = FText::GetEmpty();
+    }
+
+    if (!Type.IsContainer() && !JsonValue->IsNull() &&
+        (Type.PinCategory == UEdGraphSchema_K2::PC_Object ||
+         Type.PinCategory == UEdGraphSchema_K2::PC_Class ||
+         Type.PinCategory == UEdGraphSchema_K2::PC_Interface) &&
+        !OutDefault.DefaultObject)
+    {
+        OutDefault = FNormalizedDefault{};
+        return InvalidInput(
+            OutError, Path, TEXT("Unreal object path could not be resolved."));
+    }
+
+    FEdGraphPinType ValidationType = Type;
+    if (ValidationType.PinCategory == UEdGraphSchema_K2::PC_Enum)
+    {
+        ValidationType.PinCategory = UEdGraphSchema_K2::PC_Byte;
+    }
+    FString ValidationMessage;
+    if (!Schema->DefaultValueSimpleValidation(
+        ValidationType,
+        NAME_None,
+        OutDefault.DefaultValue,
+        OutDefault.DefaultObject,
+        OutDefault.DefaultTextValue,
+        &ValidationMessage))
+    {
+        OutDefault = FNormalizedDefault{};
+        return InvalidInput(OutError, Path, ValidationMessage);
+    }
+    return true;
 }
 
 TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint)

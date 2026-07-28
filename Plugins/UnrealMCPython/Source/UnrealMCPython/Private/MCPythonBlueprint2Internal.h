@@ -11,6 +11,7 @@ class UEdGraph;
 class UEdGraphNode;
 class UEdGraphPin;
 class USCS_Node;
+struct FEdGraphPinType;
 
 namespace UE::MCPython::Blueprint2
 {
@@ -50,6 +51,21 @@ struct FRollbackResult
     bool bSucceeded = false;
     bool bDeferredToWorkflow = false;
     TArray<TSharedPtr<FJsonValue>> ResidualChanges;
+};
+
+struct FError
+{
+    FString Code;
+    FString Path;
+    FString Message;
+    FString Hint;
+};
+
+struct FNormalizedDefault
+{
+    FString DefaultValue;
+    TObjectPtr<UObject> DefaultObject = nullptr;
+    FText DefaultTextValue;
 };
 
 class FMutationScope
@@ -117,4 +133,18 @@ TSharedRef<FJsonObject> MakeFailure(
 FString SerializeResult(const TSharedRef<FJsonObject>& Result);
 TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint);
 bool IsSupportedBlueprintSelectionEditor(const FName& EditorName);
+bool ParseTypeSpec(
+    const TSharedRef<FJsonObject>& Spec,
+    FEdGraphPinType& OutType,
+    FError& OutError,
+    const FString& Path = TEXT("params.type"),
+    int32 Depth = 0);
+TSharedRef<FJsonObject> SerializeTypeSpec(const FEdGraphPinType& Type);
+bool NormalizeDefaultValue(
+    const FEdGraphPinType& Type,
+    const TSharedPtr<FJsonValue>& JsonValue,
+    UObject* Owner,
+    FNormalizedDefault& OutDefault,
+    FError& OutError,
+    const FString& Path);
 }
