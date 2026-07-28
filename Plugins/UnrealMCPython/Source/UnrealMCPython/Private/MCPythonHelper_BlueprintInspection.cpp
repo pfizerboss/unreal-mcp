@@ -1288,6 +1288,10 @@ FInspectRecord MakeComponentRecord(
             ? UE::MCPython::Blueprint2::DescribeComponentTarget(
                 Blueprint, Parent).Id
             : FString());
+    const int32 SiblingIndex = Parent
+        ? Parent->GetChildNodes().IndexOfByKey(Component)
+        : Blueprint->SimpleConstructionScript->GetRootNodes().IndexOfByKey(Component);
+    Record.Json->SetNumberField(TEXT("sibling_index"), SiblingIndex);
     Record.Json->SetNumberField(
         TEXT("child_count"), Component->GetChildNodes().Num());
     if (bHierarchy || bDetailed)
@@ -1302,12 +1306,6 @@ FInspectRecord MakeComponentRecord(
                         Blueprint, Child).Id));
             }
         }
-        ChildIds.Sort([](
-            const TSharedPtr<FJsonValue>& A,
-            const TSharedPtr<FJsonValue>& B)
-        {
-            return A->AsString() < B->AsString();
-        });
         Record.Json->SetArrayField(TEXT("child_ids"), ChildIds);
     }
     if (bDetailed)

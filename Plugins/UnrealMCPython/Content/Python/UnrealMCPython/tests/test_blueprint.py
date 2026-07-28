@@ -102,6 +102,8 @@ class TestBlueprintActions(MCPTestCase):
                       component_class_path="/Script/Engine.StaticMeshComponent",
                       component_name="TestMeshComp")
         self.assertSuccess(r)
+        self.assertNotEqual(self._compile_status(), "UpToDate")
+        self.assertTrue(self._is_blueprint_package_dirty())
 
     def test_add_and_remove_component(self):
         self._skip_if_no_bp()
@@ -110,10 +112,47 @@ class TestBlueprintActions(MCPTestCase):
                       component_class_path="/Script/Engine.PointLightComponent",
                       component_name="TestLightComp")
         self.assertSuccess(r)
+        compiled = self.call("blueprint_actions", "ue_compile_blueprint",
+                             asset_path=self._bp_path)
+        self.assertSuccess(compiled)
+        blueprint = unreal.EditorAssetLibrary.load_asset(self._bp_path)
+        self.assertTrue(unreal.EditorAssetLibrary.save_loaded_asset(blueprint))
+        self.assertFalse(self._is_blueprint_package_dirty())
         r = self.call("blueprint_actions", "ue_remove_component_from_blueprint",
                       asset_path=self._bp_path,
                       component_name="TestLightComp")
         self.assertSuccess(r)
+        self.assertNotEqual(self._compile_status(), "UpToDate")
+        self.assertTrue(self._is_blueprint_package_dirty())
+
+    def test_legacy_component_name_adapter_is_case_sensitive(self):
+        self._skip_if_no_bp()
+        added = self.call(
+            "blueprint_actions",
+            "ue_add_component_to_blueprint",
+            asset_path=self._bp_path,
+            component_class_path="/Script/Engine.StaticMeshComponent",
+            component_name="ExactCaseComp",
+        )
+        self.assertSuccess(added)
+
+        rejected = self.call(
+            "blueprint_actions",
+            "ue_remove_component_from_blueprint",
+            asset_path=self._bp_path,
+            component_name="exactcasecomp",
+        )
+        self.assertFalse(rejected.get("success"), rejected)
+        components = self.call(
+            "blueprint_actions",
+            "ue_list_blueprint_components",
+            asset_path=self._bp_path,
+        )
+        self.assertSuccess(components)
+        self.assertIn(
+            "ExactCaseComp",
+            [component["variable_name"] for component in components["components"]],
+        )
 
     def test_auto_layout_graph(self):
         self._skip_if_no_bp()
@@ -190,14 +229,55 @@ class TestBlueprintActions(MCPTestCase):
 
     def test_set_component_property(self):
         self._skip_if_no_bp()
-        self.call("blueprint_actions", "ue_add_component_to_blueprint",
-                  asset_path=self._bp_path,
-                  component_class_path="/Script/Engine.PointLightComponent",
-                  component_name="PropLightComp")
+        added = self.call("blueprint_actions", "ue_add_component_to_blueprint",
+                          asset_path=self._bp_path,
+                          component_class_path="/Script/Engine.PointLightComponent",
+                          component_name="PropLightComp")
+        self.assertSuccess(added)
+        compiled = self.call("blueprint_actions", "ue_compile_blueprint",
+                             asset_path=self._bp_path)
+        self.assertSuccess(compiled)
+        blueprint = unreal.EditorAssetLibrary.load_asset(self._bp_path)
+        self.assertTrue(unreal.EditorAssetLibrary.save_loaded_asset(blueprint))
+        self.assertFalse(self._is_blueprint_package_dirty())
         r = self.call("blueprint_actions", "ue_set_component_property",
                       asset_path=self._bp_path, component_name="PropLightComp",
                       property_name="Intensity", value="5000.0")
         self.assertSuccess(r)
+        self.assertNotEqual(self._compile_status(), "UpToDate")
+        self.assertTrue(self._is_blueprint_package_dirty())
+
+    def test_set_component_property_rejects_unsafe_properties_before_mutation(self):
+        self._skip_if_no_bp()
+        added = self.call("blueprint_actions", "ue_add_component_to_blueprint",
+                          asset_path=self._bp_path,
+                          component_class_path="/Script/Engine.PointLightComponent",
+                          component_name="SafePropertyComp")
+        self.assertSuccess(added)
+        compiled = self.call("blueprint_actions", "ue_compile_blueprint",
+                             asset_path=self._bp_path)
+        self.assertSuccess(compiled)
+        blueprint = unreal.EditorAssetLibrary.load_asset(self._bp_path)
+        self.assertTrue(unreal.EditorAssetLibrary.save_loaded_asset(blueprint))
+        self.assertFalse(self._is_blueprint_package_dirty())
+
+        for property_name, value in (
+            ("CachedMaxDrawDistance", "1000"),
+            ("bIsBeingMovedByEditor", "true"),
+            ("OnComponentActivated", "()"),
+            ("DefinitelyMissingProperty", "1"),
+        ):
+            with self.subTest(property_name=property_name):
+                rejected = self.call(
+                    "blueprint_actions",
+                    "ue_set_component_property",
+                    asset_path=self._bp_path,
+                    component_name="SafePropertyComp",
+                    property_name=property_name,
+                    value=value,
+                )
+                self.assertFalse(rejected.get("success"), rejected)
+                self.assertFalse(self._is_blueprint_package_dirty())
 
     def test_create_blueprint(self):
         import unreal

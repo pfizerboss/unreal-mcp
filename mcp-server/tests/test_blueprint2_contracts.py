@@ -331,7 +331,7 @@ def test_mutation_targets_use_stable_ids():
         "rename_blueprint_component": {"component_id": COMPONENT_ID},
         "reparent_blueprint_component": {
             "component_id": COMPONENT_ID,
-            "parent_component_id": COMPONENT_ID,
+            "parent_component_id": {"anyOf": [COMPONENT_ID, {"type": "null"}]},
         },
         "reorder_blueprint_component": {"component_id": COMPONENT_ID},
         "set_blueprint_component_transform": {"component_id": COMPONENT_ID},
@@ -593,6 +593,27 @@ def test_component_transform_vectors_are_bounded():
         validator.validate(
             {**params, "transform": {"location": [0, 0, 1_000_000_001]}}
         )
+
+
+def test_reparent_component_uses_null_for_the_scs_root():
+    schema = _new_specs()["reparent_blueprint_component"]["input_schema"]
+    validator = Draft202012Validator(schema)
+    common = {
+        "asset_path": "/Game/BP_Player",
+        "component_id": "component:55555555-5555-4555-8555-555555555555",
+    }
+
+    validator.validate({**common, "parent_component_id": None})
+    validator.validate(
+        {
+            **common,
+            "parent_component_id": (
+                "component:66666666-6666-4666-8666-666666666666"
+            ),
+        }
+    )
+    with pytest.raises(ValidationError):
+        validator.validate({**common, "parent_component_id": ""})
 
 
 def test_diff_queries_use_fixed_sections_and_independent_pagination():
@@ -906,10 +927,14 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
         "disconnect_blueprint_pins",
         "rename_blueprint_variable",
         "remove_blueprint_variable",
-        "set_blueprint_variable_default",
-        "set_blueprint_variable_metadata",
-        "set_blueprint_variable_replication",
-    }
+            "set_blueprint_variable_default",
+            "set_blueprint_variable_metadata",
+            "set_blueprint_variable_replication",
+            "rename_blueprint_component",
+            "reparent_blueprint_component",
+            "reorder_blueprint_component",
+            "set_blueprint_component_transform",
+        }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()
         payload = json.loads(result)

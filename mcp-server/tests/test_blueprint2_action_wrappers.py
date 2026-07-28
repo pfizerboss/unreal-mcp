@@ -44,6 +44,7 @@ HELPER_HEADER = (
 INSPECTION_SOURCE = PRIVATE / "MCPythonHelper_BlueprintInspection.cpp"
 GRAPH_SOURCE = PRIVATE / "MCPythonHelper_BlueprintGraph.cpp"
 VARIABLE_SOURCE = PRIVATE / "MCPythonHelper_BlueprintVariables.cpp"
+COMPONENT_SOURCE = PRIVATE / "MCPythonHelper_BlueprintComponents.cpp"
 BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
 EDITOR_TESTS = (
     ROOT
@@ -279,6 +280,98 @@ def test_set_blueprint_variable_replication(monkeypatch):
             },
         )
     ]
+
+
+def test_rename_blueprint_component(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_rename_blueprint_component(
+        asset_path="/Game/BP.BP",
+        component_id="component:55555555-5555-4555-8555-555555555555",
+        new_name="PlayerMesh",
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "rename_blueprint_component",
+            "/Game/BP.BP",
+            {
+                "component_id": "component:55555555-5555-4555-8555-555555555555",
+                "new_name": "PlayerMesh",
+            },
+        )
+    ]
+
+
+def test_reparent_blueprint_component_supports_explicit_root(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_reparent_blueprint_component(
+        asset_path="/Game/BP.BP",
+        component_id="component:55555555-5555-4555-8555-555555555555",
+        parent_component_id=None,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "reparent_blueprint_component",
+            "/Game/BP.BP",
+            {
+                "component_id": "component:55555555-5555-4555-8555-555555555555",
+                "parent_component_id": None,
+            },
+        )
+    ]
+
+
+def test_reorder_blueprint_component(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_reorder_blueprint_component(
+        asset_path="/Game/BP.BP",
+        component_id="component:55555555-5555-4555-8555-555555555555",
+        sibling_index=2,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "reorder_blueprint_component",
+            "/Game/BP.BP",
+            {
+                "component_id": "component:55555555-5555-4555-8555-555555555555",
+                "sibling_index": 2,
+            },
+        )
+    ]
+
+
+def test_set_blueprint_component_transform_copies_input(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    transform = {"location": [10, 20, 30], "scale": [2, 2, 2]}
+    before = json.loads(json.dumps(transform))
+
+    result = module.ue_set_blueprint_component_transform(
+        asset_path="/Game/BP.BP",
+        component_id="component:55555555-5555-4555-8555-555555555555",
+        transform=transform,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert transform == before
+    assert calls == [
+        (
+            "set_blueprint_component_transform",
+            "/Game/BP.BP",
+            {
+                "component_id": "component:55555555-5555-4555-8555-555555555555",
+                "transform": before,
+            },
+        )
+    ]
+    assert calls[0][2]["transform"] is not transform
 
 
 def test_load_blueprint_accepts_blueprint_subclasses(monkeypatch):
@@ -1164,6 +1257,83 @@ def test_variable_authoring_validates_before_mutation_and_never_compiles_or_save
         assert "call_asset_helper" in body
         assert "compile_blueprint" not in body
         assert "save_loaded_asset" not in body
+
+
+def test_component_authoring_is_transactional_safe_and_never_compiles_or_saves():
+    assert COMPONENT_SOURCE.exists(), "Task 13 native component helper is missing"
+    source = COMPONENT_SOURCE.read_text(encoding="utf-8")
+    legacy_source = HELPER_SOURCE.read_text(encoding="utf-8")
+    header = HELPER_HEADER.read_text(encoding="utf-8")
+    actions = BLUEPRINT_ACTIONS.read_text(encoding="utf-8")
+
+    for declaration in (
+        "static FString RenameBlueprintComponent(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString ReparentBlueprintComponent(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString ReorderBlueprintComponent(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString SetBlueprintComponentTransform(UBlueprint* Blueprint, const FString& RequestJson);",
+    ):
+        assert declaration in header
+
+    for name in (
+        "AddComponentToBlueprint",
+        "RemoveComponentFromBlueprint",
+        "SetComponentProperty",
+        "RenameBlueprintComponent",
+        "ReparentBlueprintComponent",
+        "ReorderBlueprintComponent",
+        "SetBlueprintComponentTransform",
+    ):
+        body_start = source.index(f"FString UMCPythonHelper::{name}")
+        next_start = source.find("FString UMCPythonHelper::", body_start + 1)
+        body = source[body_start : next_start if next_start != -1 else len(source)]
+        assert "FMutationScope Scope" in body, name
+
+    property_body = source[
+        source.index("FString UMCPythonHelper::SetComponentProperty") :
+        source.index("FString UMCPythonHelper::RenameBlueprintComponent")
+    ]
+    mutation = property_body.index("FMutationScope Scope")
+    import_text = property_body.index("ImportText_Direct")
+    for validation in (
+        "CPF_EditConst",
+        "CPF_Transient",
+        "FDelegateProperty",
+        "FMulticastDelegateProperty",
+    ):
+        assert property_body.index(validation) < mutation
+        assert property_body.index(validation) < import_text
+
+    for moved_name in (
+        "AddComponentToBlueprint",
+        "RemoveComponentFromBlueprint",
+        "SetComponentProperty",
+    ):
+        assert f"UMCPythonHelper::{moved_name}" not in legacy_source
+
+    for forbidden in ("CompileBlueprint(", "SavePackage(", "save_asset("):
+        assert forbidden not in source
+
+    component_wrappers = (
+        actions[
+            actions.index("def ue_add_component_to_blueprint") :
+            actions.index("def ue_remove_component_from_blueprint")
+        ],
+        actions[
+            actions.index("def ue_remove_component_from_blueprint") :
+            actions.index("def ue_set_component_property")
+        ],
+        actions[
+            actions.index("def ue_set_component_property") :
+            actions.index("# ─── Graph Auto-Layout")
+        ],
+        actions[
+            actions.index("def ue_rename_blueprint_component") :
+            actions.index("def ue_get_blueprint_health")
+        ],
+    )
+    for body in component_wrappers:
+        assert "save_asset(" not in body
+        assert "compile_blueprint(" not in body
 
 
 def test_cpp_core_uses_persisted_guids_bounded_owners_and_guarded_undo():

@@ -278,6 +278,22 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString SetBlueprintVariableReplication(UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Rename one SCS component targeted by its persisted VariableGuid. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString RenameBlueprintComponent(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Reparent one SCS component to another stable component or the explicit SCS root. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString ReparentBlueprintComponent(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Move one SCS component to an explicit sibling index. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString ReorderBlueprintComponent(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Patch bounded relative transform fields on one scene component template. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SetBlueprintComponentTransform(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Return Blueprint 2 runtime or asset-specific capability data. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);

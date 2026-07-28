@@ -156,6 +156,52 @@ class TestBlueprint2Graph(MCPTestCase):
             separators=(",", ":"),
         )
 
+    def _component_records(self):
+        return self._inspect(
+            [{"op": "components", "detail": "detailed", "limit": 500}]
+        )[0]["items"]
+
+    def _component_record(self, component_name):
+        records = [
+            record
+            for record in self._component_records()
+            if record["name"] == component_name
+        ]
+        self.assertEqual(len(records), 1, records)
+        return records[0]
+
+    def _component_snapshot(self):
+        return json.dumps(
+            self._component_records(), sort_keys=True, separators=(",", ":")
+        )
+
+    def _add_component(self, component_name, component_class, parent_name=""):
+        result = call_action(
+            "blueprint_actions",
+            "ue_add_component_to_blueprint",
+            asset_path=self.asset_path,
+            component_class_path=component_class,
+            component_name=component_name,
+            parent_component_name=parent_name,
+        )
+        self.assertSuccess(result)
+        return self._component_record(component_name)
+
+    def _assert_component_rejected_unchanged(
+        self, action_name, expected_code="INVALID_INPUT", **kwargs
+    ):
+        before = self._component_snapshot()
+        result = call_action(
+            "blueprint_actions",
+            action_name,
+            asset_path=self.asset_path,
+            **kwargs,
+        )
+        self.assertFalse(result.get("success"), result)
+        self.assertEqual(result["errors"][0]["code"], expected_code, result)
+        self.assertEqual(self._component_snapshot(), before)
+        return result
+
     def _add_member_variable(self, variable_name, pin_type):
         self.assertTrue(
             unreal.BlueprintEditorLibrary.add_member_variable(
@@ -2046,6 +2092,314 @@ class TestBlueprint2Graph(MCPTestCase):
             )["workflow_transaction"]
             if context["active"]:
                 self._rollback_workflow(transaction_id)
+
+    def test_rename_blueprint_component(self):
+        camera = self._add_component(
+            "RenameCamera", "/Script/Engine.CameraComponent"
+        )
+        other = self._add_component(
+            "RenameCollision", "/Script/Engine.BoxComponent"
+        )
+        getter = self._add_common_node(
+            {"type": "VariableGet", "variable_name": "RenameCamera"}
+        )
+
+        renamed = call_action(
+            "blueprint_actions",
+            "ue_rename_blueprint_component",
+            asset_path=self.asset_path,
+            component_id=camera["component_id"],
+            new_name="RenamedCamera",
+        )
+        self.assertSuccess(renamed)
+        self.assertEqual(renamed["data"]["component_id"], camera["component_id"])
+        self.assertEqual(
+            self._component_record("RenamedCamera")["component_id"],
+            camera["component_id"],
+        )
+        inspected_getter = self._inspect_node(getter["data"]["node_id"])
+        self.assertIn(
+            "RenamedCamera", [pin["name"] for pin in inspected_getter["pins"]]
+        )
+        compiled = call_action(
+            "blueprint_actions",
+            "ue_compile_blueprint",
+            asset_path=self.asset_path,
+        )
+        self.assertSuccess(compiled)
+
+        self._assert_component_rejected_unchanged(
+            "ue_rename_blueprint_component",
+            expected_code="CONFLICT",
+            component_id=camera["component_id"],
+            new_name=other["name"],
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_rename_blueprint_component",
+            expected_code="CONFLICT",
+            component_id=camera["component_id"],
+            new_name=self.VARIABLE_NAME,
+        )
+
+        unreal.BlueprintEditorLibrary.compile_blueprint(self.blueprint)
+        child_name = f"Blueprint2ComponentChild_{uuid.uuid4().hex[:10]}"
+        child_factory = unreal.BlueprintFactory()
+        child_factory.set_editor_property(
+            "parent_class", self.blueprint.generated_class()
+        )
+        child_blueprint = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+            child_name,
+            BLUEPRINT2_TEST_ROOT,
+            unreal.Blueprint,
+            child_factory,
+        )
+        self.assertIsNotNone(child_blueprint)
+        child_path = f"{BLUEPRINT2_TEST_ROOT}/{child_name}.{child_name}"
+        self._created_assets.append(child_path)
+        self.assertTrue(
+            unreal.BlueprintEditorLibrary.add_member_variable(
+                child_blueprint,
+                unreal.Name("ChildComponentConflict"),
+                unreal.BlueprintEditorLibrary.get_basic_type_by_name(
+                    unreal.Name("bool")
+                ),
+            )
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_rename_blueprint_component",
+            expected_code="CONFLICT",
+            component_id=camera["component_id"],
+            new_name="ChildComponentConflict",
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_rename_blueprint_component",
+            expected_code="PRECONDITION_FAILED",
+            component_id="component:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            new_name="MissingComponent",
+        )
+
+    def test_reparent_blueprint_component(self):
+        parent = self._add_component(
+            "HierarchyParent", "/Script/Engine.SceneComponent"
+        )
+        child = self._add_component(
+            "HierarchyChild",
+            "/Script/Engine.SceneComponent",
+            parent_name="HierarchyParent",
+        )
+        grandchild = self._add_component(
+            "HierarchyGrandchild",
+            "/Script/Engine.SceneComponent",
+            parent_name="HierarchyChild",
+        )
+
+        self._assert_component_rejected_unchanged(
+            "ue_reparent_blueprint_component",
+            expected_code="CONFLICT",
+            component_id=parent["component_id"],
+            parent_component_id=grandchild["component_id"],
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_reparent_blueprint_component",
+            expected_code="CONFLICT",
+            component_id=child["component_id"],
+            parent_component_id=child["component_id"],
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_reparent_blueprint_component",
+            expected_code="PRECONDITION_FAILED",
+            component_id=child["component_id"],
+            parent_component_id=(
+                "component:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+            ),
+        )
+
+        rooted = call_action(
+            "blueprint_actions",
+            "ue_reparent_blueprint_component",
+            asset_path=self.asset_path,
+            component_id=child["component_id"],
+            parent_component_id=None,
+        )
+        self.assertSuccess(rooted)
+        self.assertEqual(self._component_record("HierarchyChild")["parent_id"], "")
+        self.assertEqual(
+            self._component_record("HierarchyGrandchild")["parent_id"],
+            child["component_id"],
+        )
+
+        before_workflow = self._component_snapshot()
+        transaction_id = self._begin_workflow("Reparent Blueprint component")
+        try:
+            moved = call_action(
+                "workflow_actions",
+                "ue_execute_step",
+                transaction_id=transaction_id,
+                action_module="UnrealMCPython.blueprint_actions",
+                action_name="ue_reparent_blueprint_component",
+                params={
+                    "asset_path": self.asset_path,
+                    "component_id": grandchild["component_id"],
+                    "parent_component_id": parent["component_id"],
+                },
+            )
+            self.assertSuccess(moved)
+            self.assertEqual(
+                self._component_record("HierarchyGrandchild")["parent_id"],
+                parent["component_id"],
+            )
+            self._rollback_workflow(transaction_id)
+            self.assertEqual(self._component_snapshot(), before_workflow)
+        finally:
+            context = call_action(
+                "workflow_actions", "ue_get_editor_context", asset_paths=[]
+            )["workflow_transaction"]
+            if context["active"]:
+                self._rollback_workflow(transaction_id)
+
+    def test_reorder_blueprint_component(self):
+        parent = self._add_component(
+            "OrderParent", "/Script/Engine.SceneComponent"
+        )
+        children = [
+            self._add_component(
+                name,
+                "/Script/Engine.SceneComponent",
+                parent_name="OrderParent",
+            )
+            for name in ("OrderA", "OrderB", "OrderC")
+        ]
+
+        def indexes():
+            return {
+                name: self._component_record(name)["sibling_index"]
+                for name in ("OrderA", "OrderB", "OrderC")
+            }
+
+        self.assertEqual(indexes(), {"OrderA": 0, "OrderB": 1, "OrderC": 2})
+        for component, requested, expected in (
+            (children[2], 0, {"OrderC": 0, "OrderA": 1, "OrderB": 2}),
+            (children[2], 1, {"OrderA": 0, "OrderC": 1, "OrderB": 2}),
+            (children[2], 2, {"OrderA": 0, "OrderB": 1, "OrderC": 2}),
+        ):
+            moved = call_action(
+                "blueprint_actions",
+                "ue_reorder_blueprint_component",
+                asset_path=self.asset_path,
+                component_id=component["component_id"],
+                sibling_index=requested,
+            )
+            self.assertSuccess(moved)
+            self.assertEqual(indexes(), expected)
+
+        self._assert_component_rejected_unchanged(
+            "ue_reorder_blueprint_component",
+            component_id=children[0]["component_id"],
+            sibling_index=3,
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_reorder_blueprint_component",
+            expected_code="PRECONDITION_FAILED",
+            component_id="component:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            sibling_index=0,
+        )
+
+        movement = self._add_component(
+            "OrderMovement",
+            "/Script/Engine.RotatingMovementComponent",
+            parent_name="OrderParent",
+        )
+        rooted = call_action(
+            "blueprint_actions",
+            "ue_reparent_blueprint_component",
+            asset_path=self.asset_path,
+            component_id=movement["component_id"],
+            parent_component_id=None,
+        )
+        self.assertSuccess(rooted)
+        before_root_reorder = self._component_snapshot()
+        root_reorder = call_action(
+            "blueprint_actions",
+            "ue_reorder_blueprint_component",
+            asset_path=self.asset_path,
+            component_id=movement["component_id"],
+            sibling_index=0,
+        )
+        if not root_reorder.get("success"):
+            self.assertEqual(
+                root_reorder["errors"][0]["code"], "UE_VERSION_UNSUPPORTED"
+            )
+            self.assertEqual(
+                root_reorder["errors"][0]["details"]["capability"],
+                "root_component_reorder",
+            )
+            self.assertEqual(self._component_snapshot(), before_root_reorder)
+        else:
+            self.assertEqual(
+                self._component_record("OrderMovement")["sibling_index"], 0
+            )
+
+    def test_set_blueprint_component_transform(self):
+        scene = self._add_component(
+            "TransformScene", "/Script/Engine.SceneComponent"
+        )
+        initial = self._component_record("TransformScene")["defaults"]
+
+        for transform in (
+            {"location": [10.5, -20.25, 30.75]},
+            {"rotation": [15, 25, 35]},
+            {"scale": [2, 3, 4]},
+        ):
+            changed = call_action(
+                "blueprint_actions",
+                "ue_set_blueprint_component_transform",
+                asset_path=self.asset_path,
+                component_id=scene["component_id"],
+                transform=transform,
+            )
+            self.assertSuccess(changed)
+
+        defaults = self._component_record("TransformScene")["defaults"]
+        self.assertEqual(
+            defaults["relative_location"], {"x": 10.5, "y": -20.25, "z": 30.75}
+        )
+        for field, expected in (("pitch", 15), ("yaw", 25), ("roll", 35)):
+            self.assertAlmostEqual(
+                defaults["relative_rotation"][field], expected, places=6
+            )
+        self.assertEqual(
+            defaults["relative_scale"], {"x": 2, "y": 3, "z": 4}
+        )
+        self.assertNotEqual(defaults, initial)
+
+        self._assert_component_rejected_unchanged(
+            "ue_set_blueprint_component_transform",
+            component_id=scene["component_id"],
+            transform={"location": [0, 0, 1_000_000_001]},
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_set_blueprint_component_transform",
+            expected_code="PRECONDITION_FAILED",
+            component_id="component:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            transform={"location": [0, 0, 0]},
+        )
+        movement = self._add_component(
+            "TransformMovement", "/Script/Engine.RotatingMovementComponent"
+        )
+        self._assert_component_rejected_unchanged(
+            "ue_set_blueprint_component_transform",
+            expected_code="PRECONDITION_FAILED",
+            component_id=movement["component_id"],
+            transform={"location": [0, 0, 0]},
+        )
+
+    def test_legacy_graph_mutation_workflow_rollbacks_continued(self):
+        branch = self._add_common_node(
+            {"type": "Branch", "pos_x": 160, "pos_y": 120}
+        )
+        sequence = self._add_common_node(
+            {"type": "Sequence", "output_count": 2, "pos_x": 480, "pos_y": 120}
+        )
 
         transaction_id = self._begin_workflow("Move Blueprint node")
         try:

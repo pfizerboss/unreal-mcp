@@ -417,7 +417,6 @@ def ue_add_component_to_blueprint(asset_path: str = None,
             rotation_pitch, rotation_yaw, rotation_roll,
             parent_component_name or ""
         )
-        unreal.EditorAssetLibrary.save_asset(bp.get_path_name(), only_if_is_dirty=False)
         return result
     except Exception as e:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
@@ -434,7 +433,6 @@ def ue_remove_component_from_blueprint(asset_path: str = None, component_name: s
         if err:
             return err
         result = unreal.MCPythonHelper.remove_component_from_blueprint(bp, component_name)
-        unreal.EditorAssetLibrary.save_asset(bp.get_path_name(), only_if_is_dirty=False)
         return result
     except Exception as e:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
@@ -456,7 +454,6 @@ def ue_set_component_property(asset_path: str = None, component_name: str = None
         if err:
             return err
         result = unreal.MCPythonHelper.set_component_property(bp, component_name, property_name, value)
-        unreal.EditorAssetLibrary.save_asset(bp.get_path_name(), only_if_is_dirty=False)
         return result
     except Exception as e:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
@@ -1073,31 +1070,60 @@ def ue_set_blueprint_variable_replication(asset_path: str = None,
 
 
 def ue_rename_blueprint_component(asset_path: str = None,
-                                        component_id: str = None,
-                                        new_name: str = None) -> str:
+                                         component_id: str = None,
+                                         new_name: str = None) -> str:
     """Renames an SCS component targeted by stable ID."""
-    return _blueprint2_unsupported("rename_blueprint_component")
+    from UnrealMCPython import blueprint2
+
+    return blueprint2.call_asset_helper(
+        "rename_blueprint_component",
+        asset_path,
+        {"component_id": component_id, "new_name": new_name},
+    )
 
 
 def ue_reparent_blueprint_component(asset_path: str = None,
                                           component_id: str = None,
                                           parent_component_id: str = None) -> str:
     """Reparents an SCS component using stable component IDs."""
-    return _blueprint2_unsupported("reparent_blueprint_component")
+    from UnrealMCPython import blueprint2
+
+    return blueprint2.call_asset_helper(
+        "reparent_blueprint_component",
+        asset_path,
+        {
+            "component_id": component_id,
+            "parent_component_id": parent_component_id,
+        },
+    )
 
 
 def ue_reorder_blueprint_component(asset_path: str = None,
                                          component_id: str = None,
                                          sibling_index: int = None) -> str:
     """Moves an SCS component to an explicit sibling index."""
-    return _blueprint2_unsupported("reorder_blueprint_component")
+    from UnrealMCPython import blueprint2
+
+    return blueprint2.call_asset_helper(
+        "reorder_blueprint_component",
+        asset_path,
+        {"component_id": component_id, "sibling_index": sibling_index},
+    )
 
 
 def ue_set_blueprint_component_transform(asset_path: str = None,
                                                component_id: str = None,
                                                transform: dict = None) -> str:
     """Sets bounded relative transform fields on an SCS component."""
-    return _blueprint2_unsupported("set_blueprint_component_transform")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "component_id": component_id,
+        "transform": transform,
+    })
+    return blueprint2.call_asset_helper(
+        "set_blueprint_component_transform", asset_path, request
+    )
 
 
 def ue_get_blueprint_health(asset_path: str = None,

@@ -1134,7 +1134,9 @@ BLUEPRINT2_ACTION_SPECS = {
             {
                 "asset_path": ASSET_PATH,
                 "component_id": COMPONENT_ID,
-                "parent_component_id": COMPONENT_ID,
+                "parent_component_id": {
+                    "anyOf": [COMPONENT_ID, {"type": "null"}],
+                },
             },
             ("asset_path", "component_id", "parent_component_id"),
         ),
