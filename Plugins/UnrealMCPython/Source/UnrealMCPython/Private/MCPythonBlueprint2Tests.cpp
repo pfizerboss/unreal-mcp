@@ -894,6 +894,51 @@ bool FMCPythonBlueprint2BriefCountsTest::RunTest(const FString& Parameters)
         TEXT("Blueprint brief excludes nested graph names"),
         bContainsNestedGraph);
 
+    const TSharedPtr<FJsonObject> Inspection = ParseJsonObject(
+        UMCPythonHelper::InspectBlueprint(
+            BriefBlueprint,
+            TEXT("{\"queries\":["
+                 "{\"op\":\"macros\",\"detail\":\"detailed\"},"
+                 "{\"op\":\"dispatchers\"},"
+                 "{\"op\":\"interfaces\"}]}")));
+    TestTrue(
+        TEXT("Blueprint inspection fixture succeeds"),
+        Inspection.IsValid() && Inspection->GetBoolField(TEXT("success")));
+    if (Inspection && Inspection->GetBoolField(TEXT("success")))
+    {
+        const TArray<TSharedPtr<FJsonValue>>& Results =
+            Inspection->GetObjectField(TEXT("data"))->GetArrayField(
+                TEXT("results"));
+        TestEqual(
+            TEXT("Blueprint inspection emits all fixture query results"),
+            Results.Num(),
+            int32(3));
+        if (Results.Num() == 3)
+        {
+            for (int32 Index = 0; Index < Results.Num(); ++Index)
+            {
+                const TSharedPtr<FJsonObject> Result = Results[Index]->AsObject();
+                TestEqual(
+                    *FString::Printf(
+                        TEXT("Blueprint inspection query %d is non-empty"),
+                        Index),
+                    Result->GetIntegerField(TEXT("returned_count")),
+                    int32(1));
+            }
+            const TSharedPtr<FJsonObject> Macro =
+                Results[0]->AsObject()->GetArrayField(TEXT("items"))[0]->AsObject();
+            TestTrue(
+                TEXT("Detailed macro inspection emits source metadata"),
+                Macro->HasTypedField<EJson::Object>(TEXT("metadata")));
+            const TSharedPtr<FJsonObject> Interface =
+                Results[2]->AsObject()->GetArrayField(TEXT("items"))[0]->AsObject();
+            TestEqualSensitive(
+                TEXT("Interface inspection emits the implemented class path"),
+                Interface->GetStringField(TEXT("class_path")),
+                UInterface::StaticClass()->GetPathName());
+        }
+    }
+
     return true;
 }
 

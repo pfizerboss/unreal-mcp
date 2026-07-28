@@ -541,6 +541,7 @@ INSPECT_QUERY = _object(
         "kind": {"type": "string", "minLength": 1},
         "name_pattern": {"type": "string", "minLength": 1},
         "class_path": FULL_UNREAL_PATH,
+        "detail": {"type": "string", "enum": ["compact", "detailed"], "default": "compact"},
         "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
         "cursor": {"type": "string", "default": ""},
     },
@@ -617,16 +618,14 @@ BLUEPRINT2_ACTION_SPECS = {
         _object(
             {
                 "asset_path": ASSET_PATH,
-                "queries": _array(INSPECT_QUERY, minItems=1, maxItems=32),
-                "compact": {"type": "boolean", "default": True},
+                "queries": _array(INSPECT_QUERY, maxItems=32),
                 "cursor": {"type": "string", "default": ""},
             },
-            ("asset_path", "queries"),
+            ("asset_path",),
         ),
         {
             "asset_path": "/Game/BP_Player",
             "queries": [{"op": "functions", "limit": 100}],
-            "compact": True,
         },
     ),
     "create_blueprint_function": _write(

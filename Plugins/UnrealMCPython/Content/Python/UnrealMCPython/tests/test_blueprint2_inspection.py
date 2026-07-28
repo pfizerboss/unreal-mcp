@@ -70,6 +70,7 @@ class TestBlueprint2Inspection(MCPTestCase):
             node_json={"type": "CustomEvent", "event_name": self.ACTOR_EVENT},
         )
         self.assertSuccess(event)
+        self._actor_event_node_name = event["node_name"]
         unreal.BlueprintEditorLibrary.compile_blueprint(blueprint)
         self.assertTrue(unreal.EditorAssetLibrary.save_loaded_asset(blueprint))
 
@@ -159,6 +160,444 @@ class TestBlueprint2Inspection(MCPTestCase):
                 {"asset_path": asset_path},
             )
         )
+
+    def _inspect(self, queries=(), *, cursor=""):
+        return json.loads(
+            execute_action(
+                "UnrealMCPython.blueprint_actions",
+                "ue_inspect_blueprint",
+                {
+                    "asset_path": self._actor_path,
+                    "queries": list(queries),
+                    "cursor": cursor,
+                },
+            )
+        )
+
+    def _add_custom_event(self, event_name):
+        result = call_action(
+            "blueprint_actions",
+            "ue_add_blueprint_node",
+            asset_path=self._actor_path,
+            graph_name="EventGraph",
+            node_json={"type": "CustomEvent", "event_name": event_name},
+        )
+        self.assertSuccess(result)
+
+    def _add_connected_print_string(self):
+        result = call_action(
+            "blueprint_actions",
+            "ue_add_blueprint_node",
+            asset_path=self._actor_path,
+            graph_name="EventGraph",
+            node_json={
+                "type": "CallFunction",
+                "function_name": "PrintString",
+                "target": "KismetSystemLibrary",
+            },
+        )
+        self.assertSuccess(result)
+        connected = call_action(
+            "blueprint_actions",
+            "ue_connect_blueprint_pins",
+            asset_path=self._actor_path,
+            graph_name="EventGraph",
+            source_node=self._actor_event_node_name,
+            source_pin="then",
+            target_node=result["node_name"],
+            target_pin="execute",
+        )
+        self.assertSuccess(connected)
+        return result["node_name"]
+
+    def _build_large_event_graph(self):
+        nodes = [
+            {
+                "id": f"pagination_event_{index:03d}",
+                "type": "CustomEvent",
+                "event_name": f"PaginationEvent{index:03d}",
+                "pos_x": (index % 10) * 300,
+                "pos_y": (index // 10) * 180,
+            }
+            for index in range(120)
+        ]
+        result = call_action(
+            "blueprint_actions",
+            "ue_build_blueprint_graph",
+            asset_path=self._actor_path,
+            graph_name="EventGraph",
+            graph_structure={"nodes": nodes, "connections": []},
+        )
+        self.assertSuccess(result)
+        self.assertEqual(result["nodes_created"], 120)
+        blueprint = unreal.EditorAssetLibrary.load_asset(self._actor_path)
+        unreal.BlueprintEditorLibrary.compile_blueprint(blueprint)
+        self.assertTrue(unreal.EditorAssetLibrary.save_loaded_asset(blueprint))
+
+    def test_inspect_blueprint(self):
+        result = self._inspect(
+            [
+                {"op": "variables", "name_pattern": "Brief*"},
+                {
+                    "op": "nodes",
+                    "class_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+                },
+                {"op": "components", "name_pattern": "Brief*"},
+                {"op": "events", "name_pattern": self.ACTOR_EVENT},
+            ]
+        )
+
+        self.assertSuccess(result)
+        self.assertEqual(result["data"]["asset_path"], self._actor_path)
+        results = result["data"]["results"]
+        self.assertEqual(
+            [query_result["op"] for query_result in results],
+            ["variables", "nodes", "components", "events"],
+        )
+        self.assertEqual(results[0]["items"][0]["name"], self.ACTOR_VARIABLE)
+        self.assertEqual(results[1]["items"][0]["kind"], "custom_event")
+        self.assertEqual(results[2]["items"][0]["name"], self.ACTOR_COMPONENT)
+        event = results[3]["items"][0]
+        self.assertTrue(event["name"].startswith("K2Node_CustomEvent_"))
+        self.assertNotEqual(event["name"], self.ACTOR_EVENT)
+        self.assertEqual(event["event_name"], self.ACTOR_EVENT)
+        for query_result in results:
+            self.assertEqual(query_result["detail"], "compact")
+            self.assertEqual(query_result["returned_count"], len(query_result["items"]))
+            for record in query_result["items"]:
+                for identity_field in ("id", "id_kind", "stable", "kind", "name"):
+                    self.assertIn(identity_field, record)
+
+    def test_inspect_empty_queries_defaults_to_compact_overview(self):
+        result = self._inspect()
+
+        self.assertSuccess(result)
+        query_result = result["data"]["results"][0]
+        self.assertEqual(query_result["op"], "overview")
+        self.assertEqual(query_result["detail"], "compact")
+        self.assertEqual(query_result["returned_count"], 1)
+        self.assertNotIn("nodes", query_result["items"][0])
+
+    def test_inspect_each_supported_op(self):
+        operations = [
+            "overview",
+            "variables",
+            "variable_defaults",
+            "components",
+            "component_hierarchy",
+            "functions",
+            "macros",
+            "events",
+            "dispatchers",
+            "interfaces",
+            "nodes",
+            "pins",
+            "connections",
+        ]
+
+        result = self._inspect([{"op": operation, "limit": 1} for operation in operations])
+
+        self.assertSuccess(result)
+        results = result["data"]["results"]
+        self.assertEqual([query_result["op"] for query_result in results], operations)
+        for query_result in results:
+            self.assertLessEqual(len(query_result["items"]), 1)
+            self.assertIn("total_count", query_result)
+            self.assertIn("returned_count", query_result)
+            self.assertIn("next_cursor", query_result)
+        overview = results[0]["items"][0]
+        self.assertNotIn("nodes", overview)
+        self.assertNotIn("pins", overview)
+
+    def test_inspect_compact_omits_details(self):
+        result = self._inspect(
+            [
+                {
+                    "op": "nodes",
+                    "class_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+                    "limit": 1,
+                    "detail": "compact",
+                }
+            ]
+        )
+
+        self.assertSuccess(result)
+        node = result["data"]["results"][0]["items"][0]
+        for detailed_field in (
+            "title",
+            "position",
+            "pins",
+            "default",
+            "metadata",
+            "linked_pin_ids",
+        ):
+            self.assertNotIn(detailed_field, node)
+        self.assertIn("pin_count", node)
+        self.assertIn("type", node)
+
+    def test_inspect_detailed_includes_requested_details(self):
+        result = self._inspect(
+            [
+                {
+                    "op": "nodes",
+                    "class_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+                    "limit": 1,
+                    "detail": "detailed",
+                }
+            ]
+        )
+
+        self.assertSuccess(result)
+        node = result["data"]["results"][0]["items"][0]
+        self.assertIn("title", node)
+        self.assertEqual(set(node["position"]), {"x", "y"})
+        self.assertGreater(len(node["pins"]), 0)
+        for pin in node["pins"]:
+            self.assertIn("id", pin)
+            self.assertIn("type", pin)
+            self.assertIn("default", pin)
+            self.assertIn("linked_pin_ids", pin)
+            self.assertIn("linked_node_ids", pin)
+
+    def test_inspect_detailed_function_uses_source_metadata(self):
+        result = self._inspect(
+            [
+                {
+                    "op": "functions",
+                    "name_pattern": self.ACTOR_FUNCTION,
+                    "detail": "detailed",
+                }
+            ]
+        )
+
+        self.assertSuccess(result)
+        function = result["data"]["results"][0]["items"][0]
+        metadata = function["metadata"]
+        required = {
+            "pure",
+            "const",
+            "static",
+            "access",
+            "category",
+            "description",
+            "inputs",
+            "outputs",
+        }
+        self.assertTrue(required <= set(metadata))
+        self.assertIn(metadata["access"], {"public", "protected", "private"})
+        for parameter in [*metadata["inputs"], *metadata["outputs"]]:
+            self.assertIn("name", parameter)
+            self.assertIsInstance(parameter["type"], dict)
+
+    def test_inspect_detailed_pins_include_linked_node_ids(self):
+        print_node_name = self._add_connected_print_string()
+        nodes = self._inspect(
+            [
+                {
+                    "op": "nodes",
+                    "name_pattern": print_node_name,
+                    "limit": 1,
+                }
+            ]
+        )
+        self.assertSuccess(nodes)
+        print_node_id = nodes["data"]["results"][0]["items"][0]["node_id"]
+
+        result = self._inspect(
+            [
+                {
+                    "op": "pins",
+                    "node_id": print_node_id,
+                    "detail": "detailed",
+                }
+            ]
+        )
+
+        self.assertSuccess(result)
+        linked_pins = [
+            pin
+            for pin in result["data"]["results"][0]["items"]
+            if pin["link_count"]
+        ]
+        self.assertEqual(len(linked_pins), 1)
+        self.assertEqual(len(linked_pins[0]["linked_pin_ids"]), 1)
+        self.assertEqual(len(linked_pins[0]["linked_node_ids"]), 1)
+
+    def test_inspect_rejects_malformed_filter_constraints(self):
+        cases = (
+            (
+                {"op": "nodes", "graph_id": "not-a-stable-id"},
+                "queries[0].graph_id",
+            ),
+            (
+                {"op": "nodes", "member_id": "node:NOT-A-GUID"},
+                "queries[0].member_id",
+            ),
+            (
+                {"op": "pins", "node_id": "node:not-a-guid"},
+                "queries[0].node_id",
+            ),
+            (
+                {
+                    "op": "nodes",
+                    "class_path": "/Game/BP_Invalid.BP_Invalid_C",
+                },
+                "queries[0].class_path",
+            ),
+        )
+
+        for query, path in cases:
+            with self.subTest(path=path):
+                result = self._inspect([query])
+                self.assertFalse(result["success"])
+                self.assertEqual(result["errors"][0]["code"], "INVALID_INPUT")
+                self.assertEqual(result["errors"][0]["path"], path)
+
+    def test_inspect_filters_by_graph_member_node_and_kind(self):
+        event_result = self._inspect(
+            [{"op": "events", "name_pattern": self.ACTOR_EVENT, "limit": 1}]
+        )
+        self.assertSuccess(event_result)
+        event = event_result["data"]["results"][0]["items"][0]
+        graph_id = event["graph_id"]
+        node_id = event["node_id"]
+
+        result = self._inspect(
+            [
+                {"op": "nodes", "graph_id": graph_id},
+                {"op": "nodes", "member_id": graph_id},
+                {"op": "pins", "node_id": node_id},
+                {"op": "nodes", "kind": "custom_event"},
+            ]
+        )
+
+        self.assertSuccess(result)
+        graph_nodes, member_nodes, node_pins, event_nodes = result["data"][
+            "results"
+        ]
+        self.assertTrue(graph_nodes["items"])
+        self.assertTrue(member_nodes["items"])
+        self.assertTrue(
+            all(item["graph_id"] == graph_id for item in member_nodes["items"])
+        )
+        self.assertTrue(node_pins["items"])
+        self.assertTrue(
+            all(item["kind"] == "custom_event" for item in event_nodes["items"])
+        )
+
+    def test_inspect_details_are_independent_per_query(self):
+        query = {
+            "op": "nodes",
+            "class_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+            "limit": 1,
+        }
+        result = self._inspect(
+            [
+                {**query, "detail": "compact"},
+                {**query, "detail": "detailed"},
+            ]
+        )
+
+        self.assertSuccess(result)
+        compact_result, detailed_result = result["data"]["results"]
+        self.assertEqual(compact_result["detail"], "compact")
+        self.assertNotIn("pins", compact_result["items"][0])
+        self.assertEqual(detailed_result["detail"], "detailed")
+        self.assertIn("pins", detailed_result["items"][0])
+
+    def test_inspect_paginates_each_query_independently(self):
+        self._build_large_event_graph()
+        queries = [{"op": "nodes"}, {"op": "pins", "limit": 1}]
+
+        first = self._inspect(queries)
+
+        self.assertSuccess(first)
+        first_results = first["data"]["results"]
+        self.assertEqual(len(first_results[0]["items"]), 100)
+        self.assertEqual(len(first_results[1]["items"]), 1)
+        node_cursor = first_results[0]["next_cursor"]
+        pin_cursor = first_results[1]["next_cursor"]
+        self.assertTrue(node_cursor)
+        self.assertTrue(pin_cursor)
+        self.assertNotEqual(node_cursor, pin_cursor)
+
+        second = self._inspect(
+            [
+                {**queries[0], "cursor": node_cursor},
+                {**queries[1], "cursor": pin_cursor},
+            ]
+        )
+
+        self.assertSuccess(second)
+        second_results = second["data"]["results"]
+        self.assertTrue(second_results[0]["items"])
+        self.assertEqual(len(second_results[1]["items"]), 1)
+        first_node_ids = {item["id"] for item in first_results[0]["items"]}
+        first_pin_ids = {item["id"] for item in first_results[1]["items"]}
+        self.assertTrue(first_node_ids.isdisjoint(
+            item["id"] for item in second_results[0]["items"]
+        ))
+        self.assertTrue(first_pin_ids.isdisjoint(
+            item["id"] for item in second_results[1]["items"]
+        ))
+
+    def test_inspect_rejects_stale_cursor(self):
+        self._add_custom_event("StaleCursorEventA")
+        self._add_custom_event("StaleCursorEventB")
+        query = {
+            "op": "nodes",
+            "class_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+            "limit": 1,
+        }
+        first = self._inspect([query])
+        self.assertSuccess(first)
+        first_result = first["data"]["results"][0]
+        self.assertTrue(first_result["next_cursor"])
+        removed = call_action(
+            "blueprint_actions",
+            "ue_remove_blueprint_node",
+            asset_path=self._actor_path,
+            graph_name="EventGraph",
+            node_name=first_result["items"][0]["name"],
+        )
+        self.assertSuccess(removed)
+
+        stale = self._inspect(
+            [{**query, "cursor": first_result["next_cursor"]}]
+        )
+
+        self.assertFalse(stale["success"])
+        self.assertEqual(stale["errors"][0]["code"], "INVALID_INPUT")
+        self.assertEqual(stale["errors"][0]["path"], "queries[0].cursor")
+
+    def test_inspect_rejects_query_mismatched_cursor(self):
+        first = self._inspect([{"op": "nodes", "limit": 1}])
+        self.assertSuccess(first)
+        cursor = first["data"]["results"][0]["next_cursor"]
+        self.assertTrue(cursor)
+
+        mismatched = self._inspect(
+            [{"op": "pins", "limit": 1, "cursor": cursor}]
+        )
+
+        self.assertFalse(mismatched["success"])
+        self.assertEqual(mismatched["errors"][0]["code"], "INVALID_INPUT")
+        self.assertEqual(mismatched["errors"][0]["path"], "queries[0].cursor")
+
+    def test_inspect_top_level_cursor_requires_one_query(self):
+        first = self._inspect([{"op": "nodes", "limit": 1}])
+        self.assertSuccess(first)
+        cursor = first["data"]["results"][0]["next_cursor"]
+        self.assertTrue(cursor)
+
+        rejected = self._inspect(
+            [{"op": "nodes", "limit": 1}, {"op": "pins", "limit": 1}],
+            cursor=cursor,
+        )
+
+        self.assertFalse(rejected["success"])
+        self.assertEqual(rejected["errors"][0]["code"], "INVALID_INPUT")
+        self.assertEqual(rejected["errors"][0]["path"], "cursor")
 
     def test_get_blueprint_brief(self):
         result = self._brief(self._actor_path)

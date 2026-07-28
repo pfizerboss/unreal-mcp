@@ -198,6 +198,10 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprintBrief(UBlueprint* Blueprint);
 
+    /** Run bounded, filtered, independently paginated Blueprint queries. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString InspectBlueprint(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Return Blueprint 2 runtime or asset-specific capability data. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);

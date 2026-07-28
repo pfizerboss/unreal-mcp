@@ -174,8 +174,9 @@ def test_canonical_blueprint_type_recursion_resolves_inside_action_schema():
 
 def test_inspect_queries_are_bounded_and_independently_pageable():
     schema = _new_specs()["inspect_blueprint"]["input_schema"]
+    assert schema["required"] == ["asset_path"]
     queries = schema["properties"]["queries"]
-    assert queries["minItems"] == 1
+    assert "minItems" not in queries
     query = queries["items"]
     assert set(query["properties"]["op"]["enum"]) == {
         "overview",
@@ -199,7 +200,15 @@ def test_inspect_queries_are_bounded_and_independently_pageable():
         "default": 100,
     }
     assert query["properties"]["cursor"]["type"] == "string"
+    assert query["properties"]["detail"] == {
+        "type": "string",
+        "enum": ["compact", "detailed"],
+        "default": "compact",
+    }
     assert query["additionalProperties"] is False
+    assert "compact" not in schema["properties"]
+    Draft202012Validator(schema).validate({"asset_path": "/Game/BP_Player", "queries": []})
+    Draft202012Validator(schema).validate({"asset_path": "/Game/BP_Player"})
 
 
 def test_contracts_require_full_unreal_object_paths():
@@ -754,9 +763,28 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
     assert module_spec is not None and module_spec.loader is not None
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
-    for action in NEW_BLUEPRINT2_ACTIONS - {"get_blueprint_brief"}:
+    active_actions = {"get_blueprint_brief", "inspect_blueprint"}
+    for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()
         payload = json.loads(result)
         ToolResult.model_validate(payload)
         assert payload["errors"][0]["code"] == "UE_VERSION_UNSUPPORTED"
         assert payload["errors"][0]["details"]["capability"] == "blueprint2_cpp_core"
+
+
+def test_inspection_materializes_detailed_records_after_pagination():
+    source = (
+        Path(__file__).parents[2]
+        / "Plugins"
+        / "UnrealMCPython"
+        / "Source"
+        / "UnrealMCPython"
+        / "Private"
+        / "MCPythonHelper_BlueprintInspection.cpp"
+    ).read_text(encoding="utf-8")
+
+    page_start = source.index("const int32 End =")
+    materialize = source.index("MaterializeInspectRecord", page_start)
+    append_item = source.index("Items.Add", page_start)
+
+    assert page_start < materialize < append_item

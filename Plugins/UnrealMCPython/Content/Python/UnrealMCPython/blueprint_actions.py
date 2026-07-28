@@ -700,10 +700,15 @@ def ue_get_blueprint_brief(asset_path: str = None) -> str:
     return blueprint2.call_asset_helper("get_blueprint_brief", asset_path)
 
 
-def ue_inspect_blueprint(asset_path: str = None, queries: list = None,
-                               compact: bool = True, cursor: str = "") -> str:
+def ue_inspect_blueprint(asset_path: str = None, queries: list[dict] = (),
+                         cursor: str = "") -> str:
     """Runs bounded, independently paginated queries against one Blueprint."""
-    return _blueprint2_unsupported("inspect_blueprint")
+    from UnrealMCPython import blueprint2
+
+    request = {"queries": [dict(query) for query in queries]}
+    if cursor:
+        request["cursor"] = cursor
+    return blueprint2.call_asset_helper("inspect_blueprint", asset_path, request)
 
 
 def ue_create_blueprint_function(asset_path: str = None, function_name: str = None,

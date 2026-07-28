@@ -226,6 +226,10 @@ def test_blueprint_brief_executes_through_real_unreal_dispatcher(monkeypatch):
         "UnrealMCPython.mcp_unreal_actions",
     ):
         monkeypatch.delitem(sys.modules, module_name, raising=False)
+    package = sys.modules.get("UnrealMCPython")
+    if package is not None:
+        for attribute in ("blueprint2", "blueprint_actions", "mcp_unreal_actions"):
+            monkeypatch.delattr(package, attribute, raising=False)
 
     dispatcher = __import__(
         "UnrealMCPython.mcp_unreal_actions",
@@ -241,6 +245,70 @@ def test_blueprint_brief_executes_through_real_unreal_dispatcher(monkeypatch):
 
     assert result["success"] is True
     assert result["status"] == "succeeded"
+
+
+def test_inspect_blueprint(monkeypatch):
+    calls = []
+
+    class Blueprint:
+        pass
+
+    blueprint = Blueprint()
+
+    def inspect_blueprint(asset, request_json):
+        calls.append((asset, json.loads(request_json)))
+        return (
+            '{"success":true,"status":"succeeded","summary":"ok",'
+            '"data":{"results":[]},"changes":[],"warnings":[],"errors":[],'
+            '"next_actions":[],"trace_id":"test"}'
+        )
+
+    fake_unreal = SimpleNamespace(
+        Blueprint=Blueprint,
+        EditorAssetLibrary=SimpleNamespace(load_asset=lambda _path: blueprint),
+        MCPythonHelper=SimpleNamespace(inspect_blueprint=inspect_blueprint),
+    )
+    monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
+    monkeypatch.syspath_prepend(str(PLUGIN_PYTHON))
+    for module_name in (
+        "UnrealMCPython.blueprint2",
+        "UnrealMCPython.blueprint_actions",
+        "UnrealMCPython.mcp_unreal_actions",
+    ):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    package = sys.modules.get("UnrealMCPython")
+    if package is not None:
+        for attribute in ("blueprint2", "blueprint_actions", "mcp_unreal_actions"):
+            monkeypatch.delattr(package, attribute, raising=False)
+
+    dispatcher = __import__(
+        "UnrealMCPython.mcp_unreal_actions",
+        fromlist=["execute_action"],
+    )
+    queries = [{"op": "nodes", "limit": 7}]
+    result = json.loads(
+        dispatcher.execute_action(
+            "UnrealMCPython.blueprint_actions",
+            "ue_inspect_blueprint",
+            {
+                "asset_path": "/Game/BP.BP",
+                "queries": queries,
+                "cursor": "opaque-cursor",
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert calls == [
+        (
+            blueprint,
+            {
+                "queries": [{"op": "nodes", "limit": 7}],
+                "cursor": "opaque-cursor",
+            },
+        )
+    ]
+    assert queries == [{"op": "nodes", "limit": 7}]
 
 
 def test_call_json_helper_copies_request_and_passes_result_through(monkeypatch):

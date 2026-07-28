@@ -472,7 +472,7 @@ CATALOG = {
             'doc': 'Returns information about currently selected blueprint nodes in the editor.',
         },
         'inspect_blueprint': {
-            'params': "asset_path, queries, compact=True, cursor=''",
+            'params': "asset_path, queries=(), cursor=''",
             'doc': 'Runs bounded, independently paginated queries against one Blueprint.',
         },
         'list_blueprint_components': {
