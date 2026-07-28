@@ -565,9 +565,25 @@ def test_blueprint_function_wrappers_forward_exact_copied_requests(
                 "dispatcher_type_path": "mcdelegate",
             },
         ),
+        (
+            "add_blueprint_interface",
+            {
+                "asset_path": "/Game/BP.BP",
+                "interface_path": "/Game/BPI_Score.BPI_Score_C",
+            },
+            {"interface_path": "/Game/BPI_Score.BPI_Score_C"},
+        ),
+        (
+            "remove_blueprint_interface",
+            {
+                "asset_path": "/Game/BP.BP",
+                "interface_id": "interface:/Game/BPI_Score.BPI_Score_C",
+            },
+            {"interface_id": "interface:/Game/BPI_Score.BPI_Score_C"},
+        ),
     ),
 )
-def test_blueprint_macro_event_dispatcher_wrappers_forward_exact_requests(
+def test_blueprint_member_wrappers_forward_exact_requests(
     monkeypatch, action, params, expected_request
 ):
     calls = []

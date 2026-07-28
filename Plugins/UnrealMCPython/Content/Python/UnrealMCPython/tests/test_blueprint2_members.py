@@ -91,6 +91,62 @@ class TestBlueprint2Members(MCPTestCase):
         self.assertIsNotNone(inspected)
         return graph, inspected
 
+    def _create_interface_asset(self):
+        if not hasattr(unreal, "BlueprintInterfaceFactory"):
+            self.skipTest("Blueprint interface factory is unavailable")
+        name = f"Blueprint2Interface_{uuid.uuid4().hex[:10]}"
+        interface = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+            name,
+            BLUEPRINT2_TEST_ROOT,
+            unreal.Blueprint,
+            unreal.BlueprintInterfaceFactory(),
+        )
+        self.assertIsNotNone(interface)
+        interface_path = f"{BLUEPRINT2_TEST_ROOT}/{name}.{name}"
+        self._created_assets.append(interface_path)
+        graph = unreal.BlueprintEditorLibrary.add_function_graph(
+            interface, self.FUNCTION_NAME
+        )
+        self.assertIsNotNone(graph)
+        unreal.BlueprintEditorLibrary.compile_blueprint(interface)
+        generated_class = interface.generated_class()
+        self.assertIsNotNone(generated_class)
+        function = next(
+            (
+                candidate
+                for candidate in unreal.ObjectIterator(unreal.Function)
+                if candidate.get_outer() == generated_class
+                and candidate.get_name() == self.FUNCTION_NAME
+            ),
+            None,
+        )
+        self.assertIsNotNone(function)
+        unreal.get_editor_subsystem(
+            unreal.EditorAssetSubsystem
+        ).set_metadata_tag(
+            function,
+            "ForceAsFunction",
+            "true",
+        )
+        return interface, interface_path, generated_class.get_path_name()
+
+    def _inspect_interface(self, class_path):
+        result = call_action(
+            "blueprint_actions",
+            "ue_inspect_blueprint",
+            asset_path=self.asset_path,
+            queries=[{"op": "interfaces", "detail": "detailed"}],
+        )
+        self.assertSuccess(result)
+        return next(
+            (
+                item
+                for item in result["data"]["results"][0]["items"]
+                if item["class_path"] == class_path
+            ),
+            None,
+        )
+
     def _inspect_functions(self, asset_path=None, name_pattern=None):
         query = {"op": "functions", "detail": "detailed"}
         if name_pattern:
@@ -656,6 +712,146 @@ class TestBlueprint2Members(MCPTestCase):
         self.assertIsNone(
             self._inspect_member("dispatchers", self.DISPATCHER_NAME)
         )
+
+    def test_add_blueprint_interface(self):
+        _, _, interface_class_path = self._create_interface_asset()
+        added = self.call(
+            "blueprint_actions",
+            "ue_add_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_path=interface_class_path,
+        )
+
+        self.assertSuccess(added)
+        interface_id = f"interface:{interface_class_path}"
+        self.assertEqual(added["data"]["interface_id"], interface_id)
+        implementation_graph_ids = added["data"]["implementation_graph_ids"]
+        self.assertEqual(len(implementation_graph_ids), 1)
+        self.assertTrue(
+            all(graph_id.startswith("graph:") for graph_id in implementation_graph_ids)
+        )
+        inspected = self._inspect_interface(interface_class_path)
+        self.assertIsNotNone(inspected)
+        self.assertEqual(inspected["interface_id"], interface_id)
+        self.assertEqual(
+            sorted(inspected["graph_ids"]), sorted(implementation_graph_ids)
+        )
+        self._compile_without_errors()
+        self.assertEqual(
+            self._inspect_interface(interface_class_path)["interface_id"], interface_id
+        )
+
+    def test_remove_blueprint_interface(self):
+        _, _, interface_class_path = self._create_interface_asset()
+        added = self.call(
+            "blueprint_actions",
+            "ue_add_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_path=interface_class_path,
+        )
+        self.assertSuccess(added)
+        self._compile_without_errors()
+        self.assertIsNotNone(self._inspect_interface(interface_class_path))
+
+        removed = self.call(
+            "blueprint_actions",
+            "ue_remove_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_id=added["data"]["interface_id"],
+        )
+
+        self.assertSuccess(removed)
+        self.assertEqual(
+            removed["data"]["interface_id"], added["data"]["interface_id"]
+        )
+        self.assertIsNone(self._inspect_interface(interface_class_path))
+
+    def test_blueprint_interface_rejections_are_atomic(self):
+        not_interface = self.call(
+            "blueprint_actions",
+            "ue_add_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_path="/Script/Engine.Actor",
+        )
+        self._assert_rejected(not_interface, "INVALID_INPUT", "interface_path")
+
+        _, _, interface_class_path = self._create_interface_asset()
+        added = self.call(
+            "blueprint_actions",
+            "ue_add_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_path=interface_class_path,
+        )
+        self.assertSuccess(added)
+        duplicate = self.call(
+            "blueprint_actions",
+            "ue_add_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_path=interface_class_path,
+        )
+        self._assert_rejected(duplicate, "CONFLICT", "interface_path")
+        self.assertIsNotNone(self._inspect_interface(interface_class_path))
+
+        _, _, missing_interface_path = self._create_interface_asset()
+        missing = self.call(
+            "blueprint_actions",
+            "ue_remove_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_id=f"interface:{missing_interface_path}",
+        )
+        self._assert_rejected(missing, "PRECONDITION_FAILED", "interface_id")
+        self.assertIsNotNone(self._inspect_interface(interface_class_path))
+
+    def test_remove_blueprint_interface_inside_workflow_transaction(self):
+        _, _, interface_class_path = self._create_interface_asset()
+        added = self.call(
+            "blueprint_actions",
+            "ue_add_blueprint_interface",
+            asset_path=self.asset_path,
+            interface_path=interface_class_path,
+        )
+        self.assertSuccess(added)
+        transaction_id = f"mcp_interface_{uuid.uuid4().hex}"
+        try:
+            begun = self.call(
+                "workflow_actions",
+                "ue_begin_transaction",
+                transaction_id=transaction_id,
+                description="Remove Blueprint interface",
+                total_steps=1,
+                show_dialog=False,
+            )
+            self.assertSuccess(begun)
+            removed = self.call(
+                "workflow_actions",
+                "ue_execute_step",
+                transaction_id=transaction_id,
+                action_module="UnrealMCPython.blueprint_actions",
+                action_name="ue_remove_blueprint_interface",
+                params={
+                    "asset_path": self.asset_path,
+                    "interface_id": added["data"]["interface_id"],
+                },
+            )
+            self.assertSuccess(removed)
+            self.assertIsNone(self._inspect_interface(interface_class_path))
+            rolled_back = self.call(
+                "workflow_actions",
+                "ue_rollback_transaction",
+                transaction_id=transaction_id,
+            )
+            self.assertSuccess(rolled_back)
+            self.assertIsNotNone(self._inspect_interface(interface_class_path))
+        finally:
+            context = self.call(
+                "workflow_actions", "ue_get_editor_context", asset_paths=[]
+            )["workflow_transaction"]
+            if context["active"]:
+                self.call(
+                    "workflow_actions",
+                    "ue_rollback_transaction",
+                    transaction_id=transaction_id,
+                )
 
     def test_duplicate_member_name_is_rejected(self):
         self._seed_function()

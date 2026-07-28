@@ -242,6 +242,14 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString RemoveEventDispatcher(UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Add a Blueprint interface by exact reflected class path. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString AddBlueprintInterface(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Remove one directly implemented Blueprint interface by stable identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString RemoveBlueprintInterface(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Return Blueprint 2 runtime or asset-specific capability data. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);

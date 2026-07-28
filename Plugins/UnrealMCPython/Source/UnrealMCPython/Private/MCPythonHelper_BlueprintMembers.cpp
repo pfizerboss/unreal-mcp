@@ -9,6 +9,7 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_Event.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
 #include "K2Node_MacroInstance.h"
@@ -793,7 +794,8 @@ bool ResolveMemberTarget(
     const bool bFound =
         (Kind == ETargetKind::Graph && OutResolved.Graph) ||
         (Kind == ETargetKind::Node && OutResolved.Node) ||
-        (Kind == ETargetKind::Variable && OutResolved.Variable);
+        (Kind == ETargetKind::Variable && OutResolved.Variable) ||
+        (Kind == ETargetKind::Interface && OutResolved.Object);
     if (bFound)
     {
         return true;
@@ -2321,4 +2323,345 @@ FString UMCPythonHelper::RemoveEventDispatcher(
             MakeChangeValue(TEXT("delete"), GraphId, GraphDetails),
             MakeChangeValue(TEXT("delete"), DispatcherId, VariableDetails),
         });
+}
+
+FString UMCPythonHelper::AddBlueprintInterface(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    if (!FBlueprintEditorUtils::DoesSupportImplementingInterfaces(Blueprint))
+    {
+        return Precondition(
+            TEXT("asset_path"),
+            TEXT("This Blueprint type does not support implemented interfaces."));
+    }
+
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(), {TEXT("interface_path")}, Error))
+    {
+        return Error;
+    }
+    FString InterfacePath;
+    if (!RequiredString(
+            Request.ToSharedRef(),
+            TEXT("interface_path"),
+            InterfacePath,
+            Error))
+    {
+        return Error;
+    }
+    UClass* InterfaceClass = LoadObject<UClass>(nullptr, *InterfacePath);
+    if (!InterfaceClass || InterfaceClass->GetPathName() != InterfacePath ||
+        !InterfaceClass->HasAnyClassFlags(CLASS_Interface))
+    {
+        return Invalid(
+            TEXT("interface_path"),
+            TEXT("interface_path must resolve exactly to a reflected interface class."),
+            TEXT("Use the full /Script/... or generated /Game/..._C class path."));
+    }
+    if (FBlueprintEditorUtils::ImplementsInterface(
+            Blueprint, true, InterfaceClass))
+    {
+        return Conflict(
+            TEXT("interface_path"),
+            TEXT("The Blueprint already implements this interface directly or through a parent."));
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython", "AddBlueprintInterface", "Add Blueprint Interface"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the interface implementation transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    if (!FBlueprintEditorUtils::ImplementNewInterface(
+            Blueprint, InterfaceClass->GetClassPathName()))
+    {
+        return MutationFailure(
+            Scope,
+            Conflict(
+                TEXT("interface_path"),
+                TEXT("Unreal could not implement the interface because one or more functions conflict with this Blueprint.")));
+    }
+
+    FBPInterfaceDescription* AddedDescription = nullptr;
+    for (FBPInterfaceDescription& Description :
+         Blueprint->ImplementedInterfaces)
+    {
+        if (Description.Interface.Get() == InterfaceClass)
+        {
+            if (AddedDescription)
+            {
+                return MutationFailure(
+                    Scope,
+                    Failure(
+                        TEXT("INTERNAL_ERROR"),
+                        TEXT("interface_path"),
+                        TEXT("Unreal created duplicate interface descriptions."),
+                        TEXT("Inspect the Blueprint and retry.")));
+            }
+            AddedDescription = &Description;
+        }
+    }
+    if (!AddedDescription)
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("interface_path"),
+                TEXT("Unreal reported success without creating an interface description."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+
+    const FString InterfaceId = TEXT("interface:") + InterfacePath;
+    TArray<TSharedPtr<FJsonValue>> GraphIds;
+    TArray<TSharedPtr<FJsonValue>> Changes;
+    for (UEdGraph* Graph : AddedDescription->Graphs)
+    {
+        if (!Graph)
+        {
+            return MutationFailure(
+                Scope,
+                Failure(
+                    TEXT("INTERNAL_ERROR"),
+                    TEXT("interface_path"),
+                    TEXT("The interface contains a null implementation graph."),
+                    TEXT("Inspect the Blueprint and retry.")));
+        }
+        Scope.Modify(Graph);
+        if (!Graph->GraphGuid.IsValid())
+        {
+            Graph->GraphGuid = FGuid::NewGuid();
+        }
+        const FString GraphId = DescribeGraphTarget(Blueprint, Graph).Id;
+        GraphIds.Add(MakeShared<FJsonValueString>(GraphId));
+        const TSharedRef<FJsonObject> GraphDetails = MakeShared<FJsonObject>();
+        GraphDetails->SetStringField(TEXT("interface_path"), InterfacePath);
+        GraphDetails->SetStringField(TEXT("graph_name"), Graph->GetName());
+        Changes.Add(MakeChangeValue(TEXT("create"), GraphId, GraphDetails));
+    }
+    GraphIds.Sort([](
+        const TSharedPtr<FJsonValue>& A,
+        const TSharedPtr<FJsonValue>& B)
+    {
+        return A->AsString() < B->AsString();
+    });
+    const TSharedRef<FJsonObject> InterfaceDetails = MakeShared<FJsonObject>();
+    InterfaceDetails->SetStringField(TEXT("interface_path"), InterfacePath);
+    Changes.Insert(
+        MakeChangeValue(TEXT("create"), InterfaceId, InterfaceDetails), 0);
+
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("interface_id"), InterfaceId);
+    Data->SetStringField(TEXT("interface_path"), InterfacePath);
+    Data->SetArrayField(TEXT("implementation_graph_ids"), GraphIds);
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Blueprint interface added."),
+        Data,
+        Changes);
+}
+
+FString UMCPythonHelper::RemoveBlueprintInterface(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(), {TEXT("interface_id")}, Error))
+    {
+        return Error;
+    }
+    FString InterfaceId;
+    if (!RequiredString(
+            Request.ToSharedRef(),
+            TEXT("interface_id"),
+            InterfaceId,
+            Error))
+    {
+        return Error;
+    }
+    FTargetRef Target;
+    Target.Id = InterfaceId;
+    FResolvedTarget Resolved;
+    if (!ResolveMemberTarget(
+            Blueprint,
+            ETargetKind::Interface,
+            Target,
+            TEXT("interface_id"),
+            Resolved,
+            Error))
+    {
+        return Error;
+    }
+    UClass* InterfaceClass = Cast<UClass>(Resolved.Object);
+    int32 InterfaceIndex = INDEX_NONE;
+    for (int32 Index = 0;
+         Index < Blueprint->ImplementedInterfaces.Num();
+         ++Index)
+    {
+        if (Blueprint->ImplementedInterfaces[Index].Interface.Get() ==
+            InterfaceClass)
+        {
+            InterfaceIndex = Index;
+            break;
+        }
+    }
+    if (!InterfaceClass || InterfaceIndex == INDEX_NONE)
+    {
+        return Precondition(
+            TEXT("interface_id"),
+            TEXT("The target is not an interface directly implemented by this Blueprint."));
+    }
+    const FString InterfacePath = InterfaceClass->GetPathName();
+    FBPInterfaceDescription& Description =
+        Blueprint->ImplementedInterfaces[InterfaceIndex];
+    const TArray<UEdGraph*> InterfaceGraphs = Description.Graphs;
+    TArray<FString> InterfaceGraphIds;
+    InterfaceGraphIds.Reserve(InterfaceGraphs.Num());
+    for (UEdGraph* Graph : InterfaceGraphs)
+    {
+        if (!Graph)
+        {
+            return Precondition(
+                TEXT("interface_id"),
+                TEXT("The interface description contains an invalid implementation graph."));
+        }
+        InterfaceGraphIds.Add(DescribeGraphTarget(Blueprint, Graph).Id);
+    }
+
+    TArray<UK2Node_Event*> InterfaceEvents;
+    TArray<UK2Node_Event*> AllEvents;
+    FBlueprintEditorUtils::GetAllNodesOfClass(Blueprint, AllEvents);
+    for (UK2Node_Event* Event : AllEvents)
+    {
+        if (Event &&
+            Event->EventReference.GetMemberParentClass(
+                Event->GetBlueprintClassFromNode()) == InterfaceClass)
+        {
+            InterfaceEvents.Add(Event);
+        }
+    }
+    TArray<UEdGraph*> AllGraphs;
+    Blueprint->GetAllGraphs(AllGraphs);
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython",
+        "RemoveBlueprintInterface",
+        "Remove Blueprint Interface"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the interface removal transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    for (UEdGraph* Graph : AllGraphs)
+    {
+        Scope.Modify(Graph);
+        if (Graph)
+        {
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                Scope.Modify(Node);
+            }
+        }
+    }
+
+    for (TFieldIterator<UFunction> FunctionIt(InterfaceClass);
+         FunctionIt;
+         ++FunctionIt)
+    {
+        UFunction* Function = *FunctionIt;
+        if (Function &&
+            Function->GetFName() != UEdGraphSchema_K2::FN_ExecuteUbergraphBase)
+        {
+            FBlueprintEditorUtils::RemoveInterfaceFunction(
+                Blueprint, Description, Function, false);
+        }
+    }
+    if (!Description.Graphs.IsEmpty())
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("interface_id"),
+                TEXT("Unreal did not remove every interface implementation graph."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    for (UK2Node_Event* Event : InterfaceEvents)
+    {
+        if (Event && Event->GetGraph())
+        {
+            Event->GetGraph()->RemoveNode(Event);
+        }
+    }
+    Blueprint->ImplementedInterfaces.RemoveAt(InterfaceIndex, 1);
+    FBlueprintEditorUtils::RefreshAllNodes(Blueprint);
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+    if (Blueprint->ImplementedInterfaces.ContainsByPredicate(
+            [InterfaceClass](const FBPInterfaceDescription& Candidate)
+            {
+                return Candidate.Interface.Get() == InterfaceClass;
+            }))
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("interface_id"),
+                TEXT("Unreal did not remove the interface description."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> GraphIdValues;
+    TArray<TSharedPtr<FJsonValue>> Changes;
+    for (const FString& GraphId : InterfaceGraphIds)
+    {
+        GraphIdValues.Add(MakeShared<FJsonValueString>(GraphId));
+        const TSharedRef<FJsonObject> GraphDetails = MakeShared<FJsonObject>();
+        GraphDetails->SetStringField(TEXT("interface_path"), InterfacePath);
+        Changes.Add(MakeChangeValue(TEXT("delete"), GraphId, GraphDetails));
+    }
+    GraphIdValues.Sort([](
+        const TSharedPtr<FJsonValue>& A,
+        const TSharedPtr<FJsonValue>& B)
+    {
+        return A->AsString() < B->AsString();
+    });
+    const TSharedRef<FJsonObject> InterfaceDetails = MakeShared<FJsonObject>();
+    InterfaceDetails->SetStringField(TEXT("interface_path"), InterfacePath);
+    Changes.Add(
+        MakeChangeValue(TEXT("delete"), InterfaceId, InterfaceDetails));
+
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("interface_id"), InterfaceId);
+    Data->SetStringField(TEXT("interface_path"), InterfacePath);
+    Data->SetArrayField(TEXT("implementation_graph_ids"), GraphIdValues);
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Blueprint interface removed."),
+        Data,
+        Changes);
 }

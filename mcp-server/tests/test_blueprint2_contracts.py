@@ -848,6 +848,8 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
         "delete_custom_event",
         "add_event_dispatcher",
         "remove_event_dispatcher",
+        "add_blueprint_interface",
+        "remove_blueprint_interface",
     }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()

@@ -934,13 +934,23 @@ def ue_remove_event_dispatcher(asset_path: str = None,
 def ue_add_blueprint_interface(asset_path: str = None,
                                      interface_path: str = None) -> str:
     """Adds a Blueprint interface by full Unreal object path."""
-    return _blueprint2_unsupported("add_blueprint_interface")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({"interface_path": interface_path})
+    return blueprint2.call_asset_helper(
+        "add_blueprint_interface", asset_path, request
+    )
 
 
 def ue_remove_blueprint_interface(asset_path: str = None,
                                         interface_id: str = None) -> str:
     """Removes an implemented Blueprint interface targeted by stable ID."""
-    return _blueprint2_unsupported("remove_blueprint_interface")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({"interface_id": interface_id})
+    return blueprint2.call_asset_helper(
+        "remove_blueprint_interface", asset_path, request
+    )
 
 
 def ue_add_reflected_blueprint_node(asset_path: str = None, graph_id: str = None,
