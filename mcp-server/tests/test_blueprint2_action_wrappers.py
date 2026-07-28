@@ -42,6 +42,7 @@ HELPER_HEADER = (
     / "MCPythonHelper.h"
 )
 INSPECTION_SOURCE = PRIVATE / "MCPythonHelper_BlueprintInspection.cpp"
+GRAPH_SOURCE = PRIVATE / "MCPythonHelper_BlueprintGraph.cpp"
 BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
 EDITOR_TESTS = (
     ROOT
@@ -581,6 +582,22 @@ def test_blueprint_function_wrappers_forward_exact_copied_requests(
             },
             {"interface_id": "interface:/Game/BPI_Score.BPI_Score_C"},
         ),
+        (
+            "add_reflected_blueprint_node",
+            {
+                "asset_path": "/Game/BP.BP",
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "member_kind": "function",
+                "member_path": "/Script/Engine.Actor:K2_GetActorLocation",
+                "position": {"x": 320, "y": 160},
+            },
+            {
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "member_kind": "function",
+                "member_path": "/Script/Engine.Actor:K2_GetActorLocation",
+                "position": {"x": 320, "y": 160},
+            },
+        ),
     ),
 )
 def test_blueprint_member_wrappers_forward_exact_requests(
@@ -719,6 +736,45 @@ def test_internal_header_declares_stable_target_and_transaction_contracts():
         assert declaration in source
     assert "const FGuid& GetEditorSessionId();" in shared
     assert "bool HasActiveWorkflowTransaction();" in shared
+
+
+def test_graph_authoring_validates_before_mutation_and_uses_shared_transactions():
+    source = GRAPH_SOURCE.read_text(encoding="utf-8")
+    reflected = source[
+        source.index("FString UMCPythonHelper::AddReflectedBlueprintNode") :
+        source.index("FString UMCPythonHelper::AddBlueprintNode")
+    ]
+    mutation = reflected.index("FMutationScope Scope")
+    for validation in (
+        "IsExactK2Graph(Graph)",
+        "CanUserKismetCallFunction(Function)",
+        "CanFunctionBeUsedInGraph",
+        "CanCreateNodeClass",
+        "LoadExactObject<UClass>",
+        "LoadExactObject<UEnum>",
+        "LoadExactObject<UScriptStruct>",
+    ):
+        assert reflected.index(validation) < mutation
+    assert reflected.count("Creator.Finalize();") == 7
+
+    mutations = (
+        "AddBlueprintNode",
+        "ConnectBlueprintPins",
+        "RemoveBlueprintNode",
+        "BuildBlueprintGraph",
+        "SetBlueprintNodePosition",
+        "SetBlueprintNodePinDefault",
+    )
+    starts = [source.index(f"FString UMCPythonHelper::{name}") for name in mutations]
+    starts.append(len(source))
+    for index, name in enumerate(mutations):
+        body = source[starts[index] : starts[index + 1]]
+        assert "FMutationScope Scope" in body, name
+        assert "Scope.Modify(Blueprint);" in body, name
+        assert "Scope.Modify(Graph);" in body, name
+
+    assert "CompileBlueprint(" not in source
+    assert "SavePackage(" not in source
 
 
 def test_cpp_core_uses_persisted_guids_bounded_owners_and_guarded_undo():

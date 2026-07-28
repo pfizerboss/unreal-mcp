@@ -736,6 +736,15 @@ def test_catalog_defaults_match_registry_optionality_for_blueprint2_actions():
     )
     reflected = _new_specs()["add_reflected_blueprint_node"]["input_schema"]
     assert "position" in reflected["required"]
+    assert reflected["properties"]["member_kind"]["enum"] == [
+        "function",
+        "property_get",
+        "property_set",
+        "cast_to",
+        "enum_literal",
+        "make_struct",
+        "break_struct",
+    ]
 
 
 def test_duplicate_blueprint2_metadata_is_rejected(monkeypatch):
@@ -850,6 +859,7 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
         "remove_event_dispatcher",
         "add_blueprint_interface",
         "remove_blueprint_interface",
+        "add_reflected_blueprint_node",
     }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()

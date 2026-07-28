@@ -957,7 +957,17 @@ def ue_add_reflected_blueprint_node(asset_path: str = None, graph_id: str = None
                                           member_kind: str = None, member_path: str = None,
                                           position: dict = None) -> str:
     """Adds a reflected node using a full Unreal member object path."""
-    return _blueprint2_unsupported("add_reflected_blueprint_node")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "graph_id": graph_id,
+        "member_kind": member_kind,
+        "member_path": member_path,
+        "position": position,
+    })
+    return blueprint2.call_asset_helper(
+        "add_reflected_blueprint_node", asset_path, request
+    )
 
 
 def ue_set_blueprint_node_properties(asset_path: str = None, node_id: str = None,

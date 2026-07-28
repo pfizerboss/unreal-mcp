@@ -258,6 +258,10 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString AddBlueprintNode(UBlueprint* Blueprint, const FString& GraphName, const FString& NodeJson);
 
+    /** Add a Blueprint graph node resolved from one exact reflected member path. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString AddReflectedBlueprintNode(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Connect two pins in a Blueprint graph */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString ConnectBlueprintPins(UBlueprint* Blueprint, const FString& GraphName,
