@@ -388,7 +388,7 @@ CATALOG = {
             'doc': "Adds a component to a Blueprint's SCS.",
         },
         'add_event_dispatcher': {
-            'params': 'asset_path, dispatcher_name, parameters=[]',
+            'params': "asset_path, dispatcher_name, parameters=[], category='', description=''",
             'doc': 'Adds an event dispatcher with ordered parameters.',
         },
         'add_reflected_blueprint_node': {
@@ -424,11 +424,11 @@ CATALOG = {
             'doc': 'Creates a Blueprint function with a complete ordered signature.',
         },
         'create_blueprint_macro': {
-            'params': 'asset_path, macro_name, inputs=[], outputs=[]',
+            'params': "asset_path, macro_name, inputs=[], outputs=[], pure=False, category='', description=''",
             'doc': 'Creates a Blueprint macro with ordered tunnel parameters.',
         },
         'create_custom_event': {
-            'params': 'asset_path, event_name, parameters=[]',
+            'params': 'asset_path, graph_id, event_name, parameters=[], pos_x=0.0, pos_y=0.0',
             'doc': 'Creates a custom event with ordered parameters.',
         },
         'delete_blueprint_function': {

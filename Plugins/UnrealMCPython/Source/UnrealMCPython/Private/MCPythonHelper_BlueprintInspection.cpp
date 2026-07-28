@@ -739,6 +739,12 @@ TSharedRef<FJsonObject> MakePinJson(
     return Json;
 }
 
+TArray<TSharedPtr<FJsonValue>> SerializeUserPins(
+    const UK2Node_EditablePinBase* Node,
+    UBlueprint* Blueprint = nullptr,
+    bool bIncludePinIds = false,
+    bool bSkipExecPins = false);
+
 FInspectRecord MakeNodeRecord(
     UBlueprint* Blueprint,
     UEdGraph* Graph,
@@ -799,6 +805,11 @@ FInspectRecord MakeNodeRecord(
     {
         Record.Json->SetStringField(TEXT("event_name"), EventName);
     }
+    if (const UK2Node_CustomEvent* CustomEvent =
+            Cast<UK2Node_CustomEvent>(Node))
+    {
+        Record.Json->SetStringField(TEXT("event_id"), NodeTarget.Id);
+    }
     SetTargetMetadata(
         Record.Json,
         ETargetKind::Graph,
@@ -821,6 +832,13 @@ FInspectRecord MakeNodeRecord(
         Position->SetNumberField(TEXT("y"), Node->NodePosY);
         Record.Json->SetObjectField(TEXT("position"), Position);
         Record.Json->SetStringField(TEXT("comment"), Node->NodeComment);
+        if (const UK2Node_CustomEvent* CustomEvent =
+                Cast<UK2Node_CustomEvent>(Node))
+        {
+            Record.Json->SetArrayField(
+                TEXT("parameters"),
+                SerializeUserPins(CustomEvent, Blueprint, true));
+        }
         TArray<TSharedPtr<FJsonValue>> Pins;
         for (UEdGraphPin* Pin : Node->Pins)
         {
@@ -877,7 +895,10 @@ FInspectRecord MakePinRecord(
 }
 
 TArray<TSharedPtr<FJsonValue>> SerializeUserPins(
-    const UK2Node_EditablePinBase* Node)
+    const UK2Node_EditablePinBase* Node,
+    UBlueprint* Blueprint,
+    bool bIncludePinIds,
+    bool bSkipExecPins)
 {
     TArray<TSharedPtr<FJsonValue>> Parameters;
     if (!Node)
@@ -890,20 +911,21 @@ TArray<TSharedPtr<FJsonValue>> SerializeUserPins(
         {
             continue;
         }
-        const TSharedRef<FJsonObject> Parameter = MakeShared<FJsonObject>();
-        Parameter->SetStringField(TEXT("name"), Pin->PinName.ToString());
         const UEdGraphPin* GraphPin = Node->FindPin(Pin->PinName);
         const FEdGraphPinType& Type = GraphPin
             ? GraphPin->PinType
             : Pin->PinType;
+        if (bSkipExecPins &&
+            Type.PinCategory == UEdGraphSchema_K2::PC_Exec)
+        {
+            continue;
+        }
+        const TSharedRef<FJsonObject> Parameter = MakeShared<FJsonObject>();
+        Parameter->SetStringField(TEXT("name"), Pin->PinName.ToString());
         Parameter->SetObjectField(
             TEXT("type"),
             UE::MCPython::Blueprint2::SerializeTypeSpec(Type));
-        if (Pin->PinDefaultValue.IsEmpty())
-        {
-            Parameter->SetField(TEXT("default"), MakeShared<FJsonValueNull>());
-        }
-        else
+        if (!Pin->PinDefaultValue.IsEmpty())
         {
             TSharedPtr<FJsonValue> Default =
                 UE::MCPython::Blueprint2::SerializeDefaultValue(
@@ -914,6 +936,13 @@ TArray<TSharedPtr<FJsonValue>> SerializeUserPins(
             Parameter->SetField(
                 TEXT("default"),
                 Default.IsValid() ? Default : MakeShared<FJsonValueNull>());
+        }
+        if (bIncludePinIds && Blueprint && GraphPin)
+        {
+            Parameter->SetStringField(
+                TEXT("pin_id"),
+                UE::MCPython::Blueprint2::DescribePinTarget(
+                    Blueprint, GraphPin).Id);
         }
         Parameters.Add(MakeShared<FJsonValueObject>(Parameter));
     }
@@ -1033,8 +1062,10 @@ void AddSourceMemberMetadata(
             }
         }
         Metadata->SetBoolField(TEXT("pure"), bPure);
-        Metadata->SetArrayField(TEXT("inputs"), SerializeUserPins(Entry));
-        Metadata->SetArrayField(TEXT("outputs"), SerializeUserPins(Exit));
+        Metadata->SetArrayField(
+            TEXT("inputs"), SerializeUserPins(Entry, nullptr, false, true));
+        Metadata->SetArrayField(
+            TEXT("outputs"), SerializeUserPins(Exit, nullptr, false, true));
         const FKismetUserDeclaredFunctionMetadata* Source =
             UK2Node_MacroInstance::GetAssociatedGraphMetadata(Graph);
         SetDeclaredMetadata(Metadata, Source);
@@ -1150,6 +1181,38 @@ FInspectRecord MakeVariableRecord(
         {
             Metadata->SetStringField(
                 Entry.DataKey.ToString(), Entry.DataValue);
+        }
+        if (bDispatcher)
+        {
+            const UK2Node_FunctionEntry* SignatureEntry = nullptr;
+            for (UEdGraph* SignatureGraph :
+                 Blueprint->DelegateSignatureGraphs)
+            {
+                if (!SignatureGraph ||
+                    SignatureGraph->GetFName() != Variable.VarName)
+                {
+                    continue;
+                }
+                TArray<UK2Node_FunctionEntry*> Entries;
+                SignatureGraph->GetNodesOfClass(Entries);
+                if (Entries.Num() == 1)
+                {
+                    SignatureEntry = Entries[0];
+                    break;
+                }
+            }
+            Metadata->SetArrayField(
+                TEXT("parameters"), SerializeUserPins(SignatureEntry));
+            Metadata->SetStringField(
+                TEXT("category"),
+                SignatureEntry
+                    ? SignatureEntry->MetaData.Category.ToString()
+                    : FString());
+            Metadata->SetStringField(
+                TEXT("description"),
+                SignatureEntry
+                    ? SignatureEntry->MetaData.ToolTip.ToString()
+                    : FString());
         }
         Record.Json->SetObjectField(TEXT("metadata"), Metadata);
     }

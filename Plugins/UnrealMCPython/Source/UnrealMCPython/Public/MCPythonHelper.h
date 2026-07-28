@@ -218,6 +218,30 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString DeleteBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Create a user-authored macro with ordered tunnel parameters. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString CreateBlueprintMacro(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Delete a user-authored macro targeted by graph identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString DeleteBlueprintMacro(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Create a custom event in a stable K2 ubergraph target. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString CreateCustomEvent(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Delete a custom event targeted by node identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString DeleteCustomEvent(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Add an event dispatcher with a complete ordered signature. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString AddEventDispatcher(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Remove an event dispatcher targeted by variable identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString RemoveEventDispatcher(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Return Blueprint 2 runtime or asset-specific capability data. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);

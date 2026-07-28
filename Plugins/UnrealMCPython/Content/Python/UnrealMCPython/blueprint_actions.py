@@ -814,9 +814,23 @@ def ue_delete_blueprint_function(asset_path: str = None,
 
 
 def ue_create_blueprint_macro(asset_path: str = None, macro_name: str = None,
-                                    inputs: list = [], outputs: list = []) -> str:
+                                    inputs: list = [], outputs: list = [],
+                                    pure: bool = False, category: str = "",
+                                    description: str = "") -> str:
     """Creates a Blueprint macro with ordered tunnel parameters."""
-    return _blueprint2_unsupported("create_blueprint_macro")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "macro_name": macro_name,
+        "inputs": inputs,
+        "outputs": outputs,
+        "pure": pure,
+        "category": category,
+        "description": description,
+    })
+    return blueprint2.call_asset_helper(
+        "create_blueprint_macro", asset_path, request
+    )
 
 
 def ue_delete_blueprint_macro(asset_path: str = None, macro_id: str = None,
@@ -825,13 +839,37 @@ def ue_delete_blueprint_macro(asset_path: str = None, macro_id: str = None,
                                     macro_owner_id: str = "",
                                     macro_type_path: str = "") -> str:
     """Deletes a Blueprint macro targeted by stable ID."""
-    return _blueprint2_unsupported("delete_blueprint_macro")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "macro_id": macro_id,
+        "allow_name_fallback": allow_name_fallback,
+        "macro_name": macro_name,
+        "macro_owner_id": macro_owner_id,
+        "macro_type_path": macro_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "delete_blueprint_macro", asset_path, request
+    )
 
 
-def ue_create_custom_event(asset_path: str = None, event_name: str = None,
-                                 parameters: list = []) -> str:
+def ue_create_custom_event(asset_path: str = None, graph_id: str = None,
+                                  event_name: str = None, parameters: list = [],
+                                  pos_x: float = 0.0,
+                                  pos_y: float = 0.0) -> str:
     """Creates a custom event with ordered parameters."""
-    return _blueprint2_unsupported("create_custom_event")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "graph_id": graph_id,
+        "event_name": event_name,
+        "parameters": parameters,
+        "pos_x": pos_x,
+        "pos_y": pos_y,
+    })
+    return blueprint2.call_asset_helper(
+        "create_custom_event", asset_path, request
+    )
 
 
 def ue_delete_custom_event(asset_path: str = None, event_id: str = None,
@@ -840,14 +878,36 @@ def ue_delete_custom_event(asset_path: str = None, event_id: str = None,
                                   owner_graph_id: str = "",
                                   event_type_path: str = "") -> str:
     """Deletes a custom event targeted by stable ID."""
-    return _blueprint2_unsupported("delete_custom_event")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "event_id": event_id,
+        "allow_name_fallback": allow_name_fallback,
+        "event_name": event_name,
+        "owner_graph_id": owner_graph_id,
+        "event_type_path": event_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "delete_custom_event", asset_path, request
+    )
 
 
 def ue_add_event_dispatcher(asset_path: str = None,
-                                  dispatcher_name: str = None,
-                                  parameters: list = []) -> str:
+                                   dispatcher_name: str = None,
+                                   parameters: list = [], category: str = "",
+                                   description: str = "") -> str:
     """Adds an event dispatcher with ordered parameters."""
-    return _blueprint2_unsupported("add_event_dispatcher")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "dispatcher_name": dispatcher_name,
+        "parameters": parameters,
+        "category": category,
+        "description": description,
+    })
+    return blueprint2.call_asset_helper(
+        "add_event_dispatcher", asset_path, request
+    )
 
 
 def ue_remove_event_dispatcher(asset_path: str = None,
@@ -857,7 +917,18 @@ def ue_remove_event_dispatcher(asset_path: str = None,
                                      dispatcher_owner_id: str = "",
                                      dispatcher_type_path: str = "") -> str:
     """Removes an event dispatcher targeted by stable ID."""
-    return _blueprint2_unsupported("remove_event_dispatcher")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "dispatcher_id": dispatcher_id,
+        "allow_name_fallback": allow_name_fallback,
+        "dispatcher_name": dispatcher_name,
+        "dispatcher_owner_id": dispatcher_owner_id,
+        "dispatcher_type_path": dispatcher_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "remove_event_dispatcher", asset_path, request
+    )
 
 
 def ue_add_blueprint_interface(asset_path: str = None,

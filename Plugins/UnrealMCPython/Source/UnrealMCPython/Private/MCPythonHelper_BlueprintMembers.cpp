@@ -8,8 +8,11 @@
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "K2Node_CustomEvent.h"
 #include "K2Node_FunctionEntry.h"
 #include "K2Node_FunctionResult.h"
+#include "K2Node_MacroInstance.h"
+#include "K2Node_Tunnel.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/Kismet2NameValidators.h"
 #include "Serialization/JsonReader.h"
@@ -40,6 +43,22 @@ struct FFunctionSignature
     bool bPure = false;
     bool bConst = false;
     FString Access;
+    FString Category;
+    FString Description;
+};
+
+struct FMacroSignature
+{
+    TArray<FFunctionParameter> Inputs;
+    TArray<FFunctionParameter> Outputs;
+    bool bPure = false;
+    FString Category;
+    FString Description;
+};
+
+struct FDispatcherSignature
+{
+    TArray<FFunctionParameter> Parameters;
     FString Category;
     FString Description;
 };
@@ -152,6 +171,23 @@ bool RequiredBool(
         OutFailure = Invalid(
             Field,
             FString::Printf(TEXT("'%s' must be a boolean."), *Field));
+        return false;
+    }
+    return true;
+}
+
+bool RequiredNumber(
+    const TSharedRef<FJsonObject>& Request,
+    const FString& Field,
+    double& OutValue,
+    FString& OutFailure)
+{
+    if (!Request->TryGetNumberField(Field, OutValue) ||
+        !FMath::IsFinite(OutValue))
+    {
+        OutFailure = Invalid(
+            Field,
+            FString::Printf(TEXT("'%s' must be a finite number."), *Field));
         return false;
     }
     return true;
@@ -393,6 +429,70 @@ bool ParseSignature(
     return true;
 }
 
+bool ParseMacroSignature(
+    const TSharedRef<FJsonObject>& Request,
+    UBlueprint* Blueprint,
+    FMacroSignature& OutSignature,
+    FString& OutFailure)
+{
+    TSet<FName> UsedNames;
+    return ParseParameters(
+               Request,
+               TEXT("inputs"),
+               Blueprint,
+               UsedNames,
+               OutSignature.Inputs,
+               OutFailure) &&
+        ParseParameters(
+               Request,
+               TEXT("outputs"),
+               Blueprint,
+               UsedNames,
+               OutSignature.Outputs,
+               OutFailure) &&
+        RequiredBool(Request, TEXT("pure"), OutSignature.bPure, OutFailure) &&
+        RequiredString(
+               Request,
+               TEXT("category"),
+               OutSignature.Category,
+               OutFailure,
+               true) &&
+        RequiredString(
+               Request,
+               TEXT("description"),
+               OutSignature.Description,
+               OutFailure,
+               true);
+}
+
+bool ParseDispatcherSignature(
+    const TSharedRef<FJsonObject>& Request,
+    UBlueprint* Blueprint,
+    FDispatcherSignature& OutSignature,
+    FString& OutFailure)
+{
+    TSet<FName> UsedNames;
+    return ParseParameters(
+               Request,
+               TEXT("parameters"),
+               Blueprint,
+               UsedNames,
+               OutSignature.Parameters,
+               OutFailure) &&
+        RequiredString(
+               Request,
+               TEXT("category"),
+               OutSignature.Category,
+               OutFailure,
+               true) &&
+        RequiredString(
+               Request,
+               TEXT("description"),
+               OutSignature.Description,
+               OutFailure,
+               true);
+}
+
 bool IsInterfaceBlueprint(const UBlueprint* Blueprint)
 {
     return Blueprint &&
@@ -469,6 +569,53 @@ bool FindTerminators(
     }
     OutEntry = Entries[0];
     OutResult = Results.IsEmpty() ? nullptr : Results[0];
+    return true;
+}
+
+bool FindMacroTunnels(
+    UEdGraph* Graph,
+    UK2Node_Tunnel*& OutEntry,
+    UK2Node_Tunnel*& OutExit,
+    FString& OutFailure)
+{
+    TArray<UK2Node_Tunnel*> Tunnels;
+    Graph->GetNodesOfClass(Tunnels);
+    for (UK2Node_Tunnel* Tunnel : Tunnels)
+    {
+        if (!Tunnel || !Tunnel->IsEditable())
+        {
+            continue;
+        }
+        if (Tunnel->bCanHaveOutputs)
+        {
+            if (OutEntry)
+            {
+                OutFailure = Precondition(
+                    TEXT("macro_id"),
+                    TEXT("The macro has more than one editable entry tunnel."));
+                return false;
+            }
+            OutEntry = Tunnel;
+        }
+        if (Tunnel->bCanHaveInputs)
+        {
+            if (OutExit)
+            {
+                OutFailure = Precondition(
+                    TEXT("macro_id"),
+                    TEXT("The macro has more than one editable exit tunnel."));
+                return false;
+            }
+            OutExit = Tunnel;
+        }
+    }
+    if (!OutEntry || !OutExit)
+    {
+        OutFailure = Precondition(
+            TEXT("macro_id"),
+            TEXT("The macro does not have one editable entry and exit tunnel."));
+        return false;
+    }
     return true;
 }
 
@@ -555,6 +702,51 @@ bool ParseTarget(
     return true;
 }
 
+bool ParseNamedTarget(
+    const TSharedRef<FJsonObject>& Request,
+    const FString& IdField,
+    const FString& NameField,
+    const FString& OwnerField,
+    const FString& TypeField,
+    FTargetRef& OutTarget,
+    FString& OutFailure)
+{
+    if (!RequiredString(Request, IdField, OutTarget.Id, OutFailure))
+    {
+        return false;
+    }
+    if (Request->HasField(TEXT("allow_name_fallback")) &&
+        !Request->TryGetBoolField(
+            TEXT("allow_name_fallback"), OutTarget.bAllowNameFallback))
+    {
+        OutFailure = Invalid(
+            TEXT("allow_name_fallback"),
+            TEXT("allow_name_fallback must be a boolean."));
+        return false;
+    }
+    if (!OptionalString(Request, NameField, OutTarget.Name, OutFailure) ||
+        !OptionalString(Request, OwnerField, OutTarget.OwnerId, OutFailure) ||
+        !OptionalString(Request, TypeField, OutTarget.TypePath, OutFailure))
+    {
+        return false;
+    }
+    if (!OutTarget.Name.IsEmpty() &&
+        !IsValidMemberName(OutTarget.Name, NameField, OutFailure))
+    {
+        return false;
+    }
+    if (OutTarget.Id.StartsWith(TEXT("fallback:")) &&
+        (!OutTarget.bAllowNameFallback || OutTarget.OwnerId.IsEmpty() ||
+         OutTarget.Name.IsEmpty() || OutTarget.TypePath.IsEmpty()))
+    {
+        OutFailure = Invalid(
+            IdField,
+            TEXT("An unstable target id requires explicit, fully qualified name fallback."));
+        return false;
+    }
+    return true;
+}
+
 bool ResolveFunction(
     UBlueprint* Blueprint,
     const FTargetRef& Target,
@@ -586,6 +778,60 @@ bool ResolveFunction(
     OutGraph = Resolved.Graph;
     return IsUserFunctionGraph(
         Blueprint, OutGraph, OutEntry, OutResult, OutFailure);
+}
+
+bool ResolveMemberTarget(
+    UBlueprint* Blueprint,
+    ETargetKind Kind,
+    const FTargetRef& Target,
+    const FString& Path,
+    FResolvedTarget& OutResolved,
+    FString& OutFailure)
+{
+    FString ResolutionError;
+    OutResolved = ResolveTarget(Blueprint, Kind, Target, ResolutionError);
+    const bool bFound =
+        (Kind == ETargetKind::Graph && OutResolved.Graph) ||
+        (Kind == ETargetKind::Node && OutResolved.Node) ||
+        (Kind == ETargetKind::Variable && OutResolved.Variable);
+    if (bFound)
+    {
+        return true;
+    }
+    if (ResolutionError.Contains(TEXT("ambiguous")))
+    {
+        OutFailure = Conflict(Path, ResolutionError);
+    }
+    else if (
+        ResolutionError.Contains(TEXT("no longer exists")) ||
+        ResolutionError.Contains(TEXT("not found")) ||
+        ResolutionError.Contains(TEXT("does not belong")))
+    {
+        OutFailure = Precondition(Path, ResolutionError);
+    }
+    else
+    {
+        OutFailure = Invalid(Path, ResolutionError);
+    }
+    return false;
+}
+
+TArray<TSharedPtr<FJsonValue>> ParameterPinIds(
+    UBlueprint* Blueprint,
+    UK2Node_EditablePinBase* Node,
+    const TArray<FFunctionParameter>& Parameters)
+{
+    TArray<TSharedPtr<FJsonValue>> PinIds;
+    PinIds.Reserve(Parameters.Num());
+    for (const FFunctionParameter& Parameter : Parameters)
+    {
+        if (const UEdGraphPin* Pin = Node ? Node->FindPin(Parameter.Name) : nullptr)
+        {
+            PinIds.Add(MakeShared<FJsonValueString>(
+                DescribePinTarget(Blueprint, Pin).Id));
+        }
+    }
+    return PinIds;
 }
 
 void RemoveUserPins(UK2Node_EditablePinBase* Node)
@@ -749,6 +995,182 @@ bool ApplySignature(
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
     }
     return true;
+}
+
+bool CreateOrderedPins(
+    UK2Node_EditablePinBase* Node,
+    const TArray<FFunctionParameter>& Parameters,
+    EEdGraphPinDirection Direction,
+    const FString& Path,
+    FString& OutFailure)
+{
+    for (const FFunctionParameter& Parameter : Parameters)
+    {
+        if (!Node || !Node->CreateUserDefinedPin(
+                Parameter.Name, Parameter.Type, Direction, false))
+        {
+            OutFailure = Failure(
+                TEXT("INTERNAL_ERROR"),
+                Path,
+                FString::Printf(
+                    TEXT("Unreal rejected pin '%s'."),
+                    *Parameter.Name.ToString()),
+                TEXT("Undo the transaction, inspect the member, and retry."));
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ApplyMacroSignature(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    UK2Node_Tunnel* Entry,
+    UK2Node_Tunnel* Exit,
+    const FMacroSignature& Signature,
+    FMutationScope& Scope,
+    FString& OutFailure)
+{
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    Scope.Modify(Entry);
+    Scope.Modify(Exit);
+    RemoveUserPins(Entry);
+    RemoveUserPins(Exit);
+
+    if (!Signature.bPure)
+    {
+        FEdGraphPinType ExecType;
+        ExecType.PinCategory = UEdGraphSchema_K2::PC_Exec;
+        if (!Entry->CreateUserDefinedPin(
+                UEdGraphSchema_K2::PN_Execute,
+                ExecType,
+                EGPD_Output,
+                false) ||
+            !Exit->CreateUserDefinedPin(
+                UEdGraphSchema_K2::PN_Then,
+                ExecType,
+                EGPD_Input,
+                false))
+        {
+            OutFailure = Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("pure"),
+                TEXT("Unreal rejected the macro execution pins."),
+                TEXT("Undo the transaction, inspect the macro, and retry."));
+            return false;
+        }
+    }
+    if (!CreateOrderedPins(
+            Entry, Signature.Inputs, EGPD_Output, TEXT("inputs"), OutFailure) ||
+        !CreateOrderedPins(
+            Exit, Signature.Outputs, EGPD_Input, TEXT("outputs"), OutFailure))
+    {
+        return false;
+    }
+
+    Entry->MetaData.Category = FText::FromString(Signature.Category);
+    Entry->MetaData.ToolTip = FText::FromString(Signature.Description);
+    Entry->ReconstructNode();
+    Exit->ReconstructNode();
+    for (const FFunctionParameter& Parameter : Signature.Inputs)
+    {
+        ApplyPinDefault(Entry, Parameter);
+    }
+    for (const FFunctionParameter& Parameter : Signature.Outputs)
+    {
+        ApplyPinDefault(Exit, Parameter);
+    }
+    return true;
+}
+
+bool ApplyEventParameters(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    UK2Node_CustomEvent* Event,
+    const TArray<FFunctionParameter>& Parameters,
+    FMutationScope& Scope,
+    FString& OutFailure)
+{
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    Scope.Modify(Event);
+    RemoveUserPins(Event);
+    if (!CreateOrderedPins(
+            Event, Parameters, EGPD_Output, TEXT("parameters"), OutFailure))
+    {
+        return false;
+    }
+    Event->ReconstructNode();
+    for (const FFunctionParameter& Parameter : Parameters)
+    {
+        ApplyPinDefault(Event, Parameter);
+    }
+    return true;
+}
+
+bool ApplyDispatcherSignature(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    UK2Node_FunctionEntry* Entry,
+    const FDispatcherSignature& Signature,
+    FMutationScope& Scope,
+    FString& OutFailure)
+{
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    Scope.Modify(Entry);
+    RemoveUserPins(Entry);
+    if (!CreateOrderedPins(
+            Entry,
+            Signature.Parameters,
+            EGPD_Output,
+            TEXT("parameters"),
+            OutFailure))
+    {
+        return false;
+    }
+    Entry->MetaData.Category = FText::FromString(Signature.Category);
+    Entry->MetaData.ToolTip = FText::FromString(Signature.Description);
+    Entry->ReconstructNode();
+    for (const FFunctionParameter& Parameter : Signature.Parameters)
+    {
+        ApplyPinDefault(Entry, Parameter);
+    }
+    return true;
+}
+
+TSharedPtr<FJsonValue> MakeChangeValue(
+    const FString& Kind,
+    const FString& TargetId,
+    const TSharedRef<FJsonObject>& Details)
+{
+    const TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
+    Change->SetStringField(TEXT("kind"), Kind);
+    Change->SetStringField(TEXT("target_id"), TargetId);
+    Change->SetObjectField(TEXT("details"), Details);
+    return MakeShared<FJsonValueObject>(Change);
+}
+
+FString AuthoringSuccess(
+    UBlueprint* Blueprint,
+    const FString& Summary,
+    const TSharedRef<FJsonObject>& Data,
+    const TArray<TSharedPtr<FJsonValue>>& Changes)
+{
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    const TSharedRef<FJsonObject> NextAction = MakeShared<FJsonObject>();
+    NextAction->SetStringField(TEXT("domain"), TEXT("blueprint"));
+    NextAction->SetStringField(TEXT("action"), TEXT("compile_blueprint"));
+    NextAction->SetObjectField(TEXT("params"), Params);
+
+    const TSharedRef<FJsonObject> Response = MakeSuccess(Summary, Data);
+    Response->SetArrayField(TEXT("changes"), Changes);
+    Response->SetArrayField(
+        TEXT("next_actions"), {MakeShared<FJsonValueObject>(NextAction)});
+    return SerializeResult(Response);
 }
 
 FString MutationFailure(FMutationScope& Scope, const FString& FailureJson)
@@ -1173,4 +1595,730 @@ FString UMCPythonHelper::DeleteBlueprintFunction(
         Blueprint, Graph, EGraphRemoveFlags::MarkTransient);
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
     return DeleteSuccessResult(Blueprint, FunctionId, FunctionName);
+}
+
+FString UMCPythonHelper::CreateBlueprintMacro(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    if (Blueprint->BlueprintType != BPTYPE_Normal &&
+        Blueprint->BlueprintType != BPTYPE_MacroLibrary &&
+        Blueprint->BlueprintType != BPTYPE_LevelScript)
+    {
+        return Precondition(
+            TEXT("asset_path"),
+            TEXT("This Blueprint type does not support user-authored macros."));
+    }
+
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(),
+            {TEXT("macro_name"), TEXT("inputs"), TEXT("outputs"),
+             TEXT("pure"), TEXT("category"), TEXT("description")},
+            Error))
+    {
+        return Error;
+    }
+    FString MacroName;
+    FMacroSignature Signature;
+    if (!RequiredString(
+            Request.ToSharedRef(), TEXT("macro_name"), MacroName, Error) ||
+        !IsValidMemberName(MacroName, TEXT("macro_name"), Error) ||
+        !ParseMacroSignature(
+            Request.ToSharedRef(), Blueprint, Signature, Error) ||
+        !ValidateUniqueMemberName(
+            Blueprint, MacroName, NAME_None, TEXT("macro_name"), Error))
+    {
+        return Error;
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython", "CreateBlueprintMacro", "Create Blueprint Macro"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the macro creation transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    UEdGraph* Graph = FBlueprintEditorUtils::CreateNewGraph(
+        Blueprint,
+        FName(*MacroName),
+        UEdGraph::StaticClass(),
+        UEdGraphSchema_K2::StaticClass());
+    if (!Graph)
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("macro_name"),
+                TEXT("Unreal could not create the macro graph."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    Scope.Modify(Graph);
+    if (Graph->GetFName() != FName(*MacroName))
+    {
+        return MutationFailure(
+            Scope,
+            Conflict(
+                TEXT("macro_name"),
+                TEXT("Unreal could not reserve the requested macro name.")));
+    }
+    if (!Graph->GraphGuid.IsValid())
+    {
+        Graph->GraphGuid = FGuid::NewGuid();
+    }
+    FBlueprintEditorUtils::AddMacroGraph(Blueprint, Graph, true, nullptr);
+
+    UK2Node_Tunnel* Entry = nullptr;
+    UK2Node_Tunnel* Exit = nullptr;
+    if (!FindMacroTunnels(Graph, Entry, Exit, Error) ||
+        !ApplyMacroSignature(
+            Blueprint, Graph, Entry, Exit, Signature, Scope, Error))
+    {
+        return MutationFailure(Scope, Error);
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const FTargetRef MacroTarget = DescribeGraphTarget(Blueprint, Graph);
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("macro_id"), MacroTarget.Id);
+    Data->SetStringField(TEXT("macro_name"), MacroName);
+    Data->SetArrayField(
+        TEXT("input_pin_ids"),
+        ParameterPinIds(Blueprint, Entry, Signature.Inputs));
+    Data->SetArrayField(
+        TEXT("output_pin_ids"),
+        ParameterPinIds(Blueprint, Exit, Signature.Outputs));
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(TEXT("macro_name"), MacroName);
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Blueprint macro created."),
+        Data,
+        {MakeChangeValue(TEXT("create"), MacroTarget.Id, Details)});
+}
+
+FString UMCPythonHelper::DeleteBlueprintMacro(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(),
+            {TEXT("macro_id"), TEXT("allow_name_fallback"),
+             TEXT("macro_name"), TEXT("macro_owner_id"),
+             TEXT("macro_type_path")},
+            Error))
+    {
+        return Error;
+    }
+    FTargetRef Target;
+    FResolvedTarget Resolved;
+    if (!ParseNamedTarget(
+            Request.ToSharedRef(),
+            TEXT("macro_id"),
+            TEXT("macro_name"),
+            TEXT("macro_owner_id"),
+            TEXT("macro_type_path"),
+            Target,
+            Error) ||
+        !ResolveMemberTarget(
+            Blueprint,
+            ETargetKind::Graph,
+            Target,
+            TEXT("macro_id"),
+            Resolved,
+            Error))
+    {
+        return Error;
+    }
+    UEdGraph* Graph = Resolved.Graph;
+    if (!Blueprint->MacroGraphs.Contains(Graph))
+    {
+        return Precondition(
+            TEXT("macro_id"),
+            TEXT("The target is not a user-authored macro graph."));
+    }
+    const FString MacroId = DescribeGraphTarget(Blueprint, Graph).Id;
+    const FString MacroName = Graph->GetName();
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython", "DeleteBlueprintMacro", "Delete Blueprint Macro"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the macro deletion transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        Scope.Modify(Node);
+    }
+    FBlueprintEditorUtils::RemoveGraph(
+        Blueprint, Graph, EGraphRemoveFlags::MarkTransient);
+    if (Blueprint->MacroGraphs.Contains(Graph))
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("macro_id"),
+                TEXT("Unreal did not remove the macro graph."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("macro_id"), MacroId);
+    Data->SetStringField(TEXT("macro_name"), MacroName);
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(TEXT("macro_name"), MacroName);
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Blueprint macro deleted."),
+        Data,
+        {MakeChangeValue(TEXT("delete"), MacroId, Details)});
+}
+
+FString UMCPythonHelper::CreateCustomEvent(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(),
+            {TEXT("graph_id"), TEXT("event_name"), TEXT("parameters"),
+             TEXT("pos_x"), TEXT("pos_y")},
+            Error))
+    {
+        return Error;
+    }
+
+    FString GraphId;
+    FString EventName;
+    double PosX = 0.0;
+    double PosY = 0.0;
+    TArray<FFunctionParameter> Parameters;
+    TSet<FName> UsedNames;
+    if (!RequiredString(
+            Request.ToSharedRef(), TEXT("graph_id"), GraphId, Error) ||
+        !RequiredString(
+            Request.ToSharedRef(), TEXT("event_name"), EventName, Error) ||
+        !IsValidMemberName(EventName, TEXT("event_name"), Error) ||
+        !ParseParameters(
+            Request.ToSharedRef(),
+            TEXT("parameters"),
+            Blueprint,
+            UsedNames,
+            Parameters,
+            Error) ||
+        !RequiredNumber(Request.ToSharedRef(), TEXT("pos_x"), PosX, Error) ||
+        !RequiredNumber(Request.ToSharedRef(), TEXT("pos_y"), PosY, Error))
+    {
+        return Error;
+    }
+    if (PosX < MIN_int32 || PosX > MAX_int32 ||
+        PosY < MIN_int32 || PosY > MAX_int32)
+    {
+        return Invalid(
+            TEXT("position"),
+            TEXT("Custom event coordinates must fit in a signed 32-bit integer."));
+    }
+
+    FTargetRef GraphTarget;
+    GraphTarget.Id = GraphId;
+    FResolvedTarget Resolved;
+    if (!ResolveMemberTarget(
+            Blueprint,
+            ETargetKind::Graph,
+            GraphTarget,
+            TEXT("graph_id"),
+            Resolved,
+            Error))
+    {
+        return Error;
+    }
+    UEdGraph* Graph = Resolved.Graph;
+    const UEdGraphSchema_K2* Schema = Graph
+        ? Cast<UEdGraphSchema_K2>(Graph->GetSchema())
+        : nullptr;
+    if (!Graph || !Schema || !Blueprint->UbergraphPages.Contains(Graph) ||
+        Schema->GetGraphType(Graph) != GT_Ubergraph || !Graph->bEditable)
+    {
+        return Precondition(
+            TEXT("graph_id"),
+            TEXT("Custom events can only be created in an editable K2 ubergraph owned by this Blueprint."));
+    }
+    if (!ValidateUniqueMemberName(
+            Blueprint,
+            EventName,
+            NAME_None,
+            TEXT("event_name"),
+            Error))
+    {
+        return Error;
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython", "CreateCustomEvent", "Create Custom Event"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the custom event transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    FGraphNodeCreator<UK2Node_CustomEvent> NodeCreator(*Graph);
+    UK2Node_CustomEvent* Event = NodeCreator.CreateNode(false);
+    Event->CustomFunctionName = FName(*EventName);
+    Event->bIsEditable = true;
+    Event->NodePosX = FMath::RoundToInt32(PosX);
+    Event->NodePosY = FMath::RoundToInt32(PosY);
+    NodeCreator.Finalize();
+    if (!ApplyEventParameters(
+            Blueprint, Graph, Event, Parameters, Scope, Error))
+    {
+        return MutationFailure(Scope, Error);
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const FTargetRef EventTarget = DescribeNodeTarget(Blueprint, Event);
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("event_id"), EventTarget.Id);
+    Data->SetStringField(TEXT("event_name"), EventName);
+    Data->SetStringField(
+        TEXT("graph_id"), DescribeGraphTarget(Blueprint, Graph).Id);
+    Data->SetArrayField(
+        TEXT("pin_ids"), ParameterPinIds(Blueprint, Event, Parameters));
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(TEXT("event_name"), EventName);
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Custom event created."),
+        Data,
+        {MakeChangeValue(TEXT("create"), EventTarget.Id, Details)});
+}
+
+FString UMCPythonHelper::DeleteCustomEvent(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(),
+            {TEXT("event_id"), TEXT("allow_name_fallback"),
+             TEXT("event_name"), TEXT("owner_graph_id"),
+             TEXT("event_type_path")},
+            Error))
+    {
+        return Error;
+    }
+    FTargetRef Target;
+    FResolvedTarget Resolved;
+    if (!ParseNamedTarget(
+            Request.ToSharedRef(),
+            TEXT("event_id"),
+            TEXT("event_name"),
+            TEXT("owner_graph_id"),
+            TEXT("event_type_path"),
+            Target,
+            Error) ||
+        !ResolveMemberTarget(
+            Blueprint,
+            ETargetKind::Node,
+            Target,
+            TEXT("event_id"),
+            Resolved,
+            Error))
+    {
+        return Error;
+    }
+    UK2Node_CustomEvent* Event = Cast<UK2Node_CustomEvent>(Resolved.Node);
+    UEdGraph* Graph = Resolved.Graph;
+    if (!Event || !Graph || !Blueprint->UbergraphPages.Contains(Graph))
+    {
+        return Precondition(
+            TEXT("event_id"),
+            TEXT("The target is not a custom event in this Blueprint's ubergraph."));
+    }
+    const FString EventId = DescribeNodeTarget(Blueprint, Event).Id;
+    const FString EventName = Event->CustomFunctionName.ToString();
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython", "DeleteCustomEvent", "Delete Custom Event"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the custom event deletion transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    Scope.Modify(Event);
+    Event->DestroyNode();
+    if (Graph->Nodes.Contains(Event))
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("event_id"),
+                TEXT("Unreal did not remove the custom event node."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("event_id"), EventId);
+    Data->SetStringField(TEXT("event_name"), EventName);
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(TEXT("event_name"), EventName);
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Custom event deleted."),
+        Data,
+        {MakeChangeValue(TEXT("delete"), EventId, Details)});
+}
+
+FString UMCPythonHelper::AddEventDispatcher(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    if (Blueprint->BlueprintType == BPTYPE_Interface ||
+        Blueprint->BlueprintType == BPTYPE_MacroLibrary ||
+        Blueprint->BlueprintType == BPTYPE_FunctionLibrary)
+    {
+        return Precondition(
+            TEXT("asset_path"),
+            TEXT("This Blueprint type does not support event dispatchers."));
+    }
+
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(),
+            {TEXT("dispatcher_name"), TEXT("parameters"),
+             TEXT("category"), TEXT("description")},
+            Error))
+    {
+        return Error;
+    }
+    FString DispatcherName;
+    FDispatcherSignature Signature;
+    if (!RequiredString(
+            Request.ToSharedRef(),
+            TEXT("dispatcher_name"),
+            DispatcherName,
+            Error) ||
+        !IsValidMemberName(
+            DispatcherName, TEXT("dispatcher_name"), Error) ||
+        !ParseDispatcherSignature(
+            Request.ToSharedRef(), Blueprint, Signature, Error) ||
+        !ValidateUniqueMemberName(
+            Blueprint,
+            DispatcherName,
+            NAME_None,
+            TEXT("dispatcher_name"),
+            Error))
+    {
+        return Error;
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython", "AddEventDispatcher", "Add Event Dispatcher"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the event dispatcher transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    FEdGraphPinType DispatcherType;
+    DispatcherType.PinCategory = UEdGraphSchema_K2::PC_MCDelegate;
+    const FName DispatcherFName(*DispatcherName);
+    if (!FBlueprintEditorUtils::AddMemberVariable(
+            Blueprint, DispatcherFName, DispatcherType))
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("dispatcher_name"),
+                TEXT("Unreal rejected the event dispatcher variable."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    const int32 VariableIndex =
+        FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, DispatcherFName);
+    if (!Blueprint->NewVariables.IsValidIndex(VariableIndex))
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("dispatcher_name"),
+                TEXT("Unreal created no addressable dispatcher variable."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    const FTargetRef DispatcherTarget = DescribeVariableTarget(
+        Blueprint, Blueprint->NewVariables[VariableIndex]);
+
+    UEdGraph* Graph = FBlueprintEditorUtils::CreateNewGraph(
+        Blueprint,
+        DispatcherFName,
+        UEdGraph::StaticClass(),
+        UEdGraphSchema_K2::StaticClass());
+    if (!Graph)
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("dispatcher_name"),
+                TEXT("Unreal could not create the dispatcher signature graph."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    Scope.Modify(Graph);
+    if (Graph->GetFName() != DispatcherFName)
+    {
+        return MutationFailure(
+            Scope,
+            Conflict(
+                TEXT("dispatcher_name"),
+                TEXT("Unreal could not reserve the dispatcher graph name.")));
+    }
+    if (!Graph->GraphGuid.IsValid())
+    {
+        Graph->GraphGuid = FGuid::NewGuid();
+    }
+
+    const UEdGraphSchema_K2* K2Schema =
+        Cast<UEdGraphSchema_K2>(Graph->GetSchema());
+    if (!K2Schema)
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("dispatcher_name"),
+                TEXT("The dispatcher signature graph has no K2 schema."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    Graph->bEditable = false;
+    K2Schema->CreateDefaultNodesForGraph(*Graph);
+    K2Schema->CreateFunctionGraphTerminators(*Graph, (UClass*)nullptr);
+    K2Schema->AddExtraFunctionFlags(
+        Graph,
+        FUNC_BlueprintCallable | FUNC_BlueprintEvent | FUNC_Public);
+    K2Schema->MarkFunctionEntryAsEditable(Graph, true);
+    Blueprint->DelegateSignatureGraphs.Add(Graph);
+
+    TArray<UK2Node_FunctionEntry*> Entries;
+    Graph->GetNodesOfClass(Entries);
+    if (Entries.Num() != 1 ||
+        !ApplyDispatcherSignature(
+            Blueprint,
+            Graph,
+            Entries.IsEmpty() ? nullptr : Entries[0],
+            Signature,
+            Scope,
+            Error))
+    {
+        if (Error.IsEmpty())
+        {
+            Error = Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("dispatcher_name"),
+                TEXT("The dispatcher graph does not have exactly one signature entry."),
+                TEXT("Inspect the Blueprint and retry."));
+        }
+        return MutationFailure(Scope, Error);
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const FTargetRef GraphTarget = DescribeGraphTarget(Blueprint, Graph);
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("dispatcher_id"), DispatcherTarget.Id);
+    Data->SetStringField(TEXT("dispatcher_name"), DispatcherName);
+    Data->SetStringField(TEXT("signature_graph_id"), GraphTarget.Id);
+    Data->SetArrayField(
+        TEXT("pin_ids"),
+        ParameterPinIds(Blueprint, Entries[0], Signature.Parameters));
+    const TSharedRef<FJsonObject> VariableDetails = MakeShared<FJsonObject>();
+    VariableDetails->SetStringField(TEXT("dispatcher_name"), DispatcherName);
+    const TSharedRef<FJsonObject> GraphDetails = MakeShared<FJsonObject>();
+    GraphDetails->SetStringField(TEXT("dispatcher_name"), DispatcherName);
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Event dispatcher created."),
+        Data,
+        {
+            MakeChangeValue(
+                TEXT("create"), DispatcherTarget.Id, VariableDetails),
+            MakeChangeValue(TEXT("create"), GraphTarget.Id, GraphDetails),
+        });
+}
+
+FString UMCPythonHelper::RemoveEventDispatcher(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    if (!Blueprint)
+    {
+        return Precondition(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    TSharedPtr<FJsonObject> Request;
+    FString Error;
+    if (!ParseRequestObject(RequestJson, Request, Error) ||
+        !ValidateClosedRequest(
+            Request.ToSharedRef(),
+            {TEXT("dispatcher_id"), TEXT("allow_name_fallback"),
+             TEXT("dispatcher_name"), TEXT("dispatcher_owner_id"),
+             TEXT("dispatcher_type_path")},
+            Error))
+    {
+        return Error;
+    }
+    FTargetRef Target;
+    FResolvedTarget Resolved;
+    if (!ParseNamedTarget(
+            Request.ToSharedRef(),
+            TEXT("dispatcher_id"),
+            TEXT("dispatcher_name"),
+            TEXT("dispatcher_owner_id"),
+            TEXT("dispatcher_type_path"),
+            Target,
+            Error) ||
+        !ResolveMemberTarget(
+            Blueprint,
+            ETargetKind::Variable,
+            Target,
+            TEXT("dispatcher_id"),
+            Resolved,
+            Error))
+    {
+        return Error;
+    }
+    FBPVariableDescription* Variable = Resolved.Variable;
+    if (!Variable ||
+        Variable->VarType.PinCategory != UEdGraphSchema_K2::PC_MCDelegate)
+    {
+        return Precondition(
+            TEXT("dispatcher_id"),
+            TEXT("The target is not an event dispatcher declared by this Blueprint."));
+    }
+    const FName DispatcherName = Variable->VarName;
+    const FString DispatcherId =
+        DescribeVariableTarget(Blueprint, *Variable).Id;
+    TArray<UEdGraph*> MatchingGraphs;
+    for (UEdGraph* Candidate : Blueprint->DelegateSignatureGraphs)
+    {
+        if (Candidate && Candidate->GetFName() == DispatcherName)
+        {
+            MatchingGraphs.Add(Candidate);
+        }
+    }
+    if (MatchingGraphs.Num() != 1)
+    {
+        return Precondition(
+            TEXT("dispatcher_id"),
+            TEXT("The dispatcher must have exactly one same-name signature graph."));
+    }
+    UEdGraph* Graph = MatchingGraphs[0];
+    const FString GraphId = DescribeGraphTarget(Blueprint, Graph).Id;
+
+    FMutationScope Scope(NSLOCTEXT(
+        "UnrealMCPython", "RemoveEventDispatcher", "Remove Event Dispatcher"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Unreal could not start the dispatcher removal transaction."),
+            TEXT("Finish the active editor operation and retry."));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        Scope.Modify(Node);
+    }
+    FBlueprintEditorUtils::RemoveGraph(
+        Blueprint, Graph, EGraphRemoveFlags::MarkTransient);
+    FBlueprintEditorUtils::RemoveMemberVariable(Blueprint, DispatcherName);
+    if (Blueprint->DelegateSignatureGraphs.Contains(Graph) ||
+        FBlueprintEditorUtils::FindNewVariableIndex(
+            Blueprint, DispatcherName) != INDEX_NONE)
+    {
+        return MutationFailure(
+            Scope,
+            Failure(
+                TEXT("INTERNAL_ERROR"),
+                TEXT("dispatcher_id"),
+                TEXT("Unreal did not fully remove the event dispatcher."),
+                TEXT("Inspect the Blueprint and retry.")));
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("dispatcher_id"), DispatcherId);
+    Data->SetStringField(TEXT("dispatcher_name"), DispatcherName.ToString());
+    Data->SetStringField(TEXT("signature_graph_id"), GraphId);
+    const TSharedRef<FJsonObject> GraphDetails = MakeShared<FJsonObject>();
+    GraphDetails->SetStringField(
+        TEXT("dispatcher_name"), DispatcherName.ToString());
+    const TSharedRef<FJsonObject> VariableDetails = MakeShared<FJsonObject>();
+    VariableDetails->SetStringField(
+        TEXT("dispatcher_name"), DispatcherName.ToString());
+    return AuthoringSuccess(
+        Blueprint,
+        TEXT("Event dispatcher removed."),
+        Data,
+        {
+            MakeChangeValue(TEXT("delete"), GraphId, GraphDetails),
+            MakeChangeValue(TEXT("delete"), DispatcherId, VariableDetails),
+        });
 }

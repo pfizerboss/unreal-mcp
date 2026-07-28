@@ -24,6 +24,9 @@ INT_BOOL_MAP_TYPE = {"kind": "map", "key": INT_TYPE, "value": BOOL_TYPE}
 class TestBlueprint2Members(MCPTestCase):
 
     FUNCTION_NAME = "ComputeScore"
+    MACRO_NAME = "ClampScore"
+    EVENT_NAME = "OnScoreChanged"
+    DISPATCHER_NAME = "ScoreChanged"
 
     def setUp(self):
         unreal.EditorAssetLibrary.make_directory(BLUEPRINT2_TEST_ROOT)
@@ -110,6 +113,36 @@ class TestBlueprint2Members(MCPTestCase):
             ),
             None,
         )
+
+    def _inspect_member(self, op, name):
+        result = call_action(
+            "blueprint_actions",
+            "ue_inspect_blueprint",
+            asset_path=self.asset_path,
+            queries=[{"op": op, "detail": "detailed", "name_pattern": name}],
+        )
+        self.assertSuccess(result)
+        return next(
+            (item for item in result["data"]["results"][0]["items"]
+             if item["name"] == name or item.get("event_name") == name),
+            None,
+        )
+
+    def _event_graph_id(self):
+        result = call_action(
+            "blueprint_actions",
+            "ue_inspect_blueprint",
+            asset_path=self.asset_path,
+            queries=[{"op": "events", "detail": "compact"}],
+        )
+        self.assertSuccess(result)
+        graph_ids = {
+            item["graph_id"]
+            for item in result["data"]["results"][0]["items"]
+            if item["class_path"] == "/Script/BlueprintGraph.K2Node_Event"
+        }
+        self.assertEqual(len(graph_ids), 1, graph_ids)
+        return next(iter(graph_ids))
 
     def _initial_inputs(self):
         return [
@@ -399,6 +432,230 @@ class TestBlueprint2Members(MCPTestCase):
         self._assert_change(deleted, "delete")
         self.assertEqual(deleted["data"]["function_id"], function_id)
         self.assertIsNone(self._inspect_function(self.FUNCTION_NAME))
+
+    def test_create_blueprint_macro(self):
+        inputs = [
+            {"name": "Value", "type": INT_TYPE, "default": 7},
+            {"name": "Scale", "type": DOUBLE_TYPE, "default": 1.5},
+        ]
+        outputs = [{"name": "Result", "type": INT_TYPE}]
+        created = self.call(
+            "blueprint_actions",
+            "ue_create_blueprint_macro",
+            asset_path=self.asset_path,
+            macro_name=self.MACRO_NAME,
+            inputs=inputs,
+            outputs=outputs,
+            pure=True,
+            category="Scoring",
+            description="Clamps a score.",
+        )
+        self.assertSuccess(created)
+        macro_id = created["data"]["macro_id"]
+        self.assertTrue(macro_id.startswith("graph:"))
+        macro = self._inspect_member("macros", self.MACRO_NAME)
+        self.assertIsNotNone(macro)
+        self.assertEqual(macro["macro_id"], macro_id)
+        self._assert_signature(
+            macro,
+            inputs,
+            outputs,
+            pure=True,
+            category="Scoring",
+            description="Clamps a score.",
+        )
+        self._compile_without_errors()
+        self.assertEqual(
+            self._inspect_member("macros", self.MACRO_NAME)["macro_id"],
+            macro_id,
+        )
+
+    def test_delete_blueprint_macro(self):
+        created = self.call(
+            "blueprint_actions",
+            "ue_create_blueprint_macro",
+            asset_path=self.asset_path,
+            macro_name=self.MACRO_NAME,
+            inputs=[],
+            outputs=[],
+            pure=False,
+            category="",
+            description="",
+        )
+        self.assertSuccess(created)
+        macro_id = created["data"]["macro_id"]
+        deleted = self.call(
+            "blueprint_actions",
+            "ue_delete_blueprint_macro",
+            asset_path=self.asset_path,
+            macro_id=macro_id,
+        )
+        self.assertSuccess(deleted)
+        self.assertEqual(deleted["data"]["macro_id"], macro_id)
+        self.assertIsNone(self._inspect_member("macros", self.MACRO_NAME))
+
+    def test_create_custom_event(self):
+        graph_id = self._event_graph_id()
+        parameters = [
+            {"name": "Score", "type": INT_TYPE, "default": 4},
+            {"name": "Accepted", "type": BOOL_TYPE, "default": True},
+        ]
+        created = self.call(
+            "blueprint_actions",
+            "ue_create_custom_event",
+            asset_path=self.asset_path,
+            graph_id=graph_id,
+            event_name=self.EVENT_NAME,
+            parameters=parameters,
+            pos_x=160.0,
+            pos_y=320.0,
+        )
+        self.assertSuccess(created)
+        event_id = created["data"]["event_id"]
+        event = self._inspect_member("events", self.EVENT_NAME)
+        self.assertIsNotNone(event)
+        self.assertEqual(event["event_id"], event_id)
+        self.assertEqual(event["graph_id"], graph_id)
+        self.assertEqual(event["parameters"], [
+            {**parameter, "pin_id": pin_id}
+            for parameter, pin_id in zip(
+                parameters, created["data"]["pin_ids"]
+            )
+        ])
+        self.assertEqual(event["position"], {"x": 160, "y": 320})
+        self._compile_without_errors()
+        self.assertEqual(
+            self._inspect_member("events", self.EVENT_NAME)["event_id"],
+            event_id,
+        )
+
+    def test_delete_custom_event(self):
+        created = self.call(
+            "blueprint_actions",
+            "ue_create_custom_event",
+            asset_path=self.asset_path,
+            graph_id=self._event_graph_id(),
+            event_name=self.EVENT_NAME,
+            parameters=[],
+            pos_x=0.0,
+            pos_y=0.0,
+        )
+        self.assertSuccess(created)
+        event_id = created["data"]["event_id"]
+        deleted = self.call(
+            "blueprint_actions",
+            "ue_delete_custom_event",
+            asset_path=self.asset_path,
+            event_id=event_id,
+        )
+        self.assertSuccess(deleted)
+        self.assertEqual(deleted["data"]["event_id"], event_id)
+        self.assertIsNone(self._inspect_member("events", self.EVENT_NAME))
+
+    def test_add_event_dispatcher(self):
+        parameters = [
+            {"name": "Score", "type": INT_TYPE, "default": 2},
+            {"name": "Accepted", "type": BOOL_TYPE},
+        ]
+        created = self.call(
+            "blueprint_actions",
+            "ue_add_event_dispatcher",
+            asset_path=self.asset_path,
+            dispatcher_name=self.DISPATCHER_NAME,
+            parameters=parameters,
+            category="Scoring",
+            description="Emitted when the score changes.",
+        )
+        self.assertSuccess(created)
+        dispatcher_id = created["data"]["dispatcher_id"]
+        dispatcher = self._inspect_member("dispatchers", self.DISPATCHER_NAME)
+        self.assertIsNotNone(dispatcher)
+        self.assertEqual(dispatcher["dispatcher_id"], dispatcher_id)
+        self.assertEqual(dispatcher["metadata"]["parameters"], parameters)
+        self.assertEqual(dispatcher["metadata"]["category"], "Scoring")
+        self.assertEqual(
+            dispatcher["metadata"]["description"],
+            "Emitted when the score changes.",
+        )
+        self._compile_without_errors()
+        self.assertEqual(
+            self._inspect_member("dispatchers", self.DISPATCHER_NAME)[
+                "dispatcher_id"
+            ],
+            dispatcher_id,
+        )
+
+    def test_remove_event_dispatcher(self):
+        created = self.call(
+            "blueprint_actions",
+            "ue_add_event_dispatcher",
+            asset_path=self.asset_path,
+            dispatcher_name=self.DISPATCHER_NAME,
+            parameters=[],
+            category="",
+            description="",
+        )
+        self.assertSuccess(created)
+        dispatcher_id = created["data"]["dispatcher_id"]
+        removed = self.call(
+            "blueprint_actions",
+            "ue_remove_event_dispatcher",
+            asset_path=self.asset_path,
+            dispatcher_id=dispatcher_id,
+        )
+        self.assertSuccess(removed)
+        self.assertEqual(removed["data"]["dispatcher_id"], dispatcher_id)
+        self.assertEqual(len(removed["changes"]), 2)
+        self.assertIsNone(
+            self._inspect_member("dispatchers", self.DISPATCHER_NAME)
+        )
+
+    def test_macro_event_dispatcher_collisions_and_invalid_graph_are_atomic(self):
+        self._seed_function(self.MACRO_NAME)
+        collision = self.call(
+            "blueprint_actions",
+            "ue_create_blueprint_macro",
+            asset_path=self.asset_path,
+            macro_name=self.MACRO_NAME,
+            inputs=[],
+            outputs=[],
+            pure=False,
+            category="",
+            description="",
+        )
+        self._assert_rejected(collision, "CONFLICT", "macro_name")
+
+        function = self._inspect_function(self.MACRO_NAME)
+        invalid_graph = self.call(
+            "blueprint_actions",
+            "ue_create_custom_event",
+            asset_path=self.asset_path,
+            graph_id=function["function_id"],
+            event_name=self.EVENT_NAME,
+            parameters=[],
+            pos_x=0.0,
+            pos_y=0.0,
+        )
+        self._assert_rejected(invalid_graph, "PRECONDITION_FAILED", "graph_id")
+
+        invalid_dispatcher = self.call(
+            "blueprint_actions",
+            "ue_add_event_dispatcher",
+            asset_path=self.asset_path,
+            dispatcher_name=self.DISPATCHER_NAME,
+            parameters=[
+                {"name": "Value", "type": INT_TYPE},
+                {"name": "Value", "type": BOOL_TYPE},
+            ],
+            category="",
+            description="",
+        )
+        self._assert_rejected(
+            invalid_dispatcher, "INVALID_INPUT", "parameters[1].name"
+        )
+        self.assertIsNone(
+            self._inspect_member("dispatchers", self.DISPATCHER_NAME)
+        )
 
     def test_duplicate_member_name_is_rejected(self):
         self._seed_function()

@@ -454,6 +454,161 @@ def test_blueprint_function_wrappers_forward_exact_copied_requests(
     assert calls == [(blueprint, expected_request)]
 
 
+@pytest.mark.parametrize(
+    ("action", "params", "expected_request"),
+    (
+        (
+            "create_blueprint_macro",
+            {
+                "asset_path": "/Game/BP.BP",
+                "macro_name": "ClampScore",
+                "inputs": [{"name": "Value", "type": {"kind": "int"}}],
+                "outputs": [{"name": "Result", "type": {"kind": "int"}}],
+                "pure": True,
+                "category": "Scoring",
+                "description": "Clamp a score.",
+            },
+            {
+                "macro_name": "ClampScore",
+                "inputs": [{"name": "Value", "type": {"kind": "int"}}],
+                "outputs": [{"name": "Result", "type": {"kind": "int"}}],
+                "pure": True,
+                "category": "Scoring",
+                "description": "Clamp a score.",
+            },
+        ),
+        (
+            "delete_blueprint_macro",
+            {
+                "asset_path": "/Game/BP.BP",
+                "macro_id": "graph:11111111-1111-4111-8111-111111111111",
+                "allow_name_fallback": True,
+                "macro_name": "ClampScore",
+                "macro_owner_id": "/Game/BP.BP",
+                "macro_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
+            {
+                "macro_id": "graph:11111111-1111-4111-8111-111111111111",
+                "allow_name_fallback": True,
+                "macro_name": "ClampScore",
+                "macro_owner_id": "/Game/BP.BP",
+                "macro_type_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+            },
+        ),
+        (
+            "create_custom_event",
+            {
+                "asset_path": "/Game/BP.BP",
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "event_name": "OnScoreChanged",
+                "parameters": [{"name": "Score", "type": {"kind": "int"}}],
+                "pos_x": 160.0,
+                "pos_y": 320.0,
+            },
+            {
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "event_name": "OnScoreChanged",
+                "parameters": [{"name": "Score", "type": {"kind": "int"}}],
+                "pos_x": 160.0,
+                "pos_y": 320.0,
+            },
+        ),
+        (
+            "delete_custom_event",
+            {
+                "asset_path": "/Game/BP.BP",
+                "event_id": "node:22222222-2222-4222-8222-222222222222",
+                "allow_name_fallback": True,
+                "event_name": "OnScoreChanged",
+                "owner_graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "event_type_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+            },
+            {
+                "event_id": "node:22222222-2222-4222-8222-222222222222",
+                "allow_name_fallback": True,
+                "event_name": "OnScoreChanged",
+                "owner_graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "event_type_path": "/Script/BlueprintGraph.K2Node_CustomEvent",
+            },
+        ),
+        (
+            "add_event_dispatcher",
+            {
+                "asset_path": "/Game/BP.BP",
+                "dispatcher_name": "ScoreChanged",
+                "parameters": [{"name": "Score", "type": {"kind": "int"}}],
+                "category": "Scoring",
+                "description": "Emitted when the score changes.",
+            },
+            {
+                "dispatcher_name": "ScoreChanged",
+                "parameters": [{"name": "Score", "type": {"kind": "int"}}],
+                "category": "Scoring",
+                "description": "Emitted when the score changes.",
+            },
+        ),
+        (
+            "remove_event_dispatcher",
+            {
+                "asset_path": "/Game/BP.BP",
+                "dispatcher_id": "variable:44444444-4444-4444-8444-444444444444",
+                "allow_name_fallback": True,
+                "dispatcher_name": "ScoreChanged",
+                "dispatcher_owner_id": "/Game/BP.BP",
+                "dispatcher_type_path": "mcdelegate",
+            },
+            {
+                "dispatcher_id": "variable:44444444-4444-4444-8444-444444444444",
+                "allow_name_fallback": True,
+                "dispatcher_name": "ScoreChanged",
+                "dispatcher_owner_id": "/Game/BP.BP",
+                "dispatcher_type_path": "mcdelegate",
+            },
+        ),
+    ),
+)
+def test_blueprint_macro_event_dispatcher_wrappers_forward_exact_requests(
+    monkeypatch, action, params, expected_request
+):
+    calls = []
+
+    class Blueprint:
+        pass
+
+    blueprint = Blueprint()
+
+    def helper(asset, request_json):
+        calls.append((asset, json.loads(request_json)))
+        return '{"success":true}'
+
+    fake_unreal = SimpleNamespace(
+        Blueprint=Blueprint,
+        EditorAssetLibrary=SimpleNamespace(load_asset=lambda _path: blueprint),
+        MCPythonHelper=SimpleNamespace(**{action: helper}),
+    )
+    monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
+    monkeypatch.syspath_prepend(str(PLUGIN_PYTHON))
+    for module_name in (
+        "UnrealMCPython.blueprint2",
+        "UnrealMCPython.blueprint_actions",
+    ):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    package = sys.modules.get("UnrealMCPython")
+    if package is not None:
+        for attribute in ("blueprint2", "blueprint_actions"):
+            monkeypatch.delattr(package, attribute, raising=False)
+
+    actions = __import__(
+        "UnrealMCPython.blueprint_actions", fromlist=[f"ue_{action}"]
+    )
+    original = json.loads(json.dumps(params))
+    result = getattr(actions, f"ue_{action}")(**params)
+
+    assert json.loads(result)["success"] is True
+    assert params == original
+    assert calls == [(blueprint, expected_request)]
+
+
 def test_call_json_helper_copies_request_and_passes_result_through(monkeypatch):
     passthrough = '{"success":false,"errors":[{"code":"INVALID_INPUT"}]}'
     module, calls, _, _ = _load(monkeypatch, helper_result=passthrough)

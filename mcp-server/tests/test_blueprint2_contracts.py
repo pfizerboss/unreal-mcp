@@ -719,13 +719,14 @@ def test_catalog_defaults_match_registry_optionality_for_blueprint2_actions():
         "access='public', category='', description=''"
     )
     assert catalog["create_blueprint_macro"]["params"] == (
-        "asset_path, macro_name, inputs=[], outputs=[]"
+        "asset_path, macro_name, inputs=[], outputs=[], pure=False, "
+        "category='', description=''"
     )
     assert catalog["create_custom_event"]["params"] == (
-        "asset_path, event_name, parameters=[]"
+        "asset_path, graph_id, event_name, parameters=[], pos_x=0.0, pos_y=0.0"
     )
     assert catalog["add_event_dispatcher"]["params"] == (
-        "asset_path, dispatcher_name, parameters=[]"
+        "asset_path, dispatcher_name, parameters=[], category='', description=''"
     )
     assert catalog["disconnect_blueprint_pins"]["params"] == (
         "asset_path, pin_id='', source_pin_id='', target_pin_id=''"
@@ -841,6 +842,12 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
         "rename_blueprint_function",
         "set_blueprint_function_signature",
         "delete_blueprint_function",
+        "create_blueprint_macro",
+        "delete_blueprint_macro",
+        "create_custom_event",
+        "delete_custom_event",
+        "add_event_dispatcher",
+        "remove_event_dispatcher",
     }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()
