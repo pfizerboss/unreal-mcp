@@ -250,6 +250,34 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString RemoveBlueprintInterface(UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Add one legacy scalar member variable without compiling or saving. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString AddBlueprintVariable(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Patch legacy instance-editable/expose-on-spawn flags without compiling or saving. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SetBlueprintVariableFlags(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Rename one locally declared Blueprint variable targeted by stable identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString RenameBlueprintVariable(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Remove one locally declared Blueprint variable targeted by stable identity. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString RemoveBlueprintVariable(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Set one Blueprint variable's canonical default without compiling or saving. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SetBlueprintVariableDefault(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Patch allowlisted metadata on one locally declared Blueprint variable. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SetBlueprintVariableMetadata(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Set allowlisted replication behavior on one locally declared Blueprint variable. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SetBlueprintVariableReplication(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Return Blueprint 2 runtime or asset-specific capability data. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprint2Capabilities(UBlueprint* Blueprint);

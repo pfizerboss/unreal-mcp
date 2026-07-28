@@ -707,10 +707,36 @@ def test_conditional_replication_contract_rejects_ambiguous_notify_names():
         "asset_path": "/Game/BP_Player",
         "variable_id": "variable:44444444-4444-4444-8444-444444444444",
     }
+    conditions = [
+        "none",
+        "initial_only",
+        "owner_only",
+        "skip_owner",
+        "simulated_only",
+        "autonomous_only",
+        "simulated_or_physics",
+        "initial_or_owner",
+        "custom",
+        "replay_or_owner",
+        "replay_only",
+        "simulated_only_no_replay",
+        "simulated_or_physics_no_replay",
+        "skip_replay",
+    ]
     validator.validate({**common, "mode": "none"})
-    validator.validate({**common, "mode": "replicated"})
+    validator.validate({**common, "mode": "none", "condition": "none"})
+    validator.validate({**common, "mode": "none", "notify_function_name": ""})
+    for condition in conditions:
+        validator.validate(
+            {**common, "mode": "replicated", "condition": condition}
+        )
     validator.validate(
-        {**common, "mode": "rep_notify", "notify_function_name": "OnRep_Score"}
+        {
+            **common,
+            "mode": "rep_notify",
+            "notify_function_name": "OnRep_Score",
+            "condition": "owner_only",
+        }
     )
     with pytest.raises(ValidationError):
         validator.validate({**common, "mode": "rep_notify"})
@@ -718,6 +744,14 @@ def test_conditional_replication_contract_rejects_ambiguous_notify_names():
         validator.validate(
             {**common, "mode": "none", "notify_function_name": "OnRep_Score"}
         )
+    with pytest.raises(ValidationError):
+        validator.validate({**common, "mode": "none", "condition": "owner_only"})
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {**common, "mode": "replicated", "notify_function_name": "OnRep_Score"}
+        )
+    with pytest.raises(ValidationError):
+        validator.validate({**common, "mode": "replicated", "condition": "dynamic"})
 
 
 def test_catalog_defaults_match_registry_optionality_for_blueprint2_actions():
@@ -740,7 +774,7 @@ def test_catalog_defaults_match_registry_optionality_for_blueprint2_actions():
         "asset_path, pin_id='', source_pin_id='', target_pin_id=''"
     )
     assert catalog["set_blueprint_variable_replication"]["params"] == (
-        "asset_path, variable_id, mode, notify_function_name=''"
+        "asset_path, variable_id, mode, notify_function_name='', condition='none'"
     )
     reflected = _new_specs()["add_reflected_blueprint_node"]["input_schema"]
     assert "position" in reflected["required"]
@@ -870,6 +904,11 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
         "add_reflected_blueprint_node",
         "set_blueprint_node_properties",
         "disconnect_blueprint_pins",
+        "rename_blueprint_variable",
+        "remove_blueprint_variable",
+        "set_blueprint_variable_default",
+        "set_blueprint_variable_metadata",
+        "set_blueprint_variable_replication",
     }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()

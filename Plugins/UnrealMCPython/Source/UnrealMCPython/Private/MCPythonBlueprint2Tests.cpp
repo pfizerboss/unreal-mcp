@@ -6,15 +6,20 @@
 #include "MCPythonHelper.h"
 
 #include "Dom/JsonObject.h"
+#include "AI/Navigation/NavAgentInterface.h"
 #include "Components/SceneComponent.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
+#include "Engine/EngineTypes.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Engine/Texture2D.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "K2Node_CallDelegate.h"
 #include "K2Node_CustomEvent.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -89,6 +94,14 @@ TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
     TSharedPtr<FJsonObject> Result;
     const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
     return FJsonSerializer::Deserialize(Reader, Result) ? Result : nullptr;
+}
+
+FString SerializeJsonObject(const TSharedRef<FJsonObject>& Object)
+{
+    FString Result;
+    const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Result);
+    FJsonSerializer::Serialize(Object, Writer);
+    return Result;
 }
 
 void CleanupFixturePackages(const TArray<UPackage*>& Packages)
@@ -733,6 +746,277 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         GlobalCapabilities->TryGetBoolField(
             TEXT("has_k2_graphs"),
             bHasK2Graphs) && !bHasK2Graphs);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2VariableEditingTest,
+    "UnrealMCPython.Blueprint2.VariableEditing",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2VariableEditingTest::RunTest(const FString& Parameters)
+{
+    using namespace UE::MCPython::Blueprint2;
+
+    (void)Parameters;
+
+    const FString Root = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    UPackage* Package = CreatePackage(*FString::Printf(TEXT("%s/Variables"), *Root));
+    const TArray<UPackage*> FixturePackages = {Package};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+    UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        Package,
+        TEXT("BP_Variables"),
+        BPTYPE_Normal,
+        TEXT("MCPythonBlueprint2VariableEditingTest"));
+    TestNotNull(TEXT("Variable editing fixture Blueprint is created"), Blueprint);
+    if (!Blueprint)
+    {
+        return false;
+    }
+
+    auto Primitive = [](const FName Category, const FName SubCategory = NAME_None)
+    {
+        FEdGraphPinType Type;
+        Type.PinCategory = Category;
+        Type.PinSubCategory = SubCategory;
+        return Type;
+    };
+    auto Referenced = [](const FName Category, UObject* TypeObject)
+    {
+        FEdGraphPinType Type;
+        Type.PinCategory = Category;
+        Type.PinSubCategoryObject = TypeObject;
+        return Type;
+    };
+    auto JsonArray = [](std::initializer_list<TSharedPtr<FJsonValue>> Values)
+    {
+        return MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>(Values));
+    };
+    auto JsonObjectValue = [](std::initializer_list<TPair<FString, TSharedPtr<FJsonValue>>> Values)
+    {
+        const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+        for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Values)
+        {
+            Object->SetField(Pair.Key, Pair.Value);
+        }
+        return MakeShared<FJsonValueObject>(Object);
+    };
+
+    FEdGraphPinType EnumType = Referenced(
+        UEdGraphSchema_K2::PC_Byte, StaticEnum<ECollisionChannel>());
+    FEdGraphPinType StructType = Referenced(
+        UEdGraphSchema_K2::PC_Struct, TBaseStructure<FVector>::Get());
+    FEdGraphPinType ObjectType = Referenced(
+        UEdGraphSchema_K2::PC_Object, AActor::StaticClass());
+    FEdGraphPinType ClassType = Referenced(
+        UEdGraphSchema_K2::PC_Class, AActor::StaticClass());
+    FEdGraphPinType InterfaceType = Referenced(
+        UEdGraphSchema_K2::PC_Interface, UNavAgentInterface::StaticClass());
+    FEdGraphPinType SoftObjectType = Referenced(
+        UEdGraphSchema_K2::PC_SoftObject, UTexture2D::StaticClass());
+    FEdGraphPinType SoftClassType = Referenced(
+        UEdGraphSchema_K2::PC_SoftClass, AActor::StaticClass());
+    FEdGraphPinType ArrayType = Primitive(UEdGraphSchema_K2::PC_Int);
+    ArrayType.ContainerType = EPinContainerType::Array;
+    FEdGraphPinType SetType = Primitive(UEdGraphSchema_K2::PC_Name);
+    SetType.ContainerType = EPinContainerType::Set;
+    FEdGraphPinType MapType = Primitive(UEdGraphSchema_K2::PC_String);
+    MapType.ContainerType = EPinContainerType::Map;
+    MapType.PinValueType.TerminalCategory = UEdGraphSchema_K2::PC_Boolean;
+
+    struct FDefaultCase
+    {
+        const TCHAR* Label;
+        FEdGraphPinType Type;
+        TSharedPtr<FJsonValue> Valid;
+        TSharedPtr<FJsonValue> Invalid;
+    };
+    const TArray<FDefaultCase> Cases = {
+        {TEXT("bool"), Primitive(UEdGraphSchema_K2::PC_Boolean),
+            MakeShared<FJsonValueBoolean>(false), MakeShared<FJsonValueString>(TEXT("false"))},
+        {TEXT("byte"), Primitive(UEdGraphSchema_K2::PC_Byte),
+            MakeShared<FJsonValueNumber>(200), MakeShared<FJsonValueNumber>(-1)},
+        {TEXT("int"), Primitive(UEdGraphSchema_K2::PC_Int),
+            MakeShared<FJsonValueNumber>(42), MakeShared<FJsonValueNumber>(1.25)},
+        {TEXT("int64"), Primitive(UEdGraphSchema_K2::PC_Int64),
+            MakeShared<FJsonValueNumber>(9007199254740991.0), MakeShared<FJsonValueNumber>(1.25)},
+        {TEXT("float"), Primitive(UEdGraphSchema_K2::PC_Real, UEdGraphSchema_K2::PC_Float),
+            MakeShared<FJsonValueNumber>(1.25), MakeShared<FJsonValueString>(TEXT("bad"))},
+        {TEXT("double"), Primitive(UEdGraphSchema_K2::PC_Real, UEdGraphSchema_K2::PC_Double),
+            MakeShared<FJsonValueNumber>(2.5), MakeShared<FJsonValueString>(TEXT("bad"))},
+        {TEXT("string"), Primitive(UEdGraphSchema_K2::PC_String),
+            MakeShared<FJsonValueString>(TEXT("hello")), MakeShared<FJsonValueBoolean>(false)},
+        {TEXT("name"), Primitive(UEdGraphSchema_K2::PC_Name),
+            MakeShared<FJsonValueString>(TEXT("PlayerStart")), MakeShared<FJsonValueBoolean>(false)},
+        {TEXT("text"), Primitive(UEdGraphSchema_K2::PC_Text),
+            MakeShared<FJsonValueString>(TEXT("Hello text")), MakeShared<FJsonValueBoolean>(false)},
+        {TEXT("enum"), EnumType,
+            MakeShared<FJsonValueString>(TEXT("ECC_WorldStatic")), MakeShared<FJsonValueString>(TEXT("Missing"))},
+        {TEXT("struct"), StructType,
+            JsonObjectValue({
+                {TEXT("X"), MakeShared<FJsonValueNumber>(1)},
+                {TEXT("Y"), MakeShared<FJsonValueNumber>(2)},
+                {TEXT("Z"), MakeShared<FJsonValueNumber>(3)}}),
+            JsonObjectValue({{TEXT("Q"), MakeShared<FJsonValueNumber>(1)}})},
+        {TEXT("object"), ObjectType,
+            MakeShared<FJsonValueString>(AActor::StaticClass()->GetDefaultObject()->GetPathName()),
+            MakeShared<FJsonValueString>(UTexture2D::StaticClass()->GetDefaultObject()->GetPathName())},
+        {TEXT("class"), ClassType,
+            MakeShared<FJsonValueString>(APawn::StaticClass()->GetPathName()),
+            MakeShared<FJsonValueString>(UTexture2D::StaticClass()->GetPathName())},
+        {TEXT("interface"), InterfaceType,
+            MakeShared<FJsonValueString>(APawn::StaticClass()->GetDefaultObject()->GetPathName()),
+            MakeShared<FJsonValueString>(UTexture2D::StaticClass()->GetDefaultObject()->GetPathName())},
+        {TEXT("soft object"), SoftObjectType,
+            MakeShared<FJsonValueString>(UTexture2D::StaticClass()->GetDefaultObject()->GetPathName()),
+            MakeShared<FJsonValueString>(TEXT("not-an-object-path"))},
+        {TEXT("soft class"), SoftClassType,
+            MakeShared<FJsonValueString>(APawn::StaticClass()->GetPathName()),
+            MakeShared<FJsonValueString>(TEXT("not-an-object-path"))},
+        {TEXT("array"), ArrayType,
+            JsonArray({MakeShared<FJsonValueNumber>(3), MakeShared<FJsonValueNumber>(1)}),
+            JsonArray({MakeShared<FJsonValueNumber>(1), MakeShared<FJsonValueString>(TEXT("two"))})},
+        {TEXT("set"), SetType,
+            JsonArray({MakeShared<FJsonValueString>(TEXT("Player")), MakeShared<FJsonValueString>(TEXT("Enemy"))}),
+            JsonArray({MakeShared<FJsonValueString>(TEXT("Player")), MakeShared<FJsonValueBoolean>(false)})},
+        {TEXT("map"), MapType,
+            JsonArray({JsonObjectValue({
+                {TEXT("key"), MakeShared<FJsonValueString>(TEXT("Enabled"))},
+                {TEXT("value"), MakeShared<FJsonValueBoolean>(true)}})}),
+            JsonArray({JsonObjectValue({
+                {TEXT("key"), MakeShared<FJsonValueString>(TEXT("Enabled"))},
+                {TEXT("value"), MakeShared<FJsonValueString>(TEXT("yes"))}})})},
+    };
+
+    for (int32 Index = 0; Index < Cases.Num(); ++Index)
+    {
+        const FDefaultCase& Case = Cases[Index];
+        const FName VariableName(*FString::Printf(TEXT("Default_%02d"), Index));
+        TestTrue(
+            *FString::Printf(TEXT("%s variable is added"), Case.Label),
+            FBlueprintEditorUtils::AddMemberVariable(Blueprint, VariableName, Case.Type));
+        const int32 VariableIndex = FBlueprintEditorUtils::FindNewVariableIndex(
+            Blueprint, VariableName);
+        TestTrue(
+            *FString::Printf(TEXT("%s variable is addressable"), Case.Label),
+            Blueprint->NewVariables.IsValidIndex(VariableIndex));
+        if (!Blueprint->NewVariables.IsValidIndex(VariableIndex))
+        {
+            continue;
+        }
+        const FString VariableId = DescribeVariableTarget(
+            Blueprint, Blueprint->NewVariables[VariableIndex]).Id;
+        const auto Request = [&VariableId](const TSharedPtr<FJsonValue>& Value)
+        {
+            const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+            Object->SetStringField(TEXT("variable_id"), VariableId);
+            Object->SetField(TEXT("default"), Value);
+            return SerializeJsonObject(Object);
+        };
+
+        const TSharedPtr<FJsonObject> ValidResponse = ParseJsonObject(
+            UMCPythonHelper::SetBlueprintVariableDefault(
+                Blueprint, Request(Case.Valid)));
+        bool bSuccess = false;
+        TestTrue(
+            *FString::Printf(TEXT("%s action succeeds"), Case.Label),
+            ValidResponse.IsValid() &&
+                ValidResponse->TryGetBoolField(TEXT("success"), bSuccess) &&
+                bSuccess);
+        const TSharedPtr<FJsonObject>* Data = nullptr;
+        const TSharedPtr<FJsonValue>* After = nullptr;
+        if (ValidResponse.IsValid() &&
+            ValidResponse->TryGetObjectField(TEXT("data"), Data) && Data)
+        {
+            After = (*Data)->Values.Find(TEXT("after"));
+        }
+        TestTrue(
+            *FString::Printf(TEXT("%s action round-trips canonical JSON"), Case.Label),
+            After &&
+                FJsonValue::CompareEqual(*Case.Valid, **After));
+
+        const FString BeforeInvalid =
+            Blueprint->NewVariables[VariableIndex].DefaultValue;
+        const TSharedPtr<FJsonObject> InvalidResponse = ParseJsonObject(
+            UMCPythonHelper::SetBlueprintVariableDefault(
+                Blueprint, Request(Case.Invalid)));
+        bSuccess = true;
+        TestTrue(
+            *FString::Printf(TEXT("%s invalid action is rejected"), Case.Label),
+            InvalidResponse.IsValid() &&
+                InvalidResponse->TryGetBoolField(TEXT("success"), bSuccess) &&
+                !bSuccess);
+        TestEqual(
+            *FString::Printf(TEXT("%s invalid action preserves stored default"), Case.Label),
+            Blueprint->NewVariables[VariableIndex].DefaultValue,
+            BeforeInvalid);
+    }
+
+    const TSharedRef<FJsonObject> DispatcherRequest = MakeShared<FJsonObject>();
+    DispatcherRequest->SetStringField(
+        TEXT("dispatcher_name"), TEXT("BeforeRenameDispatcher"));
+    DispatcherRequest->SetArrayField(TEXT("parameters"), {});
+    DispatcherRequest->SetStringField(TEXT("category"), TEXT(""));
+    DispatcherRequest->SetStringField(TEXT("description"), TEXT(""));
+    const TSharedPtr<FJsonObject> DispatcherResponse = ParseJsonObject(
+        UMCPythonHelper::AddEventDispatcher(
+            Blueprint, SerializeJsonObject(DispatcherRequest)));
+    bool bDispatcherSuccess = false;
+    TestTrue(
+        TEXT("dispatcher fixture is created"),
+        DispatcherResponse.IsValid() &&
+            DispatcherResponse->TryGetBoolField(
+                TEXT("success"), bDispatcherSuccess) &&
+            bDispatcherSuccess);
+    const TSharedPtr<FJsonObject>* DispatcherData = nullptr;
+    FString DispatcherId;
+    if (DispatcherResponse.IsValid() &&
+        DispatcherResponse->TryGetObjectField(TEXT("data"), DispatcherData) &&
+        DispatcherData)
+    {
+        (*DispatcherData)->TryGetStringField(TEXT("dispatcher_id"), DispatcherId);
+    }
+    UEdGraph* EventGraph = Blueprint->UbergraphPages.IsEmpty()
+        ? nullptr
+        : Blueprint->UbergraphPages[0];
+    TestNotNull(TEXT("dispatcher reference graph exists"), EventGraph);
+    UK2Node_CallDelegate* DelegateNode = EventGraph
+        ? NewObject<UK2Node_CallDelegate>(EventGraph)
+        : nullptr;
+    TestNotNull(TEXT("dispatcher reference node is created"), DelegateNode);
+    if (DelegateNode && EventGraph)
+    {
+        DelegateNode->DelegateReference.SetSelfMember(TEXT("BeforeRenameDispatcher"));
+        EventGraph->AddNode(DelegateNode, false, false);
+    }
+    const TSharedRef<FJsonObject> RenameRequest = MakeShared<FJsonObject>();
+    RenameRequest->SetStringField(TEXT("variable_id"), DispatcherId);
+    RenameRequest->SetStringField(
+        TEXT("new_name"), TEXT("AfterRenameDispatcher"));
+    const TSharedPtr<FJsonObject> RenameResponse = ParseJsonObject(
+        UMCPythonHelper::RenameBlueprintVariable(
+            Blueprint, SerializeJsonObject(RenameRequest)));
+    bool bRenameSuccess = false;
+    TestTrue(
+        TEXT("dispatcher rename succeeds"),
+        RenameResponse.IsValid() &&
+            RenameResponse->TryGetBoolField(TEXT("success"), bRenameSuccess) &&
+            bRenameSuccess);
+    if (DelegateNode)
+    {
+        TestEqual(
+            TEXT("legacy delegate reference follows dispatcher rename"),
+            DelegateNode->DelegateReference.GetMemberName(),
+            FName(TEXT("AfterRenameDispatcher")));
+    }
 
     return true;
 }

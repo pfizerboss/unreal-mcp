@@ -552,7 +552,7 @@ CATALOG = {
             'doc': 'Sets supported Blueprint variable metadata.',
         },
         'set_blueprint_variable_replication': {
-            'params': "asset_path, variable_id, mode, notify_function_name=''",
+            'params': "asset_path, variable_id, mode, notify_function_name='', condition='none'",
             'doc': 'Sets supported Blueprint variable replication behavior.',
         },
         'set_component_property': {

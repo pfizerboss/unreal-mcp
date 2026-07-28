@@ -136,6 +136,36 @@ class TestBlueprint2Graph(MCPTestCase):
         self.assertEqual(len(variables), 1, variables)
         return variables[0]["variable_id"]
 
+    def _variable_record(self, variable_name):
+        variables = self._inspect(
+            [
+                {
+                    "op": "variables",
+                    "detail": "detailed",
+                    "name_pattern": variable_name,
+                }
+            ]
+        )[0]["items"]
+        self.assertEqual(len(variables), 1, variables)
+        return variables[0]
+
+    def _variable_snapshot(self, variable_name):
+        return json.dumps(
+            self._variable_record(variable_name),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _add_member_variable(self, variable_name, pin_type):
+        self.assertTrue(
+            unreal.BlueprintEditorLibrary.add_member_variable(
+                self.blueprint,
+                unreal.Name(variable_name),
+                pin_type,
+            )
+        )
+        return self._variable_id(variable_name)
+
     def _node_count(self):
         return self._inspect(
             [{"op": "nodes", "detail": "compact", "limit": 500}]
@@ -629,6 +659,517 @@ class TestBlueprint2Graph(MCPTestCase):
             )["workflow_transaction"]
             if context["active"]:
                 self._rollback_workflow(transaction_id)
+
+    def test_rename_blueprint_variable(self):
+        original_id = self.variable_id
+        notify_function = self.call(
+            "blueprint_actions",
+            "ue_create_blueprint_function",
+            asset_path=self.asset_path,
+            function_name="OnRep_GraphEnabled",
+            inputs=[],
+            outputs=[],
+        )
+        self.assertSuccess(notify_function)
+        replication = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_variable_replication",
+            asset_path=self.asset_path,
+            variable_id=original_id,
+            mode="rep_notify",
+            notify_function_name="OnRep_GraphEnabled",
+        )
+        self.assertSuccess(replication)
+        renamed = call_action(
+            "blueprint_actions",
+            "ue_rename_blueprint_variable",
+            asset_path=self.asset_path,
+            variable_id=original_id,
+            new_name="RenamedEnabled",
+        )
+        self.assertSuccess(renamed)
+        self.assertEqual(renamed["data"]["variable_id"], original_id)
+        self.assertEqual(renamed["data"]["before"]["name"], self.VARIABLE_NAME)
+        self.assertEqual(renamed["data"]["after"]["name"], "RenamedEnabled")
+        renamed_record = self._variable_record("RenamedEnabled")
+        self.assertEqual(renamed_record["variable_id"], original_id)
+        self.assertEqual(
+            renamed_record["rep_notify_function"], "OnRep_GraphEnabled"
+        )
+
+        before_collision = self._variable_snapshot("RenamedEnabled")
+        collision = call_action(
+            "blueprint_actions",
+            "ue_rename_blueprint_variable",
+            asset_path=self.asset_path,
+            variable_id=original_id,
+            new_name=self.INT_VARIABLE_NAME,
+        )
+        self.assertFalse(collision.get("success"), collision)
+        self.assertEqual(collision["errors"][0]["code"], "CONFLICT")
+        self.assertEqual(
+            self._variable_snapshot("RenamedEnabled"), before_collision
+        )
+
+        malformed = json.loads(
+            unreal.MCPythonHelper.rename_blueprint_variable(
+                self.blueprint,
+                json.dumps(
+                    {
+                        "variable_id": original_id,
+                        "new_name": "MustNotPersist",
+                        "unknown": True,
+                    }
+                ),
+            )
+        )
+        self.assertFalse(malformed.get("success"), malformed)
+        self.assertEqual(malformed["errors"][0]["code"], "INVALID_INPUT")
+        self.assertEqual(
+            self._variable_snapshot("RenamedEnabled"), before_collision
+        )
+
+        transaction_id = self._begin_workflow("Rename Blueprint variable")
+        try:
+            workflow_rename = call_action(
+                "workflow_actions",
+                "ue_execute_step",
+                transaction_id=transaction_id,
+                action_module="UnrealMCPython.blueprint_actions",
+                action_name="ue_rename_blueprint_variable",
+                params={
+                    "asset_path": self.asset_path,
+                    "variable_id": original_id,
+                    "new_name": "WorkflowRenamed",
+                },
+            )
+            self.assertSuccess(workflow_rename)
+            self._variable_record("WorkflowRenamed")
+            self._rollback_workflow(transaction_id)
+            self._variable_record("RenamedEnabled")
+        finally:
+            context = call_action(
+                "workflow_actions", "ue_get_editor_context", asset_paths=[]
+            )["workflow_transaction"]
+            if context["active"]:
+                self._rollback_workflow(transaction_id)
+
+        unreal.BlueprintEditorLibrary.compile_blueprint(self.blueprint)
+        child_name = f"Blueprint2VariableChild_{uuid.uuid4().hex[:10]}"
+        child_factory = unreal.BlueprintFactory()
+        child_factory.set_editor_property(
+            "parent_class", self.blueprint.generated_class()
+        )
+        child = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+            child_name,
+            BLUEPRINT2_TEST_ROOT,
+            unreal.Blueprint,
+            child_factory,
+        )
+        self.assertIsNotNone(child)
+        child_path = f"{BLUEPRINT2_TEST_ROOT}/{child_name}.{child_name}"
+        self._created_assets.append(child_path)
+        inherited = call_action(
+            "blueprint_actions",
+            "ue_rename_blueprint_variable",
+            asset_path=child_path,
+            variable_id=original_id,
+            new_name="InheritedMustNotRename",
+        )
+        self.assertFalse(inherited.get("success"), inherited)
+        self.assertEqual(inherited["errors"][0]["code"], "PRECONDITION_FAILED")
+        self._variable_record("RenamedEnabled")
+
+        dispatcher = self.call(
+            "blueprint_actions",
+            "ue_add_event_dispatcher",
+            asset_path=self.asset_path,
+            dispatcher_name="BeforeRenameDispatcher",
+            parameters=[],
+        )
+        self.assertSuccess(dispatcher)
+        dispatcher_id = dispatcher["data"]["dispatcher_id"]
+        dispatcher_renamed = call_action(
+            "blueprint_actions",
+            "ue_rename_blueprint_variable",
+            asset_path=self.asset_path,
+            variable_id=dispatcher_id,
+            new_name="AfterRenameDispatcher",
+        )
+        self.assertSuccess(dispatcher_renamed)
+        dispatchers = self._inspect(
+            [{"op": "dispatchers", "detail": "detailed"}]
+        )[0]["items"]
+        self.assertNotIn(
+            "BeforeRenameDispatcher",
+            {item["name"] for item in dispatchers},
+        )
+        self.assertIn(
+            "AfterRenameDispatcher",
+            {item["name"] for item in dispatchers},
+        )
+
+    def test_add_variable_rejects_loaded_child_collision(self):
+        unreal.BlueprintEditorLibrary.compile_blueprint(self.blueprint)
+        child_name = f"Blueprint2ChildCollision_{uuid.uuid4().hex[:10]}"
+        child_factory = unreal.BlueprintFactory()
+        child_factory.set_editor_property(
+            "parent_class", self.blueprint.generated_class()
+        )
+        child = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+            child_name,
+            BLUEPRINT2_TEST_ROOT,
+            unreal.Blueprint,
+            child_factory,
+        )
+        self.assertIsNotNone(child)
+        child_path = f"{BLUEPRINT2_TEST_ROOT}/{child_name}.{child_name}"
+        self._created_assets.append(child_path)
+        self.assertTrue(
+            unreal.BlueprintEditorLibrary.add_member_variable(
+                child,
+                unreal.Name("ChildOwnedName"),
+                unreal.BlueprintEditorLibrary.get_basic_type_by_name(
+                    unreal.Name("bool")
+                ),
+            )
+        )
+
+        rejected = call_action(
+            "blueprint_actions",
+            "ue_add_variable",
+            asset_path=self.asset_path,
+            variable_name="ChildOwnedName",
+            variable_type="bool",
+        )
+
+        self.assertFalse(rejected.get("success"), rejected)
+        self.assertEqual(rejected["errors"][0]["code"], "CONFLICT")
+        self.assertEqual(rejected["errors"][0]["path"], "variable_name")
+        variables = self._inspect(
+            [
+                {
+                    "op": "variables",
+                    "detail": "detailed",
+                    "name_pattern": "ChildOwnedName",
+                }
+            ]
+        )[0]["items"]
+        self.assertEqual(variables, [])
+
+    def test_remove_blueprint_variable(self):
+        removed_id = self.int_variable_id
+        removed = call_action(
+            "blueprint_actions",
+            "ue_remove_blueprint_variable",
+            asset_path=self.asset_path,
+            variable_id=removed_id,
+        )
+        self.assertSuccess(removed)
+        self.assertEqual(removed["data"]["variable_id"], removed_id)
+        remaining = self._inspect(
+            [
+                {
+                    "op": "variables",
+                    "detail": "detailed",
+                    "name_pattern": self.INT_VARIABLE_NAME,
+                }
+            ]
+        )[0]["items"]
+        self.assertEqual(remaining, [])
+
+        before = self._variable_snapshot(self.VARIABLE_NAME)
+        malformed = json.loads(
+            unreal.MCPythonHelper.remove_blueprint_variable(
+                self.blueprint,
+                json.dumps(
+                    {
+                        "variable_id": self.variable_id,
+                        "new_name": "not-allowed",
+                    }
+                ),
+            )
+        )
+        self.assertFalse(malformed.get("success"), malformed)
+        self.assertEqual(malformed["errors"][0]["code"], "INVALID_INPUT")
+        self.assertEqual(self._variable_snapshot(self.VARIABLE_NAME), before)
+
+    def test_set_blueprint_variable_default(self):
+        library = unreal.BlueprintEditorLibrary
+
+        def basic(name):
+            return library.get_basic_type_by_name(unreal.Name(name))
+
+        int_type = basic("int")
+        cases = [
+            ("DefaultBool", basic("bool"), False, "false"),
+            ("DefaultByte", basic("byte"), 200, -1),
+            (self.INT_VARIABLE_NAME, int_type, 42, 1.25),
+            ("DefaultInt64", basic("int64"), 9007199254740991, 1.25),
+            ("DefaultReal", basic("real"), 2.5, {"bad": True}),
+            ("DefaultString", basic("string"), "hello", False),
+            ("DefaultName", basic("name"), "PlayerStart", False),
+            ("DefaultText", basic("text"), "Hello text", False),
+            (
+                "DefaultVector",
+                library.get_struct_type(
+                    unreal.load_object(None, "/Script/CoreUObject.Vector")
+                ),
+                {"X": 1.0, "Y": 2.0, "Z": 3.0},
+                {"Q": 1.0},
+            ),
+            (
+                "DefaultHardObject",
+                library.get_object_reference_type(unreal.Actor),
+                "/Script/Engine.Default__Actor",
+                "/Script/Engine.Default__Texture2D",
+            ),
+            (
+                "DefaultClassPath",
+                library.get_class_reference_type(unreal.Actor),
+                "/Script/Engine.Character",
+                "/Script/Engine.Texture2D",
+            ),
+            (
+                "DefaultNumbers",
+                library.get_array_type(int_type),
+                [3, 1, 2],
+                [1, "two", 3],
+            ),
+            (
+                "DefaultTags",
+                library.get_set_type(basic("name")),
+                ["Player", "Enemy"],
+                ["Player", False],
+            ),
+            (
+                "DefaultFlags",
+                library.get_map_type(basic("string"), basic("bool")),
+                [{"key": "Enabled", "value": True}],
+                [{"key": "Enabled", "value": "yes"}],
+            ),
+        ]
+
+        action_cases = []
+        for variable_name, pin_type, requested, invalid in cases:
+            variable_id = (
+                self.int_variable_id
+                if variable_name == self.INT_VARIABLE_NAME
+                else self._add_member_variable(variable_name, pin_type)
+            )
+            action_cases.append(
+                (variable_id, variable_name, requested, invalid)
+            )
+
+        for variable_id, variable_name, requested, _ in action_cases:
+            with self.subTest(variable_name=variable_name):
+                changed = call_action(
+                    "blueprint_actions",
+                    "ue_set_blueprint_variable_default",
+                    asset_path=self.asset_path,
+                    variable_id=variable_id,
+                    default=requested,
+                )
+                self.assertSuccess(changed)
+                self.assertEqual(changed["data"]["after"], requested)
+
+        for variable_id, variable_name, _, invalid in action_cases:
+            with self.subTest(variable_name=variable_name, invalid=invalid):
+                before = self._variable_snapshot(variable_name)
+                rejected = call_action(
+                    "blueprint_actions",
+                    "ue_set_blueprint_variable_default",
+                    asset_path=self.asset_path,
+                    variable_id=variable_id,
+                    default=invalid,
+                )
+                self.assertFalse(rejected.get("success"), rejected)
+                self.assertEqual(
+                    rejected["errors"][0]["code"], "INVALID_INPUT"
+                )
+                self.assertEqual(
+                    self._variable_snapshot(variable_name), before
+                )
+
+    def test_set_blueprint_variable_metadata(self):
+        patch = {
+            "category": "Scoring",
+            "tooltip": "Current score",
+            "visible": True,
+            "instance_editable": True,
+            "expose_on_spawn": True,
+            "save_game": True,
+            "cinematic": True,
+        }
+        changed = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_variable_metadata",
+            asset_path=self.asset_path,
+            variable_id=self.variable_id,
+            metadata=patch,
+        )
+        self.assertSuccess(changed)
+        for key, value in patch.items():
+            self.assertEqual(changed["data"]["after"][key], value)
+
+        visibility = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_variable_metadata",
+            asset_path=self.asset_path,
+            variable_id=self.variable_id,
+            metadata={"visible": False},
+        )
+        self.assertSuccess(visibility)
+        self.assertFalse(visibility["data"]["after"]["visible"])
+        self.assertEqual(
+            visibility["data"]["after"]["category"], "Scoring"
+        )
+        self.assertTrue(visibility["data"]["after"]["save_game"])
+
+        before = self._variable_snapshot(self.VARIABLE_NAME)
+        for metadata in (
+            {"unknown": True},
+            {"save_game": "yes"},
+            {"expose_on_spawn": True, "instance_editable": False},
+        ):
+            with self.subTest(metadata=metadata):
+                rejected = call_action(
+                    "blueprint_actions",
+                    "ue_set_blueprint_variable_metadata",
+                    asset_path=self.asset_path,
+                    variable_id=self.variable_id,
+                    metadata=metadata,
+                )
+                self.assertFalse(rejected.get("success"), rejected)
+                self.assertEqual(
+                    self._variable_snapshot(self.VARIABLE_NAME), before
+                )
+
+    def test_set_blueprint_variable_replication(self):
+        replicated = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_variable_replication",
+            asset_path=self.asset_path,
+            variable_id=self.variable_id,
+            mode="replicated",
+            condition="owner_only",
+        )
+        self.assertSuccess(replicated)
+        self.assertEqual(replicated["data"]["after"]["mode"], "replicated")
+        self.assertEqual(
+            replicated["data"]["after"]["condition"], "owner_only"
+        )
+
+        notify_function = self.call(
+            "blueprint_actions",
+            "ue_create_blueprint_function",
+            asset_path=self.asset_path,
+            function_name="OnRep_GraphEnabled",
+            inputs=[],
+            outputs=[],
+        )
+        self.assertSuccess(notify_function)
+        rep_notify = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_variable_replication",
+            asset_path=self.asset_path,
+            variable_id=self.variable_id,
+            mode="rep_notify",
+            notify_function_name="OnRep_GraphEnabled",
+            condition="skip_owner",
+        )
+        self.assertSuccess(rep_notify)
+        self.assertEqual(rep_notify["data"]["after"]["mode"], "rep_notify")
+        self.assertEqual(
+            rep_notify["data"]["after"]["notify_function_name"],
+            "OnRep_GraphEnabled",
+        )
+        self.assertEqual(
+            rep_notify["data"]["after"]["condition"], "skip_owner"
+        )
+
+        before = self._variable_snapshot(self.VARIABLE_NAME)
+        invalid_requests = (
+            {
+                "mode": "replicated",
+                "notify_function_name": "OnRep_GraphEnabled",
+            },
+            {"mode": "rep_notify", "notify_function_name": "MissingNotify"},
+            {"mode": "replicated", "condition": "dynamic"},
+            {"mode": "none", "condition": "owner_only"},
+        )
+        for params in invalid_requests:
+            with self.subTest(params=params):
+                rejected = call_action(
+                    "blueprint_actions",
+                    "ue_set_blueprint_variable_replication",
+                    asset_path=self.asset_path,
+                    variable_id=self.variable_id,
+                    **params,
+                )
+                self.assertFalse(rejected.get("success"), rejected)
+                self.assertEqual(
+                    self._variable_snapshot(self.VARIABLE_NAME), before
+                )
+
+        cleared = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_variable_replication",
+            asset_path=self.asset_path,
+            variable_id=self.variable_id,
+            mode="none",
+        )
+        self.assertSuccess(cleared)
+        self.assertEqual(cleared["data"]["after"]["mode"], "none")
+        self.assertEqual(cleared["data"]["after"]["condition"], "none")
+        self.assertEqual(
+            cleared["data"]["after"]["notify_function_name"], ""
+        )
+
+        unsupported_name = f"Blueprint2Object_{uuid.uuid4().hex[:10]}"
+        unsupported_factory = unreal.BlueprintFactory()
+        unsupported_factory.set_editor_property("parent_class", unreal.Object)
+        unsupported = unreal.AssetToolsHelpers.get_asset_tools().create_asset(
+            unsupported_name,
+            BLUEPRINT2_TEST_ROOT,
+            unreal.Blueprint,
+            unsupported_factory,
+        )
+        self.assertIsNotNone(unsupported)
+        unsupported_path = (
+            f"{BLUEPRINT2_TEST_ROOT}/{unsupported_name}.{unsupported_name}"
+        )
+        self._created_assets.append(unsupported_path)
+        self.assertTrue(
+            unreal.BlueprintEditorLibrary.add_member_variable(
+                unsupported,
+                unreal.Name("UnsupportedReplication"),
+                unreal.BlueprintEditorLibrary.get_basic_type_by_name(
+                    unreal.Name("bool")
+                ),
+            )
+        )
+        unsupported_variables = call_action(
+            "blueprint_actions",
+            "ue_inspect_blueprint",
+            asset_path=unsupported_path,
+            queries=[{"op": "variables", "detail": "detailed"}],
+        )
+        self.assertSuccess(unsupported_variables)
+        unsupported_id = unsupported_variables["data"]["results"][0][
+            "items"
+        ][0]["variable_id"]
+        rejected_none = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_variable_replication",
+            asset_path=unsupported_path,
+            variable_id=unsupported_id,
+            mode="none",
+        )
+        self.assertFalse(rejected_none.get("success"), rejected_none)
+        self.assertEqual(
+            rejected_none["errors"][0]["code"], "UE_VERSION_UNSUPPORTED"
+        )
 
     def test_common_node_creation_rolls_back_with_outer_workflow(self):
         before = self._node_count()

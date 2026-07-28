@@ -82,7 +82,6 @@ KNOWN_UNTESTED: dict[str, set[str]] = {
         "delete_custom_event",
         "diff_blueprint_graphs",
         "disconnect_blueprint_pins",
-        "get_blueprint_brief",
         "get_blueprint_health",
         "inspect_blueprint",
         "remove_blueprint_interface",

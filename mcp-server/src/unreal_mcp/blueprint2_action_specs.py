@@ -46,6 +46,25 @@ NAME = {
     "pattern": r"^[A-Za-z_][A-Za-z0-9_]*$",
     "maxLength": 100,
 }
+REPLICATION_CONDITION = {
+    "type": "string",
+    "enum": [
+        "none",
+        "initial_only",
+        "owner_only",
+        "skip_owner",
+        "simulated_only",
+        "autonomous_only",
+        "simulated_or_physics",
+        "initial_or_owner",
+        "custom",
+        "replay_or_owner",
+        "replay_only",
+        "simulated_only_no_replay",
+        "simulated_or_physics_no_replay",
+        "skip_replay",
+    ],
+}
 
 
 def _object(properties: dict[str, dict], required: tuple[str, ...] = ()) -> dict:
@@ -1058,18 +1077,31 @@ BLUEPRINT2_ACTION_SPECS = {
                         "type": "string",
                         "enum": ["none", "replicated", "rep_notify"],
                     },
-                    "notify_function_name": NAME,
+                    "notify_function_name": {"type": "string"},
+                    "condition": REPLICATION_CONDITION,
                 },
                 ("asset_path", "variable_id", "mode"),
             ),
             "oneOf": [
                 {
-                    "properties": {"mode": {"const": "rep_notify"}},
+                    "properties": {
+                        "mode": {"const": "rep_notify"},
+                        "notify_function_name": NAME,
+                    },
                     "required": ["notify_function_name"],
                 },
                 {
-                    "properties": {"mode": {"enum": ["none", "replicated"]}},
-                    "not": {"required": ["notify_function_name"]},
+                    "properties": {
+                        "mode": {"const": "replicated"},
+                        "notify_function_name": {"maxLength": 0},
+                    },
+                },
+                {
+                    "properties": {
+                        "mode": {"const": "none"},
+                        "notify_function_name": {"maxLength": 0},
+                        "condition": {"const": "none"},
+                    },
                 },
             ],
         },
@@ -1078,6 +1110,7 @@ BLUEPRINT2_ACTION_SPECS = {
             "variable_id": "variable:44444444-4444-4444-8444-444444444444",
             "mode": "rep_notify",
             "notify_function_name": "OnRep_Score",
+            "condition": "owner_only",
         },
         idempotent=True,
     ),

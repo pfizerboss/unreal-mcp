@@ -26,6 +26,24 @@ class TestBlueprintActions(MCPTestCase):
         if not self._bp_path:
             self.skipTest("Blueprint not created in setUp")
 
+    def _compile_status(self):
+        brief = self.call(
+            "blueprint_actions",
+            "ue_get_blueprint_brief",
+            asset_path=self._bp_path,
+        )
+        self.assertSuccess(brief)
+        return brief["data"]["compile_status"]
+
+    def _is_blueprint_package_dirty(self):
+        blueprint = unreal.EditorAssetLibrary.load_asset(self._bp_path)
+        self.assertIsNotNone(blueprint)
+        package_name = blueprint.get_outer().get_name()
+        return any(
+            package.get_name() == package_name
+            for package in unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()
+        )
+
     # ── read ──────────────────────────────────────────────────────────────────
 
     def test_get_graph_info(self):
@@ -43,9 +61,13 @@ class TestBlueprintActions(MCPTestCase):
 
     def test_list_blueprint_variables(self):
         self._skip_if_no_bp()
+        before_status = self._compile_status()
+        before_dirty = self._is_blueprint_package_dirty()
         r = self.call("blueprint_actions", "ue_list_blueprint_variables",
                       asset_path=self._bp_path)
         self.assertSuccess(r)
+        self.assertEqual(self._compile_status(), before_status)
+        self.assertEqual(self._is_blueprint_package_dirty(), before_dirty)
 
     def test_list_blueprint_components(self):
         self._skip_if_no_bp()
@@ -201,6 +223,13 @@ class TestBlueprintActions(MCPTestCase):
         r = self.call("blueprint_actions", "ue_add_variable",
                       asset_path=self._bp_path, variable_name="MyFloatVar", variable_type="float")
         self.assertSuccess(r)
+        self.assertEqual(r["variable_name"], "MyFloatVar")
+        self.assertEqual(r["variable_type"], "real")
+        self.assertEqual(
+            r["next_actions"][0]["action"], "compile_blueprint"
+        )
+        self.assertNotEqual(self._compile_status(), "UpToDate")
+        self.assertTrue(self._is_blueprint_package_dirty())
         variables = self.call("blueprint_actions", "ue_list_blueprint_variables",
                               asset_path=self._bp_path)
         self.assertSuccess(variables)
@@ -219,7 +248,16 @@ class TestBlueprintActions(MCPTestCase):
                       asset_path=self._bp_path, variable_name="FlagVar",
                       instance_editable=True, expose_on_spawn=True)
         self.assertSuccess(r)
-        self.assertTrue(r["applied"]["instance_editable"])
+        self.assertEqual(
+            r["applied"],
+            {"instance_editable": True, "expose_on_spawn": True},
+        )
+        self.assertEqual(r["variable_name"], "FlagVar")
+        self.assertEqual(
+            r["next_actions"][0]["action"], "compile_blueprint"
+        )
+        self.assertNotEqual(self._compile_status(), "UpToDate")
+        self.assertTrue(self._is_blueprint_package_dirty())
 
     def test_set_variable_flags_none(self):
         self._skip_if_no_bp()

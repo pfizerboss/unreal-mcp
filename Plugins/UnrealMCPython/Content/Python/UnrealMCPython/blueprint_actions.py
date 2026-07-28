@@ -625,21 +625,16 @@ def ue_add_variable(asset_path: str = None, variable_name: str = None, variable_
     if vt not in _BP_VAR_TYPES:
         return json.dumps({"success": False, "message": f"Unsupported variable_type '{variable_type}'.",
                            "valid_types": sorted(_BP_VAR_TYPES | {"float"})})
-    try:
-        bp = unreal.EditorAssetLibrary.load_asset(asset_path)
-        if not bp or not isinstance(bp, unreal.Blueprint):
-            return json.dumps({"success": False, "message": f"Not a Blueprint: {asset_path}"})
-        bel = unreal.BlueprintEditorLibrary
-        pin = bel.get_basic_type_by_name(unreal.Name(vt))
-        ok = bel.add_member_variable(bp, unreal.Name(variable_name), pin)
-        if not ok:
-            return json.dumps({"success": False, "message": f"add_member_variable failed for '{variable_name}'."})
-        bel.compile_blueprint(bp)
-        unreal.EditorAssetLibrary.save_loaded_asset(bp)
-        return json.dumps({"success": True, "asset_path": asset_path,
-                           "variable_name": variable_name, "variable_type": vt})
-    except Exception as e:
-        return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "asset_path": asset_path,
+        "variable_name": variable_name,
+        "variable_type": vt,
+    })
+    return blueprint2.call_asset_helper(
+        "add_blueprint_variable", asset_path, request
+    )
 
 
 def ue_set_variable_flags(asset_path: str = None, variable_name: str = None,
@@ -649,25 +644,19 @@ def ue_set_variable_flags(asset_path: str = None, variable_name: str = None,
         return json.dumps({"success": False, "message": "Required parameters: asset_path, variable_name."})
     if instance_editable is None and expose_on_spawn is None:
         return json.dumps({"success": False, "message": "Provide instance_editable and/or expose_on_spawn."})
-    try:
-        bp = unreal.EditorAssetLibrary.load_asset(asset_path)
-        if not bp or not isinstance(bp, unreal.Blueprint):
-            return json.dumps({"success": False, "message": f"Not a Blueprint: {asset_path}"})
-        bel = unreal.BlueprintEditorLibrary
-        name = unreal.Name(variable_name)
-        applied = {}
-        if instance_editable is not None:
-            bel.set_blueprint_variable_instance_editable(bp, name, bool(instance_editable))
-            applied["instance_editable"] = bool(instance_editable)
-        if expose_on_spawn is not None:
-            bel.set_blueprint_variable_expose_on_spawn(bp, name, bool(expose_on_spawn))
-            applied["expose_on_spawn"] = bool(expose_on_spawn)
-        bel.compile_blueprint(bp)
-        unreal.EditorAssetLibrary.save_loaded_asset(bp)
-        return json.dumps({"success": True, "asset_path": asset_path,
-                           "variable_name": variable_name, "applied": applied})
-    except Exception as e:
-        return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "asset_path": asset_path,
+        "variable_name": variable_name,
+    }
+    if instance_editable is not None:
+        request["instance_editable"] = instance_editable
+    if expose_on_spawn is not None:
+        request["expose_on_spawn"] = expose_on_spawn
+    return blueprint2.call_asset_helper(
+        "set_blueprint_variable_flags", asset_path, deepcopy(request)
+    )
 
 
 def _blueprint2_unsupported(action: str) -> str:
@@ -1004,7 +993,19 @@ def ue_rename_blueprint_variable(asset_path: str = None, variable_id: str = None
                                        variable_owner_id: str = "",
                                        variable_type_path: str = "") -> str:
     """Renames a Blueprint variable targeted by stable ID."""
-    return _blueprint2_unsupported("rename_blueprint_variable")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "variable_id": variable_id,
+        "new_name": new_name,
+        "allow_name_fallback": allow_name_fallback,
+        "variable_name": variable_name,
+        "variable_owner_id": variable_owner_id,
+        "variable_type_path": variable_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "rename_blueprint_variable", asset_path, request
+    )
 
 
 def ue_remove_blueprint_variable(asset_path: str = None,
@@ -1014,29 +1015,61 @@ def ue_remove_blueprint_variable(asset_path: str = None,
                                        variable_owner_id: str = "",
                                        variable_type_path: str = "") -> str:
     """Removes a Blueprint variable targeted by stable ID."""
-    return _blueprint2_unsupported("remove_blueprint_variable")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "variable_id": variable_id,
+        "allow_name_fallback": allow_name_fallback,
+        "variable_name": variable_name,
+        "variable_owner_id": variable_owner_id,
+        "variable_type_path": variable_type_path,
+    })
+    return blueprint2.call_asset_helper(
+        "remove_blueprint_variable", asset_path, request
+    )
 
 
 def ue_set_blueprint_variable_default(asset_path: str = None,
                                             variable_id: str = None,
                                             default=None) -> str:
     """Sets a Blueprint variable default as a canonical JSON value."""
-    return _blueprint2_unsupported("set_blueprint_variable_default")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({"variable_id": variable_id, "default": default})
+    return blueprint2.call_asset_helper(
+        "set_blueprint_variable_default", asset_path, request
+    )
 
 
 def ue_set_blueprint_variable_metadata(asset_path: str = None,
                                              variable_id: str = None,
                                              metadata: dict = None) -> str:
     """Sets supported Blueprint variable metadata."""
-    return _blueprint2_unsupported("set_blueprint_variable_metadata")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({"variable_id": variable_id, "metadata": metadata})
+    return blueprint2.call_asset_helper(
+        "set_blueprint_variable_metadata", asset_path, request
+    )
 
 
 def ue_set_blueprint_variable_replication(asset_path: str = None,
                                                 variable_id: str = None,
                                                 mode: str = None,
-                                                notify_function_name: str = "") -> str:
+                                                notify_function_name: str = "",
+                                                condition: str = "none") -> str:
     """Sets supported Blueprint variable replication behavior."""
-    return _blueprint2_unsupported("set_blueprint_variable_replication")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "variable_id": variable_id,
+        "mode": mode,
+        "notify_function_name": notify_function_name,
+        "condition": condition,
+    })
+    return blueprint2.call_asset_helper(
+        "set_blueprint_variable_replication", asset_path, request
+    )
 
 
 def ue_rename_blueprint_component(asset_path: str = None,

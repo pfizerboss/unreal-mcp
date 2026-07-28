@@ -4,7 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -43,6 +43,7 @@ HELPER_HEADER = (
 )
 INSPECTION_SOURCE = PRIVATE / "MCPythonHelper_BlueprintInspection.cpp"
 GRAPH_SOURCE = PRIVATE / "MCPythonHelper_BlueprintGraph.cpp"
+VARIABLE_SOURCE = PRIVATE / "MCPythonHelper_BlueprintVariables.cpp"
 BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
 EDITOR_TESTS = (
     ROOT
@@ -72,6 +73,26 @@ def _load_blueprint_actions(monkeypatch, helper):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _load_variable_wrapper(monkeypatch):
+    calls = []
+
+    class Helper:
+        pass
+
+    package = ModuleType("UnrealMCPython")
+    adapter = ModuleType("UnrealMCPython.blueprint2")
+
+    def call_asset_helper(helper_name, asset_path, request=None):
+        calls.append((helper_name, asset_path, request))
+        return '{"success":true,"marker":"native"}'
+
+    adapter.call_asset_helper = call_asset_helper
+    package.blueprint2 = adapter
+    monkeypatch.setitem(sys.modules, "UnrealMCPython", package)
+    monkeypatch.setitem(sys.modules, "UnrealMCPython.blueprint2", adapter)
+    return _load_blueprint_actions(monkeypatch, Helper), calls
 
 
 def _load(monkeypatch, asset=None, helper_result='{"success":true}'):
@@ -118,6 +139,146 @@ def _load(monkeypatch, asset=None, helper_result='{"success":true}'):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module, calls, loaded, Blueprint
+
+
+def test_rename_blueprint_variable(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_rename_blueprint_variable(
+        asset_path="/Game/BP.BP",
+        variable_id="fallback:variable:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        new_name="FinalScore",
+        allow_name_fallback=True,
+        variable_name="Score",
+        variable_owner_id="/Game/BP.BP",
+        variable_type_path="category=int\ncontainer=none",
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "rename_blueprint_variable",
+            "/Game/BP.BP",
+            {
+                "variable_id": "fallback:variable:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "new_name": "FinalScore",
+                "allow_name_fallback": True,
+                "variable_name": "Score",
+                "variable_owner_id": "/Game/BP.BP",
+                "variable_type_path": "category=int\ncontainer=none",
+            },
+        )
+    ]
+
+
+def test_remove_blueprint_variable(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_remove_blueprint_variable(
+        asset_path="/Game/BP.BP",
+        variable_id="variable:44444444-4444-4444-8444-444444444444",
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "remove_blueprint_variable",
+            "/Game/BP.BP",
+            {
+                "variable_id": "variable:44444444-4444-4444-8444-444444444444",
+                "allow_name_fallback": False,
+                "variable_name": "",
+                "variable_owner_id": "",
+                "variable_type_path": "",
+            },
+        )
+    ]
+
+
+def test_set_blueprint_variable_default(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    requested_default = [3, {"asset": "/Script/Engine.Default__Actor"}]
+    before = json.loads(json.dumps(requested_default))
+
+    result = module.ue_set_blueprint_variable_default(
+        asset_path="/Game/BP.BP",
+        variable_id="variable:44444444-4444-4444-8444-444444444444",
+        default=requested_default,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert requested_default == before
+    assert calls == [
+        (
+            "set_blueprint_variable_default",
+            "/Game/BP.BP",
+            {
+                "variable_id": "variable:44444444-4444-4444-8444-444444444444",
+                "default": before,
+            },
+        )
+    ]
+    assert calls[0][2]["default"] is not requested_default
+
+
+def test_set_blueprint_variable_metadata(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    metadata = {
+        "category": "Scoring",
+        "tooltip": "Current score",
+        "visible": True,
+        "instance_editable": True,
+        "expose_on_spawn": True,
+        "save_game": True,
+        "cinematic": False,
+    }
+    before = dict(metadata)
+
+    result = module.ue_set_blueprint_variable_metadata(
+        asset_path="/Game/BP.BP",
+        variable_id="variable:44444444-4444-4444-8444-444444444444",
+        metadata=metadata,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert metadata == before
+    assert calls == [
+        (
+            "set_blueprint_variable_metadata",
+            "/Game/BP.BP",
+            {
+                "variable_id": "variable:44444444-4444-4444-8444-444444444444",
+                "metadata": before,
+            },
+        )
+    ]
+    assert calls[0][2]["metadata"] is not metadata
+
+
+def test_set_blueprint_variable_replication(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_set_blueprint_variable_replication(
+        asset_path="/Game/BP.BP",
+        variable_id="variable:44444444-4444-4444-8444-444444444444",
+        mode="rep_notify",
+        notify_function_name="OnRep_Score",
+        condition="owner_only",
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "set_blueprint_variable_replication",
+            "/Game/BP.BP",
+            {
+                "variable_id": "variable:44444444-4444-4444-8444-444444444444",
+                "mode": "rep_notify",
+                "notify_function_name": "OnRep_Score",
+                "condition": "owner_only",
+            },
+        )
+    ]
 
 
 def test_load_blueprint_accepts_blueprint_subclasses(monkeypatch):
@@ -934,6 +1095,75 @@ def test_graph_authoring_validates_before_mutation_and_uses_shared_transactions(
 
     assert "CompileBlueprint(" not in source
     assert "SavePackage(" not in source
+
+
+def test_variable_authoring_validates_before_mutation_and_never_compiles_or_saves():
+    assert VARIABLE_SOURCE.exists(), "Task 12 native variable helper is missing"
+    source = VARIABLE_SOURCE.read_text(encoding="utf-8")
+    header = HELPER_HEADER.read_text(encoding="utf-8")
+    actions = BLUEPRINT_ACTIONS.read_text(encoding="utf-8")
+
+    for declaration in (
+        "static FString AddBlueprintVariable(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString SetBlueprintVariableFlags(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString RenameBlueprintVariable(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString RemoveBlueprintVariable(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString SetBlueprintVariableDefault(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString SetBlueprintVariableMetadata(UBlueprint* Blueprint, const FString& RequestJson);",
+        "static FString SetBlueprintVariableReplication(UBlueprint* Blueprint, const FString& RequestJson);",
+    ):
+        assert declaration in header
+
+    starts = [
+        source.index(f"FString UMCPythonHelper::{name}")
+        for name in (
+            "AddBlueprintVariable",
+            "SetBlueprintVariableFlags",
+            "RenameBlueprintVariable",
+            "RemoveBlueprintVariable",
+            "SetBlueprintVariableDefault",
+            "SetBlueprintVariableMetadata",
+            "SetBlueprintVariableReplication",
+        )
+    ]
+    starts.append(len(source))
+    for index in range(len(starts) - 1):
+        body = source[starts[index] : starts[index + 1]]
+        assert "FMutationScope Scope" in body
+
+    default_body = source[
+        source.index("FString UMCPythonHelper::SetBlueprintVariableDefault") :
+        source.index("FString UMCPythonHelper::SetBlueprintVariableMetadata")
+    ]
+    assert default_body.index("NormalizeDefaultValue") < default_body.index(
+        "FMutationScope Scope"
+    )
+    replication_body = source[
+        source.index("FString UMCPythonHelper::SetBlueprintVariableReplication") :
+    ]
+    assert replication_body.index("ValidateRepNotifyFunction") < replication_body.index(
+        "FMutationScope Scope"
+    )
+    for forbidden in (
+        "CompileBlueprint(",
+        "SavePackage(",
+        "compile_blueprint(",
+        "save_loaded_asset(",
+    ):
+        assert forbidden not in source
+
+    add_wrapper = actions[
+        actions.index("def ue_add_variable") : actions.index("def ue_set_variable_flags")
+    ]
+    flags_wrapper = actions[
+        actions.index("def ue_set_variable_flags") : actions.index(
+            "def _blueprint2_unsupported"
+        )
+    ]
+    for body in (add_wrapper, flags_wrapper):
+        assert "call_asset_helper" in body
+        assert "compile_blueprint" not in body
+        assert "save_loaded_asset" not in body
 
 
 def test_cpp_core_uses_persisted_guids_bounded_owners_and_guarded_undo():
