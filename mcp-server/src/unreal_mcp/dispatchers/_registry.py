@@ -10743,8 +10743,8 @@ ACTION_SPECS = {'actor': {'add_actor_tag': {'action': 'add_actor_tag',
                                                  'examples': [{'action': 'set_blueprint_node_properties',
                                                                'params': {'asset_path': '/Game/BP_Player',
                                                                           'node_id': 'node:22222222-2222-4222-8222-222222222222',
-                                                                          'properties': {'NodeComment': 'Validated '
-                                                                                                        'comment'}}}],
+                                                                          'properties': {'comment': 'Validated '
+                                                                                                    'comment'}}}],
                                                  'idempotent': True,
                                                  'input_schema': {'additionalProperties': False,
                                                                   'properties': {'asset_path': {'format': 'unreal-asset-path',

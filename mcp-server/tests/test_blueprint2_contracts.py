@@ -564,6 +564,14 @@ def test_disconnect_blueprint_pins_has_exclusive_target_forms():
         )
 
 
+def test_set_blueprint_node_properties_example_uses_public_allowlist_key():
+    params = _new_specs()["set_blueprint_node_properties"]["examples"][0][
+        "params"
+    ]
+
+    assert params["properties"] == {"comment": "Validated comment"}
+
+
 def test_component_transform_vectors_are_bounded():
     schema = _new_specs()["set_blueprint_component_transform"]["input_schema"]
     transform = schema["properties"]["transform"]
@@ -860,6 +868,8 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
         "add_blueprint_interface",
         "remove_blueprint_interface",
         "add_reflected_blueprint_node",
+        "set_blueprint_node_properties",
+        "disconnect_blueprint_pins",
     }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()

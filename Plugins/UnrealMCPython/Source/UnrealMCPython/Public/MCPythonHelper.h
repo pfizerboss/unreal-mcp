@@ -262,11 +262,19 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString AddReflectedBlueprintNode(UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Set allowlisted properties on a Blueprint node targeted by stable ID. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SetBlueprintNodeProperties(UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Connect two pins in a Blueprint graph */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString ConnectBlueprintPins(UBlueprint* Blueprint, const FString& GraphName,
         const FString& SourceNodeName, const FString& SourcePinName,
         const FString& TargetNodeName, const FString& TargetPinName);
+
+    /** Disconnect one stable pin entirely or one exact stable pin pair. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString DisconnectBlueprintPins(UBlueprint* Blueprint, const FString& RequestJson);
 
     /** Remove a node from a Blueprint graph */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")

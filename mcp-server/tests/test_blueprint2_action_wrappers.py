@@ -598,6 +598,58 @@ def test_blueprint_function_wrappers_forward_exact_copied_requests(
                 "position": {"x": 320, "y": 160},
             },
         ),
+        (
+            "set_blueprint_node_properties",
+            {
+                "asset_path": "/Game/BP.BP",
+                "node_id": "node:22222222-2222-4222-8222-222222222222",
+                "properties": {
+                    "comment": "Validated comment",
+                    "position": {"x": 480, "y": 240},
+                    "pin_defaults": {
+                        "pin:33333333-3333-4333-8333-333333333333": False,
+                    },
+                },
+            },
+            {
+                "node_id": "node:22222222-2222-4222-8222-222222222222",
+                "properties": {
+                    "comment": "Validated comment",
+                    "position": {"x": 480, "y": 240},
+                    "pin_defaults": {
+                        "pin:33333333-3333-4333-8333-333333333333": False,
+                    },
+                },
+            },
+        ),
+        (
+            "disconnect_blueprint_pins",
+            {
+                "asset_path": "/Game/BP.BP",
+                "pin_id": "pin:33333333-3333-4333-8333-333333333333",
+                "source_pin_id": "",
+                "target_pin_id": "",
+            },
+            {
+                "pin_id": "pin:33333333-3333-4333-8333-333333333333",
+                "source_pin_id": "",
+                "target_pin_id": "",
+            },
+        ),
+        (
+            "disconnect_blueprint_pins",
+            {
+                "asset_path": "/Game/BP.BP",
+                "pin_id": "",
+                "source_pin_id": "pin:33333333-3333-4333-8333-333333333333",
+                "target_pin_id": "pin:44444444-4444-4444-8444-444444444444",
+            },
+            {
+                "pin_id": "",
+                "source_pin_id": "pin:33333333-3333-4333-8333-333333333333",
+                "target_pin_id": "pin:44444444-4444-4444-8444-444444444444",
+            },
+        ),
     ),
 )
 def test_blueprint_member_wrappers_forward_exact_requests(
@@ -640,6 +692,61 @@ def test_blueprint_member_wrappers_forward_exact_requests(
     assert json.loads(result)["success"] is True
     assert params == original
     assert calls == [(blueprint, expected_request)]
+
+
+def test_legacy_connect_wrapper_forwards_stable_ids_without_rewriting(monkeypatch):
+    calls = []
+
+    class Blueprint:
+        pass
+
+    blueprint = Blueprint()
+
+    class EditorAssetLibrary:
+        @staticmethod
+        def load_asset(asset_path):
+            calls.append(("load", asset_path))
+            return blueprint
+
+    class Helper:
+        @staticmethod
+        def connect_blueprint_pins(asset, graph_name, *targets):
+            calls.append(("connect", asset, graph_name, *targets))
+            return '{"success":true}'
+
+    fake_unreal = SimpleNamespace(
+        Blueprint=Blueprint,
+        EditorAssetLibrary=EditorAssetLibrary,
+        MCPythonHelper=Helper,
+    )
+    monkeypatch.setitem(sys.modules, "unreal", fake_unreal)
+    spec = importlib.util.spec_from_file_location(
+        "_blueprint_actions_connect_test", BLUEPRINT_ACTIONS
+    )
+    actions = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(actions)
+
+    targets = (
+        "node:11111111-1111-4111-8111-111111111111",
+        "pin:22222222-2222-4222-8222-222222222222",
+        "node:33333333-3333-4333-8333-333333333333",
+        "pin:44444444-4444-4444-8444-444444444444",
+    )
+    result = actions.ue_connect_blueprint_pins(
+        asset_path="/Game/BP.BP",
+        graph_name="EventGraph",
+        source_node=targets[0],
+        source_pin=targets[1],
+        target_node=targets[2],
+        target_pin=targets[3],
+    )
+
+    assert json.loads(result)["success"] is True
+    assert calls == [
+        ("load", "/Game/BP.BP"),
+        ("connect", blueprint, "EventGraph", *targets),
+    ]
 
 
 def test_call_json_helper_copies_request_and_passes_result_through(monkeypatch):
@@ -759,7 +866,9 @@ def test_graph_authoring_validates_before_mutation_and_uses_shared_transactions(
 
     mutations = (
         "AddBlueprintNode",
+        "SetBlueprintNodeProperties",
         "ConnectBlueprintPins",
+        "DisconnectBlueprintPins",
         "RemoveBlueprintNode",
         "BuildBlueprintGraph",
         "SetBlueprintNodePosition",
@@ -772,6 +881,56 @@ def test_graph_authoring_validates_before_mutation_and_uses_shared_transactions(
         assert "FMutationScope Scope" in body, name
         assert "Scope.Modify(Blueprint);" in body, name
         assert "Scope.Modify(Graph);" in body, name
+
+    properties = source[
+        source.index("FString UMCPythonHelper::SetBlueprintNodeProperties") :
+        source.index("FString UMCPythonHelper::ConnectBlueprintPins")
+    ]
+    assert properties.index("ResolveTarget") < properties.index("FMutationScope Scope")
+    assert properties.index("NormalizeDefaultValue") < properties.index(
+        "FMutationScope Scope"
+    )
+    assert properties.index("CanAddPin()") < properties.index(
+        "FMutationScope Scope"
+    )
+    assert properties.index("CanRemoveOptionPinToNode()") < properties.index(
+        "FMutationScope Scope"
+    )
+    assert properties.index("IsPinDefaultValid") < properties.index(
+        "FMutationScope Scope"
+    )
+    assert "bDefaultValueIsReadOnly" in properties
+    assert "bDefaultValueIsIgnored" in properties
+    assert "MaxSwitchCases" in source
+    assert "TrySetDefaultValue" in properties
+    assert "TrySetDefaultObject" in properties
+    assert "TrySetDefaultText" in properties
+
+    connections = source[
+        source.index("FString UMCPythonHelper::ConnectBlueprintPins") :
+        source.index("FString UMCPythonHelper::DisconnectBlueprintPins")
+    ]
+    assert connections.index("CanCreateConnection") < connections.index(
+        "FMutationScope Scope"
+    )
+    assert "TryCreateConnection" in connections
+    assert "CONNECT_RESPONSE_MAKE_WITH_CONVERSION_NODE" in connections
+    assert "TSet<FGuid> BeforeNodeGuids" in connections
+    assert "SnapshotConnections" in connections
+    assert "DiffConnectionChanges" in connections
+
+    disconnections = source[
+        source.index("FString UMCPythonHelper::DisconnectBlueprintPins") :
+        source.index("FString UMCPythonHelper::RemoveBlueprintNode")
+    ]
+    assert disconnections.index("ResolveStablePin") < disconnections.index(
+        "FMutationScope Scope"
+    )
+    assert "BreakSinglePinLink" in disconnections
+    assert "BreakPinLinks" in disconnections
+    assert 'TryGetStringField(TEXT("pin_id")' in disconnections
+    assert 'TryGetStringField(TEXT("source_pin_id")' in disconnections
+    assert 'TryGetStringField(TEXT("target_pin_id")' in disconnections
 
     assert "CompileBlueprint(" not in source
     assert "SavePackage(" not in source

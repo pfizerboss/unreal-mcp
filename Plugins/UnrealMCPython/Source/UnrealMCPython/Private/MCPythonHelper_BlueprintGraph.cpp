@@ -62,6 +62,65 @@ FString GraphFailure(
         false,
         TEXT("Correct the request using stable Blueprint 2 identifiers and exact Unreal object paths.")));
 }
+
+FString GraphFailureWithDetails(
+    const FString& Path,
+    const FString& Message,
+    const TSharedPtr<FJsonObject>& Details,
+    const FString& Code = TEXT("INVALID_INPUT"))
+{
+    return SerializeResult(MakeFailure(
+        Code,
+        Path,
+        Message,
+        false,
+        TEXT("Correct the request using stable Blueprint 2 identifiers and exact Unreal object paths."),
+        Details));
+}
+
+FString LegacyConnectFailure(
+    const FString& Path,
+    const FString& Message,
+    const FString& Code = TEXT("INVALID_INPUT"))
+{
+    const TSharedRef<FJsonObject> Result = MakeFailure(
+        Code,
+        Path,
+        Message,
+        false,
+        TEXT("Correct the request using stable Blueprint 2 identifiers and exact Unreal object paths."));
+    Result->SetStringField(TEXT("message"), Message);
+    return SerializeResult(Result);
+}
+
+FString LegacyConnectFailureWithDetails(
+    const FString& Path,
+    const FString& Message,
+    const TSharedPtr<FJsonObject>& Details,
+    const FString& Code = TEXT("INVALID_INPUT"))
+{
+    const TSharedRef<FJsonObject> Result = MakeFailure(
+        Code,
+        Path,
+        Message,
+        false,
+        TEXT("Correct the request using stable Blueprint 2 identifiers and exact Unreal object paths."),
+        Details);
+    Result->SetStringField(TEXT("message"), Message);
+    return SerializeResult(Result);
+}
+
+TSharedRef<FJsonObject> CompileNextAction(UBlueprint* Blueprint)
+{
+    const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(
+        TEXT("asset_path"), Blueprint ? Blueprint->GetPathName() : FString());
+    const TSharedRef<FJsonObject> NextAction = MakeShared<FJsonObject>();
+    NextAction->SetStringField(TEXT("domain"), TEXT("blueprint"));
+    NextAction->SetStringField(TEXT("action"), TEXT("compile_blueprint"));
+    NextAction->SetObjectField(TEXT("params"), Params);
+    return NextAction;
+}
 bool IsExactK2Graph(const UEdGraph* Graph)
 {
     return Graph && Graph->GetSchema() &&
@@ -268,6 +327,22 @@ FString RollbackGraphFailure(
     return GraphFailure(Path, Message);
 }
 
+FString RollbackLegacyConnectFailure(
+    FMutationScope& Scope,
+    const FString& Path,
+    const FString& Message)
+{
+    const FRollbackResult Rollback = Scope.Rollback();
+    if (!Rollback.bSucceeded && !Rollback.bDeferredToWorkflow)
+    {
+        return LegacyConnectFailure(
+            TEXT("transaction"),
+            TEXT("Blueprint graph mutation rollback failed."),
+            TEXT("ROLLBACK_FAILED"));
+    }
+    return LegacyConnectFailure(Path, Message);
+}
+
 void ModifyPinAndLinks(FMutationScope& Scope, UEdGraphPin* Pin)
 {
     if (!Pin)
@@ -412,6 +487,443 @@ bool ResolveCommonVariableName(
         return false;
     }
     return true;
+}
+
+TArray<FString> AllowedNodeProperties(const UEdGraphNode* Node)
+{
+    TArray<FString> Allowed = {
+        TEXT("comment"),
+        TEXT("comment_bubble_visible"),
+        TEXT("enabled_state"),
+        TEXT("position"),
+        TEXT("pin_defaults"),
+    };
+    if (Node && Node->IsA<UK2Node_ExecutionSequence>())
+    {
+        Allowed.Add(TEXT("output_count"));
+    }
+    else if (Node && Node->IsA<UK2Node_Select>())
+    {
+        Allowed.Add(TEXT("option_count"));
+    }
+    else if (Node && (
+        Node->IsA<UK2Node_SwitchInteger>() ||
+        Node->IsA<UK2Node_SwitchString>() ||
+        Node->IsA<UK2Node_SwitchName>()))
+    {
+        Allowed.Add(TEXT("cases"));
+    }
+    Allowed.Sort();
+    return Allowed;
+}
+
+TSharedRef<FJsonObject> AllowedPropertiesDetails(
+    const TArray<FString>& Allowed)
+{
+    TArray<TSharedPtr<FJsonValue>> Values;
+    for (const FString& Property : Allowed)
+    {
+        Values.Add(MakeShared<FJsonValueString>(Property));
+    }
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetArrayField(TEXT("allowed_properties"), Values);
+    return Details;
+}
+
+bool TryIntegerInRange(
+    const TSharedRef<FJsonObject>& Object,
+    const TCHAR* Field,
+    int32 Minimum,
+    int32 Maximum,
+    int32& OutValue)
+{
+    double Number = 0.0;
+    if (!Object->TryGetNumberField(Field, Number) ||
+        !FMath::IsFinite(Number) ||
+        Number < static_cast<double>(Minimum) ||
+        Number > static_cast<double>(Maximum))
+    {
+        return false;
+    }
+    const int32 Integer = static_cast<int32>(Number);
+    if (Number != static_cast<double>(Integer))
+    {
+        return false;
+    }
+    OutValue = Integer;
+    return true;
+}
+
+struct FPreparedPinDefault
+{
+    FString PinId;
+    FNormalizedDefault Value;
+};
+
+struct FNodePropertyPlan
+{
+    bool bSetComment = false;
+    FString Comment;
+    bool bSetCommentBubbleVisible = false;
+    bool bCommentBubbleVisible = false;
+    bool bSetEnabledState = false;
+    ENodeEnabledState EnabledState = ENodeEnabledState::Enabled;
+    bool bSetPosition = false;
+    int32 PositionX = 0;
+    int32 PositionY = 0;
+    bool bSetOutputCount = false;
+    int32 OutputCount = 0;
+    bool bSetOptionCount = false;
+    int32 OptionCount = 0;
+    bool bSetCases = false;
+    TArray<int32> IntegerCases;
+    TArray<FName> NamedCases;
+    TArray<FPreparedPinDefault> PinDefaults;
+};
+
+constexpr int32 MaxSwitchCases = 64;
+
+bool ParseEnabledState(
+    const FString& Value,
+    ENodeEnabledState& OutState)
+{
+    if (Value == TEXT("enabled"))
+    {
+        OutState = ENodeEnabledState::Enabled;
+        return true;
+    }
+    if (Value == TEXT("disabled"))
+    {
+        OutState = ENodeEnabledState::Disabled;
+        return true;
+    }
+    if (Value == TEXT("development_only"))
+    {
+        OutState = ENodeEnabledState::DevelopmentOnly;
+        return true;
+    }
+    return false;
+}
+
+bool ParseSwitchCases(
+    const TSharedRef<FJsonObject>& Properties,
+    UEdGraphNode* Node,
+    FNodePropertyPlan& Plan,
+    FString& OutError)
+{
+    const TArray<TSharedPtr<FJsonValue>>* Cases = nullptr;
+    if (!Properties->TryGetArrayField(TEXT("cases"), Cases) || !Cases)
+    {
+        OutError = TEXT("cases must be an array.");
+        return false;
+    }
+    if (Cases->Num() > MaxSwitchCases)
+    {
+        OutError = FString::Printf(
+            TEXT("cases must contain at most %d entries."), MaxSwitchCases);
+        return false;
+    }
+    Plan.bSetCases = true;
+    if (Node->IsA<UK2Node_SwitchInteger>())
+    {
+        for (const TSharedPtr<FJsonValue>& Case : *Cases)
+        {
+            double Number = 0.0;
+            if (!Case.IsValid() || !Case->TryGetNumber(Number) ||
+                !FMath::IsFinite(Number) ||
+                Number < static_cast<double>(MIN_int32) ||
+                Number > static_cast<double>(MAX_int32))
+            {
+                OutError = TEXT("Integer Switch cases must be int32 values.");
+                return false;
+            }
+            const int32 Integer = static_cast<int32>(Number);
+            if (Number != static_cast<double>(Integer))
+            {
+                OutError = TEXT("Integer Switch cases must be int32 values.");
+                return false;
+            }
+            Plan.IntegerCases.Add(Integer);
+        }
+        for (int32 Index = 1; Index < Plan.IntegerCases.Num(); ++Index)
+        {
+            const int64 Expected =
+                static_cast<int64>(Plan.IntegerCases[0]) + Index;
+            if (Expected > MAX_int32 ||
+                Plan.IntegerCases[Index] != static_cast<int32>(Expected))
+            {
+                OutError = TEXT(
+                    "Integer Switch cases must be consecutive and ordered.");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    TSet<FName> Seen;
+    for (const TSharedPtr<FJsonValue>& Case : *Cases)
+    {
+        FString Value;
+        if (!Case.IsValid() || !Case->TryGetString(Value) || Value.IsEmpty())
+        {
+            OutError = TEXT(
+                "String and Name Switch cases must be non-empty strings.");
+            return false;
+        }
+        const FName Name(*Value);
+        if (Seen.Contains(Name))
+        {
+            OutError = TEXT("Switch cases must be unique.");
+            return false;
+        }
+        Seen.Add(Name);
+        Plan.NamedCases.Add(Name);
+    }
+    return true;
+}
+
+bool ResolveStablePin(
+    UBlueprint* Blueprint,
+    const FString& PinId,
+    FResolvedTarget& OutPin,
+    FString& OutError)
+{
+    FTargetRef Target;
+    Target.Id = PinId;
+    OutPin = ResolveTarget(Blueprint, ETargetKind::Pin, Target, OutError);
+    return OutPin.Pin && OutPin.Node && OutPin.Graph;
+}
+
+UEdGraphNode* ResolveConnectionNode(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    const FString& Reference,
+    FString& OutError)
+{
+    if (Reference.StartsWith(TEXT("node:")))
+    {
+        FTargetRef Target;
+        Target.Id = Reference;
+        const FResolvedTarget Resolved = ResolveTarget(
+            Blueprint, ETargetKind::Node, Target, OutError);
+        if (!Resolved.Node)
+        {
+            return nullptr;
+        }
+        if (Resolved.Graph != Graph)
+        {
+            OutError = TEXT("Stable node target does not belong to the requested graph.");
+            return nullptr;
+        }
+        return Resolved.Node;
+    }
+    UEdGraphNode* Node = FindBPNodeByName(Graph, Reference);
+    if (!Node)
+    {
+        OutError = FString::Printf(
+            TEXT("Exact legacy node name '%s' was not found."), *Reference);
+    }
+    return Node;
+}
+
+UEdGraphPin* ResolveConnectionPin(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    UEdGraphNode* Node,
+    const FString& Reference,
+    FString& OutError)
+{
+    if (Reference.StartsWith(TEXT("pin:")))
+    {
+        FResolvedTarget Resolved;
+        if (!ResolveStablePin(Blueprint, Reference, Resolved, OutError))
+        {
+            return nullptr;
+        }
+        if (Resolved.Graph != Graph || Resolved.Node != Node)
+        {
+            OutError = TEXT(
+                "Stable pin target does not belong to the requested node and graph.");
+            return nullptr;
+        }
+        return Resolved.Pin;
+    }
+    UEdGraphPin* Pin = FindPinByName(Node, Reference);
+    if (!Pin)
+    {
+        OutError = FString::Printf(
+            TEXT("Exact legacy pin name '%s' was not found on node '%s'."),
+            *Reference,
+            *Node->GetName());
+    }
+    return Pin;
+}
+
+FString ConnectionResponseName(const ECanCreateConnectionResponse Response)
+{
+    switch (Response)
+    {
+    case CONNECT_RESPONSE_MAKE: return TEXT("make");
+    case CONNECT_RESPONSE_DISALLOW: return TEXT("disallow");
+    case CONNECT_RESPONSE_BREAK_OTHERS_A: return TEXT("break_others_a");
+    case CONNECT_RESPONSE_BREAK_OTHERS_B: return TEXT("break_others_b");
+    case CONNECT_RESPONSE_BREAK_OTHERS_AB: return TEXT("break_others_ab");
+    case CONNECT_RESPONSE_MAKE_WITH_CONVERSION_NODE:
+        return TEXT("make_with_conversion_node");
+    case CONNECT_RESPONSE_MAKE_WITH_PROMOTION:
+        return TEXT("make_with_promotion");
+    default: return TEXT("unknown");
+    }
+}
+
+TSharedRef<FJsonObject> ConnectionDetails(
+    UBlueprint* Blueprint,
+    UEdGraphPin* OutputPin,
+    UEdGraphPin* InputPin,
+    const FPinConnectionResponse* Response = nullptr)
+{
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(
+        TEXT("source_pin_id"), DescribePinTarget(Blueprint, OutputPin).Id);
+    Details->SetStringField(
+        TEXT("target_pin_id"), DescribePinTarget(Blueprint, InputPin).Id);
+    Details->SetObjectField(
+        TEXT("source_type"), SerializeTypeSpec(OutputPin->PinType));
+    Details->SetObjectField(
+        TEXT("target_type"), SerializeTypeSpec(InputPin->PinType));
+    if (Response)
+    {
+        Details->SetStringField(
+            TEXT("schema_response"), ConnectionResponseName(Response->Response));
+        Details->SetStringField(
+            TEXT("schema_message"), Response->Message.ToString());
+    }
+    return Details;
+}
+
+struct FNormalizedConnection
+{
+    FString SourcePinId;
+    FString TargetPinId;
+};
+
+FNormalizedConnection NormalizeConnection(
+    UBlueprint* Blueprint,
+    UEdGraphPin* First,
+    UEdGraphPin* Second)
+{
+    UEdGraphPin* OutputPin = First;
+    UEdGraphPin* InputPin = Second;
+    if (First && Second && First->Direction == EGPD_Input &&
+        Second->Direction == EGPD_Output)
+    {
+        OutputPin = Second;
+        InputPin = First;
+    }
+    FNormalizedConnection Result;
+    Result.SourcePinId = DescribePinTarget(Blueprint, OutputPin).Id;
+    Result.TargetPinId = DescribePinTarget(Blueprint, InputPin).Id;
+    return Result;
+}
+
+FString ConnectionTargetId(const FNormalizedConnection& Connection)
+{
+    return TEXT("connection:") + Connection.SourcePinId + TEXT("->") +
+        Connection.TargetPinId;
+}
+
+TSharedRef<FJsonObject> ConnectionChange(
+    const FString& Kind,
+    const FNormalizedConnection& Connection)
+{
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(TEXT("source_pin_id"), Connection.SourcePinId);
+    Details->SetStringField(TEXT("target_pin_id"), Connection.TargetPinId);
+    const TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
+    Change->SetStringField(TEXT("kind"), Kind);
+    Change->SetStringField(
+        TEXT("target_id"), ConnectionTargetId(Connection));
+    Change->SetObjectField(TEXT("details"), Details);
+    return Change;
+}
+
+TMap<FString, FNormalizedConnection> SnapshotConnections(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph)
+{
+    TMap<FString, FNormalizedConnection> Snapshot;
+    if (!Blueprint || !Graph)
+    {
+        return Snapshot;
+    }
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (!Node)
+        {
+            continue;
+        }
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin || Pin->Direction != EGPD_Output)
+            {
+                continue;
+            }
+            for (UEdGraphPin* Linked : Pin->LinkedTo)
+            {
+                if (!Linked || !Linked->GetOwningNode() ||
+                    Linked->GetOwningNode()->GetGraph() != Graph)
+                {
+                    continue;
+                }
+                const FNormalizedConnection Connection =
+                    NormalizeConnection(Blueprint, Pin, Linked);
+                Snapshot.Add(ConnectionTargetId(Connection), Connection);
+            }
+        }
+    }
+    return Snapshot;
+}
+
+TArray<TSharedPtr<FJsonValue>> DiffConnectionChanges(
+    const TMap<FString, FNormalizedConnection>& Before,
+    const TMap<FString, FNormalizedConnection>& After)
+{
+    struct FConnectionDelta
+    {
+        FString Kind;
+        FString TargetId;
+        FNormalizedConnection Connection;
+    };
+
+    TArray<FConnectionDelta> Deltas;
+    for (const auto& Existing : Before)
+    {
+        if (!After.Contains(Existing.Key))
+        {
+            Deltas.Add({TEXT("delete"), Existing.Key, Existing.Value});
+        }
+    }
+    for (const auto& Current : After)
+    {
+        if (!Before.Contains(Current.Key))
+        {
+            Deltas.Add({TEXT("create"), Current.Key, Current.Value});
+        }
+    }
+    Deltas.Sort([](const FConnectionDelta& A, const FConnectionDelta& B)
+    {
+        const int32 TargetComparison =
+            A.TargetId.Compare(B.TargetId, ESearchCase::CaseSensitive);
+        return TargetComparison == 0 ? A.Kind < B.Kind : TargetComparison < 0;
+    });
+
+    TArray<TSharedPtr<FJsonValue>> Changes;
+    for (const FConnectionDelta& Delta : Deltas)
+    {
+        Changes.Add(MakeShared<FJsonValueObject>(
+            ConnectionChange(Delta.Kind, Delta.Connection)));
+    }
+    return Changes;
 }
 }
 
@@ -1480,82 +1992,963 @@ FString UMCPythonHelper::AddBlueprintNode(UBlueprint* Blueprint, const FString& 
         true);
 }
 
+// ─── SetBlueprintNodeProperties UFUNCTION ────────────────────────────────────
+
+FString UMCPythonHelper::SetBlueprintNodeProperties(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    using namespace UE::MCPython::Blueprint2;
+
+    if (!Blueprint)
+    {
+        return GraphFailure(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    TSharedPtr<FJsonObject> Request;
+    const TSharedRef<TJsonReader<>> Reader =
+        TJsonReaderFactory<>::Create(RequestJson);
+    if (!FJsonSerializer::Deserialize(Reader, Request) || !Request.IsValid())
+    {
+        return GraphFailure(TEXT("params"), TEXT("Request must be a JSON object."));
+    }
+    if (!HasOnlyFields(Request.ToSharedRef(), {TEXT("node_id"), TEXT("properties")}))
+    {
+        return GraphFailure(
+            TEXT("params"), TEXT("Only node_id and properties are accepted."));
+    }
+
+    FString NodeId;
+    const TSharedPtr<FJsonObject>* PropertiesPointer = nullptr;
+    if (!Request->TryGetStringField(TEXT("node_id"), NodeId) ||
+        NodeId.IsEmpty())
+    {
+        return GraphFailure(
+            TEXT("params.node_id"), TEXT("A stable node_id is required."));
+    }
+    if (!Request->TryGetObjectField(
+            TEXT("properties"), PropertiesPointer) ||
+        !PropertiesPointer || !PropertiesPointer->IsValid() ||
+        (*PropertiesPointer)->Values.IsEmpty())
+    {
+        return GraphFailure(
+            TEXT("params.properties"),
+            TEXT("properties must be a non-empty object."));
+    }
+    const TSharedRef<FJsonObject> Properties =
+        PropertiesPointer->ToSharedRef();
+
+    FTargetRef NodeTarget;
+    NodeTarget.Id = NodeId;
+    FString ResolveError;
+    const FResolvedTarget Resolved = ResolveTarget(
+        Blueprint, ETargetKind::Node, NodeTarget, ResolveError);
+    UEdGraphNode* Node = Resolved.Node;
+    UEdGraph* Graph = Resolved.Graph;
+    if (!Node || !Graph)
+    {
+        return GraphFailure(
+            TEXT("params.node_id"),
+            FString::Printf(TEXT("Node target could not be resolved: %s"), *ResolveError));
+    }
+    if (!IsExactK2Graph(Graph))
+    {
+        return GraphFailure(
+            TEXT("params.node_id"), TEXT("Node must belong to an exact K2 graph."));
+    }
+    const UEdGraphSchema_K2* Schema =
+        CastChecked<UEdGraphSchema_K2>(Graph->GetSchema());
+
+    // The concrete class determines the allowlist before any class-specific
+    // value is read or validated.
+    const TArray<FString> Allowed = AllowedNodeProperties(Node);
+    for (const auto& Property : Properties->Values)
+    {
+        if (!Allowed.Contains(Property.Key))
+        {
+            return GraphFailureWithDetails(
+                TEXT("params.properties.") + Property.Key,
+                FString::Printf(
+                    TEXT("Property '%s' is not writable for node class '%s'."),
+                    *Property.Key,
+                    *Node->GetClass()->GetPathName()),
+                AllowedPropertiesDetails(Allowed));
+        }
+    }
+
+    FNodePropertyPlan Plan;
+    if (Properties->HasField(TEXT("comment")))
+    {
+        if (!Properties->TryGetStringField(TEXT("comment"), Plan.Comment))
+        {
+            return GraphFailure(
+                TEXT("params.properties.comment"), TEXT("comment must be a string."));
+        }
+        Plan.bSetComment = true;
+    }
+    if (Properties->HasField(TEXT("comment_bubble_visible")))
+    {
+        if (!Properties->TryGetBoolField(
+                TEXT("comment_bubble_visible"), Plan.bCommentBubbleVisible))
+        {
+            return GraphFailure(
+                TEXT("params.properties.comment_bubble_visible"),
+                TEXT("comment_bubble_visible must be a boolean."));
+        }
+        Plan.bSetCommentBubbleVisible = true;
+    }
+    if (Properties->HasField(TEXT("enabled_state")))
+    {
+        FString State;
+        if (!Properties->TryGetStringField(TEXT("enabled_state"), State) ||
+            !ParseEnabledState(State, Plan.EnabledState))
+        {
+            return GraphFailure(
+                TEXT("params.properties.enabled_state"),
+                TEXT("enabled_state must be enabled, disabled, or development_only."));
+        }
+        Plan.bSetEnabledState = true;
+    }
+    if (Properties->HasField(TEXT("position")))
+    {
+        const TSharedPtr<FJsonObject>* PositionPointer = nullptr;
+        if (!Properties->TryGetObjectField(
+                TEXT("position"), PositionPointer) ||
+            !PositionPointer || !PositionPointer->IsValid() ||
+            !HasOnlyFields(PositionPointer->ToSharedRef(), {TEXT("x"), TEXT("y")}) ||
+            !TryIntegerInRange(
+                PositionPointer->ToSharedRef(), TEXT("x"),
+                MIN_int32, MAX_int32, Plan.PositionX) ||
+            !TryIntegerInRange(
+                PositionPointer->ToSharedRef(), TEXT("y"),
+                MIN_int32, MAX_int32, Plan.PositionY))
+        {
+            return GraphFailure(
+                TEXT("params.properties.position"),
+                TEXT("position must contain only finite int32 x and y values."));
+        }
+        Plan.bSetPosition = true;
+    }
+    if (Properties->HasField(TEXT("output_count")))
+    {
+        if (!TryIntegerInRange(
+                Properties, TEXT("output_count"), 2, 64, Plan.OutputCount))
+        {
+            return GraphFailure(
+                TEXT("params.properties.output_count"),
+                TEXT("output_count must be an integer from 2 to 64."));
+        }
+        Plan.bSetOutputCount = true;
+    }
+    if (Properties->HasField(TEXT("option_count")))
+    {
+        if (!TryIntegerInRange(
+                Properties, TEXT("option_count"), 2, 64, Plan.OptionCount))
+        {
+            return GraphFailure(
+                TEXT("params.properties.option_count"),
+                TEXT("option_count must be an integer from 2 to 64."));
+        }
+        Plan.bSetOptionCount = true;
+        UK2Node_Select* SelectNode = CastChecked<UK2Node_Select>(Node);
+        TArray<UEdGraphPin*> Options;
+        SelectNode->GetOptionPins(Options);
+        if (Plan.OptionCount > Options.Num() && !SelectNode->CanAddPin())
+        {
+            return GraphFailure(
+                TEXT("params.properties.option_count"),
+                TEXT("option_count cannot be increased for this fixed-shape Select node."));
+        }
+        if (Plan.OptionCount < Options.Num() &&
+            !SelectNode->CanRemoveOptionPinToNode())
+        {
+            return GraphFailure(
+                TEXT("params.properties.option_count"),
+                TEXT("option_count cannot be decreased for this fixed-shape Select node."));
+        }
+    }
+    if (Properties->HasField(TEXT("cases")))
+    {
+        FString CasesError;
+        if (!ParseSwitchCases(Properties, Node, Plan, CasesError))
+        {
+            return GraphFailure(
+                TEXT("params.properties.cases"), CasesError);
+        }
+    }
+
+    if (Properties->HasField(TEXT("pin_defaults")))
+    {
+        const TSharedPtr<FJsonObject>* DefaultsPointer = nullptr;
+        if (!Properties->TryGetObjectField(
+                TEXT("pin_defaults"), DefaultsPointer) ||
+            !DefaultsPointer || !DefaultsPointer->IsValid() ||
+            (*DefaultsPointer)->Values.IsEmpty())
+        {
+            return GraphFailure(
+                TEXT("params.properties.pin_defaults"),
+                TEXT("pin_defaults must be a non-empty object keyed by stable pin ID."));
+        }
+        for (const auto& Default : (*DefaultsPointer)->Values)
+        {
+            FResolvedTarget PinTarget;
+            FString PinError;
+            if (!ResolveStablePin(Blueprint, Default.Key, PinTarget, PinError))
+            {
+                return GraphFailure(
+                    TEXT("params.properties.pin_defaults.") + Default.Key,
+                    FString::Printf(
+                        TEXT("Pin target could not be resolved: %s"), *PinError));
+            }
+            if (PinTarget.Node != Node || PinTarget.Graph != Graph)
+            {
+                return GraphFailure(
+                    TEXT("params.properties.pin_defaults.") + Default.Key,
+                    TEXT("Pin target does not belong to the requested node."));
+            }
+            if (PinTarget.Pin->Direction != EGPD_Input ||
+                PinTarget.Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+            {
+                return GraphFailure(
+                    TEXT("params.properties.pin_defaults.") + Default.Key,
+                    TEXT("Only non-exec input pin defaults are writable."));
+            }
+            if (PinTarget.Pin->bDefaultValueIsReadOnly ||
+                PinTarget.Pin->bDefaultValueIsIgnored)
+            {
+                return GraphFailure(
+                    TEXT("params.properties.pin_defaults.") + Default.Key,
+                    TEXT("Pin default is read-only or ignored by the node."));
+            }
+            if (Plan.bSetOptionCount)
+            {
+                if (UK2Node_Select* SelectNode = Cast<UK2Node_Select>(Node))
+                {
+                    TArray<UEdGraphPin*> Options;
+                    SelectNode->GetOptionPins(Options);
+                    const int32 OptionIndex = Options.IndexOfByKey(PinTarget.Pin);
+                    if (OptionIndex != INDEX_NONE && OptionIndex >= Plan.OptionCount)
+                    {
+                        return GraphFailure(
+                            TEXT("params.properties.pin_defaults.") + Default.Key,
+                            TEXT("Pin target would be removed by option_count."));
+                    }
+                }
+            }
+            FPreparedPinDefault Prepared;
+            Prepared.PinId = Default.Key;
+            FError DefaultError;
+            if (!NormalizeDefaultValue(
+                    PinTarget.Pin->PinType,
+                    Default.Value,
+                    Node,
+                    Prepared.Value,
+                    DefaultError,
+                    TEXT("params.properties.pin_defaults.") + Default.Key))
+            {
+                return SerializeResult(MakeFailure(
+                    DefaultError.Code.IsEmpty()
+                        ? FString(TEXT("INVALID_INPUT"))
+                        : DefaultError.Code,
+                    DefaultError.Path,
+                    DefaultError.Message,
+                    false,
+                    TEXT("Provide a value compatible with the canonical pin type.")));
+            }
+            const FString PinDefaultError = Schema->IsPinDefaultValid(
+                PinTarget.Pin,
+                Prepared.Value.DefaultValue,
+                Prepared.Value.DefaultObject,
+                Prepared.Value.DefaultTextValue);
+            if (!PinDefaultError.IsEmpty())
+            {
+                return GraphFailure(
+                    TEXT("params.properties.pin_defaults.") + Default.Key,
+                    FString::Printf(
+                        TEXT("Pin default is not writable: %s"),
+                        *PinDefaultError));
+            }
+            Plan.PinDefaults.Add(MoveTemp(Prepared));
+        }
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "MCPython", "SetBlueprintNodeProperties", "Set Blueprint node properties"));
+    if (!Scope.IsValid())
+    {
+        return GraphFailure(
+            TEXT("transaction"),
+            TEXT("Could not begin a Blueprint graph transaction."),
+            TEXT("TRANSACTION_FAILED"));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    Scope.Modify(Node);
+    for (UEdGraphPin* Pin : Node->Pins)
+    {
+        ModifyPinAndLinks(Scope, Pin);
+    }
+    bool bChangedPinShape = false;
+    if (Plan.bSetOutputCount)
+    {
+        UK2Node_ExecutionSequence* Sequence =
+            CastChecked<UK2Node_ExecutionSequence>(Node);
+        auto OutputPins = [Sequence]()
+        {
+            TArray<UEdGraphPin*> Result;
+            for (UEdGraphPin* Pin : Sequence->Pins)
+            {
+                if (Pin && Pin->Direction == EGPD_Output &&
+                    Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+                {
+                    Result.Add(Pin);
+                }
+            }
+            return Result;
+        };
+        TArray<UEdGraphPin*> Outputs = OutputPins();
+        while (Outputs.Num() < Plan.OutputCount)
+        {
+            const int32 PreviousCount = Outputs.Num();
+            Sequence->AddInputPin();
+            Outputs = OutputPins();
+            if (Outputs.Num() <= PreviousCount)
+            {
+                return RollbackGraphFailure(
+                    Scope,
+                    TEXT("params.properties.output_count"),
+                    TEXT("Sequence node did not add an output pin."));
+            }
+        }
+        while (Outputs.Num() > Plan.OutputCount)
+        {
+            const int32 PreviousCount = Outputs.Num();
+            Schema->BreakPinLinks(*Outputs.Last(), true);
+            Sequence->RemovePinFromExecutionNode(Outputs.Last());
+            Outputs = OutputPins();
+            if (Outputs.Num() >= PreviousCount)
+            {
+                return RollbackGraphFailure(
+                    Scope,
+                    TEXT("params.properties.output_count"),
+                    TEXT("Sequence node did not remove an output pin."));
+            }
+        }
+        bChangedPinShape = true;
+    }
+    if (Plan.bSetOptionCount)
+    {
+        UK2Node_Select* SelectNode = CastChecked<UK2Node_Select>(Node);
+        TArray<UEdGraphPin*> Options;
+        SelectNode->GetOptionPins(Options);
+        while (Options.Num() < Plan.OptionCount)
+        {
+            if (!SelectNode->CanAddPin())
+            {
+                return RollbackGraphFailure(
+                    Scope,
+                    TEXT("params.properties.option_count"),
+                    TEXT("Select node can no longer add an option pin."));
+            }
+            const int32 PreviousCount = Options.Num();
+            SelectNode->AddInputPin();
+            SelectNode->GetOptionPins(Options);
+            if (Options.Num() <= PreviousCount)
+            {
+                return RollbackGraphFailure(
+                    Scope,
+                    TEXT("params.properties.option_count"),
+                    TEXT("Select node did not add an option pin."));
+            }
+        }
+        while (Options.Num() > Plan.OptionCount)
+        {
+            if (!SelectNode->CanRemoveOptionPinToNode())
+            {
+                return RollbackGraphFailure(
+                    Scope,
+                    TEXT("params.properties.option_count"),
+                    TEXT("Select node can no longer remove an option pin."));
+            }
+            const int32 PreviousCount = Options.Num();
+            SelectNode->RemoveOptionPinToNode();
+            SelectNode->GetOptionPins(Options);
+            if (Options.Num() >= PreviousCount)
+            {
+                return RollbackGraphFailure(
+                    Scope,
+                    TEXT("params.properties.option_count"),
+                    TEXT("Select node did not remove an option pin."));
+            }
+        }
+        bChangedPinShape = true;
+    }
+    if (Plan.bSetCases)
+    {
+        if (UK2Node_SwitchInteger* Switch = Cast<UK2Node_SwitchInteger>(Node))
+        {
+            if (!Plan.IntegerCases.IsEmpty() &&
+                Switch->StartIndex != Plan.IntegerCases[0])
+            {
+                Switch->StartIndex = Plan.IntegerCases[0];
+                Switch->ReconstructNode();
+            }
+            auto CasePins = [Switch]()
+            {
+                TArray<UEdGraphPin*> Result;
+                UEdGraphPin* DefaultPin = Switch->GetDefaultPin();
+                for (UEdGraphPin* Pin : Switch->Pins)
+                {
+                    if (Pin && Pin != DefaultPin &&
+                        Pin->Direction == EGPD_Output &&
+                        Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+                    {
+                        Result.Add(Pin);
+                    }
+                }
+                return Result;
+            };
+            TArray<UEdGraphPin*> Current = CasePins();
+            while (Current.Num() < Plan.IntegerCases.Num())
+            {
+                const int32 PreviousCount = Current.Num();
+                Switch->AddPinToSwitchNode();
+                Current = CasePins();
+                if (Current.Num() <= PreviousCount)
+                {
+                    return RollbackGraphFailure(
+                        Scope,
+                        TEXT("params.properties.cases"),
+                        TEXT("Integer Switch did not add a case pin."));
+                }
+            }
+            while (Current.Num() > Plan.IntegerCases.Num())
+            {
+                const int32 PreviousCount = Current.Num();
+                Schema->BreakPinLinks(*Current.Last(), true);
+                Switch->RemovePinFromSwitchNode(Current.Last());
+                Current = CasePins();
+                if (Current.Num() >= PreviousCount)
+                {
+                    return RollbackGraphFailure(
+                        Scope,
+                        TEXT("params.properties.cases"),
+                        TEXT("Integer Switch did not remove a case pin."));
+                }
+            }
+        }
+        else if (UK2Node_SwitchString* StringSwitch =
+            Cast<UK2Node_SwitchString>(Node))
+        {
+            StringSwitch->PinNames = Plan.NamedCases;
+            StringSwitch->ReconstructNode();
+        }
+        else if (UK2Node_SwitchName* NameSwitch =
+            Cast<UK2Node_SwitchName>(Node))
+        {
+            NameSwitch->PinNames = Plan.NamedCases;
+            NameSwitch->ReconstructNode();
+        }
+        bChangedPinShape = true;
+    }
+
+    if (bChangedPinShape)
+    {
+        FString ReResolveError;
+        const FResolvedTarget ReResolved = ResolveTarget(
+            Blueprint, ETargetKind::Node, NodeTarget, ReResolveError);
+        if (!ReResolved.Node || ReResolved.Graph != Graph)
+        {
+            return RollbackGraphFailure(
+                Scope,
+                TEXT("params.node_id"),
+                FString::Printf(
+                    TEXT("Node could not be re-resolved after reconstruction: %s"),
+                    *ReResolveError));
+        }
+        Node = ReResolved.Node;
+    }
+
+    if (Plan.bSetComment)
+    {
+        Node->NodeComment = Plan.Comment;
+    }
+#if WITH_EDITORONLY_DATA
+    if (Plan.bSetCommentBubbleVisible)
+    {
+        Node->bCommentBubbleVisible = Plan.bCommentBubbleVisible;
+    }
+#endif
+    if (Plan.bSetEnabledState)
+    {
+        Node->SetEnabledState(Plan.EnabledState);
+    }
+    if (Plan.bSetPosition)
+    {
+        Node->NodePosX = Plan.PositionX;
+        Node->NodePosY = Plan.PositionY;
+    }
+
+    for (const FPreparedPinDefault& Prepared : Plan.PinDefaults)
+    {
+        FResolvedTarget PinTarget;
+        FString PinError;
+        if (!ResolveStablePin(Blueprint, Prepared.PinId, PinTarget, PinError) ||
+            PinTarget.Node != Node || PinTarget.Graph != Graph)
+        {
+            return RollbackGraphFailure(
+                Scope,
+                TEXT("params.properties.pin_defaults.") + Prepared.PinId,
+                FString::Printf(
+                    TEXT("Pin could not be re-resolved after reconstruction: %s"),
+                    *PinError));
+        }
+        UEdGraphPin* Pin = PinTarget.Pin;
+        if (Pin->PinType.IsContainer())
+        {
+            Schema->TrySetDefaultValue(*Pin, Prepared.Value.DefaultValue);
+        }
+        else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object ||
+            Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class ||
+            Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface)
+        {
+            Schema->TrySetDefaultObject(*Pin, Prepared.Value.DefaultObject);
+        }
+        else if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Text)
+        {
+            Schema->TrySetDefaultText(*Pin, Prepared.Value.DefaultTextValue);
+        }
+        else
+        {
+            Schema->TrySetDefaultValue(*Pin, Prepared.Value.DefaultValue);
+        }
+    }
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+    const FTargetRef GraphTarget = DescribeGraphTarget(Blueprint, Graph);
+    const FTargetRef CurrentNodeTarget = DescribeNodeTarget(Blueprint, Node);
+    const TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
+    Position->SetNumberField(TEXT("x"), Node->NodePosX);
+    Position->SetNumberField(TEXT("y"), Node->NodePosY);
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Data->SetStringField(TEXT("graph_id"), GraphTarget.Id);
+    Data->SetStringField(TEXT("node_id"), CurrentNodeTarget.Id);
+    Data->SetStringField(TEXT("class_path"), Node->GetClass()->GetPathName());
+    Data->SetObjectField(TEXT("position"), Position);
+    Data->SetArrayField(TEXT("pin_ids"), NodePinIds(Blueprint, Node));
+    Data->SetObjectField(TEXT("properties"), Properties);
+
+    const TSharedRef<FJsonObject> ChangeDetails = MakeShared<FJsonObject>();
+    TArray<TSharedPtr<FJsonValue>> PropertyNames;
+    for (const auto& Property : Properties->Values)
+    {
+        PropertyNames.Add(MakeShared<FJsonValueString>(Property.Key));
+    }
+    PropertyNames.Sort([](
+        const TSharedPtr<FJsonValue>& A,
+        const TSharedPtr<FJsonValue>& B)
+    {
+        return A->AsString() < B->AsString();
+    });
+    ChangeDetails->SetArrayField(TEXT("properties"), PropertyNames);
+    const TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
+    Change->SetStringField(TEXT("kind"), TEXT("update"));
+    Change->SetStringField(TEXT("target_id"), CurrentNodeTarget.Id);
+    Change->SetObjectField(TEXT("details"), ChangeDetails);
+
+    const TSharedRef<FJsonObject> Result = MakeSuccess(
+        TEXT("Blueprint node properties updated."), Data);
+    Result->SetArrayField(
+        TEXT("changes"), {MakeShared<FJsonValueObject>(Change)});
+    Result->SetArrayField(
+        TEXT("next_actions"),
+        {MakeShared<FJsonValueObject>(CompileNextAction(Blueprint))});
+    return SerializeResult(Result);
+}
+
 // ─── ConnectBlueprintPins UFUNCTION ──────────────────────────────────────────
 
 FString UMCPythonHelper::ConnectBlueprintPins(UBlueprint* Blueprint, const FString& GraphName,
     const FString& SourceNodeName, const FString& SourcePinName,
     const FString& TargetNodeName, const FString& TargetPinName)
 {
-    if (!Blueprint)
-        return MakeJsonError(TEXT("Invalid Blueprint."));
+    using namespace UE::MCPython::Blueprint2;
 
+    if (!Blueprint)
+    {
+        return LegacyConnectFailure(
+            TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
     UEdGraph* Graph = FindGraphByName(Blueprint, GraphName);
     if (!Graph)
-        return MakeJsonError(FString::Printf(TEXT("Graph '%s' not found."), *GraphName));
+    {
+        return LegacyConnectFailure(
+            TEXT("graph_name"),
+            FString::Printf(TEXT("Graph '%s' not found."), *GraphName));
+    }
+    if (!IsExactK2Graph(Graph))
+    {
+        return LegacyConnectFailure(
+            TEXT("graph_name"), TEXT("Graph must use the exact K2 schema."));
+    }
 
-    UEdGraphNode* SourceNode = FindBPNodeByName(Graph, SourceNodeName);
+    FString ResolveError;
+    UEdGraphNode* SourceNode = ResolveConnectionNode(
+        Blueprint, Graph, SourceNodeName, ResolveError);
     if (!SourceNode)
-        return MakeJsonError(FString::Printf(TEXT("Source node '%s' not found."), *SourceNodeName));
-
-    UEdGraphNode* TargetNode = FindBPNodeByName(Graph, TargetNodeName);
+    {
+        return LegacyConnectFailure(
+            TEXT("source_node"),
+            FString::Printf(TEXT("Source node could not be resolved: %s"), *ResolveError));
+    }
+    UEdGraphNode* TargetNode = ResolveConnectionNode(
+        Blueprint, Graph, TargetNodeName, ResolveError);
     if (!TargetNode)
-        return MakeJsonError(FString::Printf(TEXT("Target node '%s' not found."), *TargetNodeName));
-
-    UEdGraphPin* SourcePin = FindPinByName(SourceNode, SourcePinName);
+    {
+        return LegacyConnectFailure(
+            TEXT("target_node"),
+            FString::Printf(TEXT("Target node could not be resolved: %s"), *ResolveError));
+    }
+    UEdGraphPin* SourcePin = ResolveConnectionPin(
+        Blueprint, Graph, SourceNode, SourcePinName, ResolveError);
     if (!SourcePin)
     {
-        TArray<FString> PinNames;
-        for (UEdGraphPin* P : SourceNode->Pins) { if (P && !P->bHidden) PinNames.Add(P->GetName()); }
-        return MakeJsonError(FString::Printf(TEXT("Pin '%s' not found on node '%s'. Available: %s"),
-            *SourcePinName, *SourceNodeName, *FString::Join(PinNames, TEXT(", "))));
+        return LegacyConnectFailure(
+            TEXT("source_pin"),
+            FString::Printf(TEXT("Source pin could not be resolved: %s"), *ResolveError));
     }
-
-    UEdGraphPin* TargetPin = FindPinByName(TargetNode, TargetPinName);
+    UEdGraphPin* TargetPin = ResolveConnectionPin(
+        Blueprint, Graph, TargetNode, TargetPinName, ResolveError);
     if (!TargetPin)
     {
-        TArray<FString> PinNames;
-        for (UEdGraphPin* P : TargetNode->Pins) { if (P && !P->bHidden) PinNames.Add(P->GetName()); }
-        return MakeJsonError(FString::Printf(TEXT("Pin '%s' not found on node '%s'. Available: %s"),
-            *TargetPinName, *TargetNodeName, *FString::Join(PinNames, TEXT(", "))));
+        return LegacyConnectFailure(
+            TEXT("target_pin"),
+            FString::Printf(TEXT("Target pin could not be resolved: %s"), *ResolveError));
+    }
+    if (SourcePin == TargetPin || SourcePin->Direction == TargetPin->Direction)
+    {
+        return LegacyConnectFailureWithDetails(
+            TEXT("source_pin"),
+            TEXT("Connection direction requires exactly one input pin and one output pin."),
+            ConnectionDetails(Blueprint, SourcePin, TargetPin));
     }
 
-    // Verify directions are compatible (output -> input)
-    if (SourcePin->Direction == TargetPin->Direction)
-        return MakeJsonError(FString::Printf(TEXT("Cannot connect pins with same direction (%s)."),
-            SourcePin->Direction == EGPD_Input ? TEXT("both Input") : TEXT("both Output")));
-
-    // Check if connection is allowed by the schema and handle BREAK_OTHERS
-    const UEdGraphSchema* Schema = Graph->GetSchema();
-    if (!Schema)
-        return MakeJsonError(TEXT("Graph schema is unavailable."));
+    UEdGraphPin* OutputPin = SourcePin->Direction == EGPD_Output
+        ? SourcePin
+        : TargetPin;
+    UEdGraphPin* InputPin = SourcePin->Direction == EGPD_Input
+        ? SourcePin
+        : TargetPin;
+    const UEdGraphSchema_K2* Schema =
+        CastChecked<UEdGraphSchema_K2>(Graph->GetSchema());
     const FPinConnectionResponse Response =
-        Schema->CanCreateConnection(SourcePin, TargetPin);
-    if (Response.Response == CONNECT_RESPONSE_DISALLOW)
-        return MakeJsonError(FString::Printf(TEXT("Connection not allowed: %s"), *Response.Message.ToString()));
+        Schema->CanCreateConnection(OutputPin, InputPin);
+    const bool bAllowed =
+        Response.Response == CONNECT_RESPONSE_MAKE ||
+        Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_A ||
+        Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_B ||
+        Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_AB ||
+        Response.Response == CONNECT_RESPONSE_MAKE_WITH_CONVERSION_NODE ||
+        Response.Response == CONNECT_RESPONSE_MAKE_WITH_PROMOTION;
+    if (!bAllowed)
+    {
+        return LegacyConnectFailureWithDetails(
+            TEXT("source_pin"),
+            FString::Printf(
+                TEXT("Connection not allowed: %s"), *Response.Message.ToString()),
+            ConnectionDetails(Blueprint, OutputPin, InputPin, &Response));
+    }
+
+    TSet<FGuid> BeforeNodeGuids;
+    for (UEdGraphNode* Existing : Graph->Nodes)
+    {
+        if (Existing && Existing->NodeGuid.IsValid())
+        {
+            BeforeNodeGuids.Add(Existing->NodeGuid);
+        }
+    }
+    const TMap<FString, FNormalizedConnection> BeforeConnections =
+        SnapshotConnections(Blueprint, Graph);
 
     FMutationScope Scope(NSLOCTEXT(
         "MCPython", "ConnectBlueprintPins", "Connect Blueprint pins"));
     if (!Scope.IsValid())
-        return MakeJsonError(TEXT("Could not begin a Blueprint graph transaction."));
+    {
+        return LegacyConnectFailure(
+            TEXT("transaction"),
+            TEXT("Could not begin a Blueprint graph transaction."),
+            TEXT("TRANSACTION_FAILED"));
+    }
     Scope.Modify(Blueprint);
     Scope.Modify(Graph);
-    ModifyPinAndLinks(Scope, SourcePin);
-    ModifyPinAndLinks(Scope, TargetPin);
+    ModifyPinAndLinks(Scope, OutputPin);
+    ModifyPinAndLinks(Scope, InputPin);
+    if (!Schema->TryCreateConnection(OutputPin, InputPin))
+    {
+        return RollbackLegacyConnectFailure(
+            Scope,
+            TEXT("source_pin"),
+            TEXT("K2 schema failed to create the preflight-approved connection."));
+    }
 
-    // Break existing connections when schema requires it (e.g. exec output already connected)
-    if (Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_A)
-        SourcePin->BreakAllPinLinks();
-    else if (Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_B)
-        TargetPin->BreakAllPinLinks();
+    TArray<FString> InsertedNodeIds;
+    for (UEdGraphNode* Current : Graph->Nodes)
+    {
+        if (!Current)
+        {
+            continue;
+        }
+        if (Current->NodeGuid.IsValid() &&
+            !BeforeNodeGuids.Contains(Current->NodeGuid))
+        {
+            InsertedNodeIds.Add(DescribeNodeTarget(Blueprint, Current).Id);
+        }
+    }
+    InsertedNodeIds.Sort();
+    TArray<TSharedPtr<FJsonValue>> InsertedValues;
+    for (const FString& InsertedNodeId : InsertedNodeIds)
+    {
+        InsertedValues.Add(MakeShared<FJsonValueString>(InsertedNodeId));
+    }
 
-    SourcePin->MakeLinkTo(TargetPin);
+    const FNormalizedConnection Connection =
+        NormalizeConnection(Blueprint, OutputPin, InputPin);
+    const TMap<FString, FNormalizedConnection> AfterConnections =
+        SnapshotConnections(Blueprint, Graph);
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Data->SetStringField(
+        TEXT("graph_id"), DescribeGraphTarget(Blueprint, Graph).Id);
+    Data->SetStringField(TEXT("source_pin_id"), Connection.SourcePinId);
+    Data->SetStringField(TEXT("target_pin_id"), Connection.TargetPinId);
+    Data->SetStringField(
+        TEXT("schema_response"), ConnectionResponseName(Response.Response));
+    Data->SetArrayField(TEXT("inserted_conversion_node_ids"), InsertedValues);
 
+    const FString Message = FString::Printf(
+        TEXT("Connected %s.%s -> %s.%s"),
+        *SourceNodeName,
+        *SourcePinName,
+        *TargetNodeName,
+        *TargetPinName);
+    const TSharedRef<FJsonObject> Result = MakeSuccess(Message, Data);
+    Result->SetArrayField(
+        TEXT("changes"),
+        DiffConnectionChanges(BeforeConnections, AfterConnections));
+    Result->SetArrayField(
+        TEXT("next_actions"),
+        {MakeShared<FJsonValueObject>(CompileNextAction(Blueprint))});
+    Result->SetStringField(TEXT("message"), Message);
+    Result->SetStringField(TEXT("source_node"), SourceNodeName);
+    Result->SetStringField(TEXT("source_pin"), SourcePinName);
+    Result->SetStringField(TEXT("target_node"), TargetNodeName);
+    Result->SetStringField(TEXT("target_pin"), TargetPinName);
     FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
-    return MakeJsonSuccess(FString::Printf(TEXT("Connected %s.%s -> %s.%s"),
-        *SourceNodeName, *SourcePinName, *TargetNodeName, *TargetPinName));
+    return SerializeResult(Result);
 }
 
 // ─── RemoveBlueprintNode UFUNCTION ───────────────────────────────────────────
+
+FString UMCPythonHelper::DisconnectBlueprintPins(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    using namespace UE::MCPython::Blueprint2;
+
+    if (!Blueprint)
+    {
+        return GraphFailure(TEXT("asset_path"), TEXT("Blueprint is required."));
+    }
+    TSharedPtr<FJsonObject> Request;
+    const TSharedRef<TJsonReader<>> Reader =
+        TJsonReaderFactory<>::Create(RequestJson);
+    if (!FJsonSerializer::Deserialize(Reader, Request) || !Request.IsValid())
+    {
+        return GraphFailure(TEXT("params"), TEXT("Request must be a JSON object."));
+    }
+    if (!HasOnlyFields(
+            Request.ToSharedRef(),
+            {TEXT("pin_id"), TEXT("source_pin_id"), TEXT("target_pin_id")}))
+    {
+        return GraphFailure(
+            TEXT("params"),
+            TEXT("Only pin_id or source_pin_id plus target_pin_id are accepted."));
+    }
+    FString PinId;
+    FString SourcePinId;
+    FString TargetPinId;
+    if (Request->HasField(TEXT("pin_id")) &&
+        !Request->TryGetStringField(TEXT("pin_id"), PinId))
+    {
+        return GraphFailure(
+            TEXT("params.pin_id"), TEXT("pin_id must be a string."));
+    }
+    if (Request->HasField(TEXT("source_pin_id")) &&
+        !Request->TryGetStringField(TEXT("source_pin_id"), SourcePinId))
+    {
+        return GraphFailure(
+            TEXT("params.source_pin_id"),
+            TEXT("source_pin_id must be a string."));
+    }
+    if (Request->HasField(TEXT("target_pin_id")) &&
+        !Request->TryGetStringField(TEXT("target_pin_id"), TargetPinId))
+    {
+        return GraphFailure(
+            TEXT("params.target_pin_id"),
+            TEXT("target_pin_id must be a string."));
+    }
+    const bool bBreakAll = !PinId.IsEmpty() &&
+        SourcePinId.IsEmpty() && TargetPinId.IsEmpty();
+    const bool bBreakPair = PinId.IsEmpty() &&
+        !SourcePinId.IsEmpty() && !TargetPinId.IsEmpty();
+    if (bBreakAll == bBreakPair)
+    {
+        return GraphFailure(
+            TEXT("params"),
+            TEXT("Provide either pin_id alone or both source_pin_id and target_pin_id."));
+    }
+
+    FResolvedTarget FirstTarget;
+    FResolvedTarget SecondTarget;
+    FString ResolveError;
+    if (!ResolveStablePin(
+            Blueprint,
+            bBreakAll ? PinId : SourcePinId,
+            FirstTarget,
+            ResolveError))
+    {
+        return GraphFailure(
+            bBreakAll ? TEXT("params.pin_id") : TEXT("params.source_pin_id"),
+            FString::Printf(TEXT("Pin target could not be resolved: %s"), *ResolveError));
+    }
+    UEdGraph* Graph = FirstTarget.Graph;
+    if (!IsExactK2Graph(Graph))
+    {
+        return GraphFailure(
+            bBreakAll ? TEXT("params.pin_id") : TEXT("params.source_pin_id"),
+            TEXT("Pin must belong to an exact K2 graph."));
+    }
+    if (bBreakPair)
+    {
+        if (!ResolveStablePin(Blueprint, TargetPinId, SecondTarget, ResolveError))
+        {
+            return GraphFailure(
+                TEXT("params.target_pin_id"),
+                FString::Printf(
+                    TEXT("Pin target could not be resolved: %s"), *ResolveError));
+        }
+        if (SecondTarget.Graph != Graph)
+        {
+            return GraphFailure(
+                TEXT("params.target_pin_id"),
+                TEXT("Exact pin pair must belong to the same graph."));
+        }
+        if (FirstTarget.Pin == SecondTarget.Pin ||
+            FirstTarget.Pin->Direction == SecondTarget.Pin->Direction)
+        {
+            return GraphFailureWithDetails(
+                TEXT("params.source_pin_id"),
+                TEXT("Exact pin pair requires one input pin and one output pin."),
+                ConnectionDetails(
+                    Blueprint, FirstTarget.Pin, SecondTarget.Pin));
+        }
+        if (!FirstTarget.Pin->LinkedTo.Contains(SecondTarget.Pin))
+        {
+            UEdGraphPin* OutputPin = FirstTarget.Pin->Direction == EGPD_Output
+                ? FirstTarget.Pin
+                : SecondTarget.Pin;
+            UEdGraphPin* InputPin = FirstTarget.Pin->Direction == EGPD_Input
+                ? FirstTarget.Pin
+                : SecondTarget.Pin;
+            return GraphFailureWithDetails(
+                TEXT("params.target_pin_id"),
+                TEXT("The exact pin pair is not linked."),
+                ConnectionDetails(Blueprint, OutputPin, InputPin),
+                TEXT("PRECONDITION_FAILED"));
+        }
+    }
+
+    TArray<FNormalizedConnection> Removed;
+    if (bBreakAll)
+    {
+        for (UEdGraphPin* Linked : FirstTarget.Pin->LinkedTo)
+        {
+            if (Linked)
+            {
+                Removed.Add(NormalizeConnection(
+                    Blueprint, FirstTarget.Pin, Linked));
+            }
+        }
+    }
+    else
+    {
+        Removed.Add(NormalizeConnection(
+            Blueprint, FirstTarget.Pin, SecondTarget.Pin));
+    }
+    Removed.Sort([](
+        const FNormalizedConnection& A,
+        const FNormalizedConnection& B)
+    {
+        return ConnectionTargetId(A) < ConnectionTargetId(B);
+    });
+
+    FMutationScope Scope(NSLOCTEXT(
+        "MCPython", "DisconnectBlueprintPins", "Disconnect Blueprint pins"));
+    if (!Scope.IsValid())
+    {
+        return GraphFailure(
+            TEXT("transaction"),
+            TEXT("Could not begin a Blueprint graph transaction."),
+            TEXT("TRANSACTION_FAILED"));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    ModifyPinAndLinks(Scope, FirstTarget.Pin);
+    if (bBreakPair)
+    {
+        ModifyPinAndLinks(Scope, SecondTarget.Pin);
+    }
+    const UEdGraphSchema_K2* Schema =
+        CastChecked<UEdGraphSchema_K2>(Graph->GetSchema());
+    if (bBreakAll)
+    {
+        Schema->BreakPinLinks(*FirstTarget.Pin, true);
+    }
+    else
+    {
+        Schema->BreakSinglePinLink(FirstTarget.Pin, SecondTarget.Pin);
+    }
+    if (!Removed.IsEmpty())
+    {
+        FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+    }
+
+    TArray<TSharedPtr<FJsonValue>> Changes;
+    for (const FNormalizedConnection& Connection : Removed)
+    {
+        Changes.Add(MakeShared<FJsonValueObject>(
+            ConnectionChange(TEXT("delete"), Connection)));
+    }
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Data->SetStringField(
+        TEXT("graph_id"), DescribeGraphTarget(Blueprint, Graph).Id);
+    Data->SetNumberField(TEXT("removed_connection_count"), Removed.Num());
+    const TSharedRef<FJsonObject> Result = MakeSuccess(
+        FString::Printf(
+            TEXT("Disconnected %d Blueprint pin connection%s."),
+            Removed.Num(),
+            Removed.Num() == 1 ? TEXT("") : TEXT("s")),
+        Data);
+    Result->SetArrayField(TEXT("changes"), Changes);
+    if (!Removed.IsEmpty())
+    {
+        Result->SetArrayField(
+            TEXT("next_actions"),
+            {MakeShared<FJsonValueObject>(CompileNextAction(Blueprint))});
+    }
+    return SerializeResult(Result);
+}
 
 FString UMCPythonHelper::RemoveBlueprintNode(UBlueprint* Blueprint, const FString& GraphName,
     const FString& NodeName)

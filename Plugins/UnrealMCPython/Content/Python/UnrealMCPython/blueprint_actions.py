@@ -973,14 +973,28 @@ def ue_add_reflected_blueprint_node(asset_path: str = None, graph_id: str = None
 def ue_set_blueprint_node_properties(asset_path: str = None, node_id: str = None,
                                            properties: dict = None) -> str:
     """Sets allowlisted reflected properties on a node targeted by stable ID."""
-    return _blueprint2_unsupported("set_blueprint_node_properties")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({"node_id": node_id, "properties": properties})
+    return blueprint2.call_asset_helper(
+        "set_blueprint_node_properties", asset_path, request
+    )
 
 
 def ue_disconnect_blueprint_pins(asset_path: str = None, pin_id: str = "",
                                        source_pin_id: str = "",
                                        target_pin_id: str = "") -> str:
     """Disconnects one pin entirely or one exact stable pin pair."""
-    return _blueprint2_unsupported("disconnect_blueprint_pins")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "pin_id": pin_id,
+        "source_pin_id": source_pin_id,
+        "target_pin_id": target_pin_id,
+    })
+    return blueprint2.call_asset_helper(
+        "disconnect_blueprint_pins", asset_path, request
+    )
 
 
 def ue_rename_blueprint_variable(asset_path: str = None, variable_id: str = None,
