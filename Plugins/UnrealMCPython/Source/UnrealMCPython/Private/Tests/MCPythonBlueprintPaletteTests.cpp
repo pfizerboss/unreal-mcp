@@ -7,8 +7,11 @@
 
 #include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNodeUtils.h"
 #include "Engine/Blueprint.h"
 #include "GameFramework/Actor.h"
+#include "K2Node_CustomEvent.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/DateTime.h"
@@ -112,6 +115,22 @@ TSharedRef<FJsonObject> MakeSpawnRequest(
     Request->SetStringField(TEXT("action_id"), ActionId);
     Request->SetObjectField(TEXT("position"), Position);
     Request->SetArrayField(TEXT("bindings"), MoveTemp(Bindings));
+    return Request;
+}
+
+TSharedRef<FJsonObject> MakeSuggestRequest(
+    const FString& GraphId,
+    const FString& PinId,
+    const FString& Query,
+    const FString& Cursor,
+    const int32 Limit)
+{
+    const TSharedRef<FJsonObject> Request = MakeShared<FJsonObject>();
+    Request->SetStringField(TEXT("graph_id"), GraphId);
+    Request->SetStringField(TEXT("pin_id"), PinId);
+    Request->SetStringField(TEXT("query"), Query);
+    Request->SetStringField(TEXT("cursor"), Cursor);
+    Request->SetNumberField(TEXT("limit"), Limit);
     return Request;
 }
 
@@ -879,6 +898,275 @@ bool FMCPythonBlueprintPaletteSpawnTest::RunTest(const FString& Parameters)
             TEXT("singleton rejection rolls back without a second event"),
             Fixture.Graph->Nodes.Num(),
             CountBeforeSingleton);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprintPalettePinSuggestionsTest,
+    "UnrealMCP.Blueprint2.Palette.PinSuggestions",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprintPalettePinSuggestionsTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+    using namespace UE::MCPython::Blueprint2;
+
+    ResetPaletteTokenStateForTests();
+    FPaletteBlueprintFixture Fixture = MakePaletteBlueprintFixture(
+        TEXT("MCPythonBlueprintPalettePinSuggestionsTest"));
+    ON_SCOPE_EXIT
+    {
+        ResetPaletteTokenStateForTests();
+        CleanupFixturePackage(Fixture.Package);
+    };
+    TestNotNull(TEXT("pin suggestion fixture Blueprint is created"), Fixture.Blueprint);
+    TestNotNull(TEXT("pin suggestion fixture EventGraph exists"), Fixture.Graph);
+    if (!Fixture.Blueprint || !Fixture.Graph || Fixture.GraphId.IsEmpty())
+    {
+        return false;
+    }
+
+    FGraphNodeCreator<UK2Node_CustomEvent> SourceCreator(*Fixture.Graph);
+    UK2Node_CustomEvent* SourceNode = SourceCreator.CreateNode(false);
+    SourceNode->CustomFunctionName = TEXT("PalettePinSource");
+    SourceCreator.Finalize();
+    UEdGraphPin* IntegerPin = SourceNode->CreatePin(
+        EGPD_Output, UEdGraphSchema_K2::PC_Int, TEXT("IntegerValue"));
+    UEdGraphPin* BooleanPin = SourceNode->CreatePin(
+        EGPD_Output, UEdGraphSchema_K2::PC_Boolean, TEXT("BooleanValue"));
+    UEdGraphPin* ExecPin = SourceNode->FindPin(
+        UEdGraphSchema_K2::PN_Then, EGPD_Output);
+    TestNotNull(TEXT("integer source pin exists"), IntegerPin);
+    TestNotNull(TEXT("boolean source pin exists"), BooleanPin);
+    TestNotNull(TEXT("execution source pin exists"), ExecPin);
+    if (!IntegerPin || !BooleanPin || !ExecPin)
+    {
+        return false;
+    }
+    const FString IntegerPinId = DescribePinTarget(Fixture.Blueprint, IntegerPin).Id;
+    const FString BooleanPinId = DescribePinTarget(Fixture.Blueprint, BooleanPin).Id;
+    const FString ExecPinId = DescribePinTarget(Fixture.Blueprint, ExecPin).Id;
+    TestTrue(TEXT("integer pin has a stable ID"), IntegerPinId.StartsWith(TEXT("pin:")));
+    TestTrue(TEXT("boolean pin has a stable ID"), BooleanPinId.StartsWith(TEXT("pin:")));
+    TestTrue(TEXT("exec pin has a stable ID"), ExecPinId.StartsWith(TEXT("pin:")));
+
+    auto Suggest = [&Fixture](
+        const FString& PinId,
+        const FString& Query = FString(),
+        const FString& Cursor = FString(),
+        const int32 Limit = 50)
+    {
+        return ParseJsonObject(UMCPythonHelper::SuggestBlueprintNodesForPin(
+            Fixture.Blueprint,
+            SerializeJsonObject(MakeSuggestRequest(
+                Fixture.GraphId, PinId, Query, Cursor, Limit))));
+    };
+    auto ActionIds = [](const TSharedPtr<FJsonObject>& Result)
+    {
+        TArray<FString> Ids;
+        if (!Result || !Result->GetBoolField(TEXT("success")))
+        {
+            return Ids;
+        }
+        for (const TSharedPtr<FJsonValue>& Item :
+            Result->GetObjectField(TEXT("data"))->GetArrayField(TEXT("items")))
+        {
+            Ids.Add(Item->AsObject()->GetStringField(TEXT("action_id")));
+        }
+        return Ids;
+    };
+
+    const TSharedPtr<FJsonObject> IntegerSuggestions = Suggest(IntegerPinId);
+    const TSharedPtr<FJsonObject> BooleanSuggestions = Suggest(BooleanPinId);
+    const TSharedPtr<FJsonObject> ExecSuggestions = Suggest(ExecPinId);
+    TestTrue(
+        TEXT("integer pin suggestions succeed"),
+        IntegerSuggestions.IsValid() &&
+            IntegerSuggestions->GetBoolField(TEXT("success")));
+    TestTrue(
+        TEXT("boolean pin suggestions succeed"),
+        BooleanSuggestions.IsValid() &&
+            BooleanSuggestions->GetBoolField(TEXT("success")));
+    TestTrue(
+        TEXT("exec pin suggestions succeed"),
+        ExecSuggestions.IsValid() &&
+            ExecSuggestions->GetBoolField(TEXT("success")));
+    if (IntegerSuggestions && IntegerSuggestions->GetBoolField(TEXT("success")))
+    {
+        TestTrue(
+            TEXT("suggestion summary identifies the native filter authority"),
+            IntegerSuggestions->GetStringField(TEXT("summary")).Contains(
+                TEXT("compatible according to the current native action filter")));
+    }
+    const TArray<FString> IntegerIds = ActionIds(IntegerSuggestions);
+    const TArray<FString> BooleanIds = ActionIds(BooleanSuggestions);
+    const TArray<FString> ExecIds = ActionIds(ExecSuggestions);
+    TestTrue(TEXT("integer suggestions exist"), IntegerIds.Num() > 0);
+    TestTrue(TEXT("boolean suggestions exist"), BooleanIds.Num() > 0);
+    TestTrue(TEXT("exec suggestions exist"), ExecIds.Num() > 0);
+    TestTrue(TEXT("typed contexts differ"), IntegerIds != BooleanIds);
+    TestTrue(TEXT("data and exec contexts differ"), IntegerIds != ExecIds);
+
+    const TArray<TPair<TSharedPtr<FJsonObject>, FString>> SuggestionContexts = {
+        {IntegerSuggestions, IntegerPinId},
+        {BooleanSuggestions, BooleanPinId},
+        {ExecSuggestions, ExecPinId}};
+    for (const TPair<TSharedPtr<FJsonObject>, FString>& Context : SuggestionContexts)
+    {
+        if (!Context.Key || !Context.Key->GetBoolField(TEXT("success")))
+        {
+            continue;
+        }
+        const TSharedPtr<FJsonObject> Data = Context.Key->GetObjectField(TEXT("data"));
+        TestEqual(
+            TEXT("suggestion page preserves the exact source pin"),
+            Data->GetStringField(TEXT("source_pin_id")),
+            Context.Value);
+        for (const TSharedPtr<FJsonValue>& Item : Data->GetArrayField(TEXT("items")))
+        {
+            FPaletteContext Expected;
+            Expected.SourcePinId = Context.Value;
+            Expected.Limit = 0;
+            FPaletteActionRecord Record;
+            FError Error;
+            TestTrue(
+                TEXT("suggestion action token preserves source pin ownership"),
+                ResolvePaletteActionToken(
+                    Item->AsObject()->GetStringField(TEXT("action_id")),
+                    Expected,
+                    Record,
+                    Error));
+            TestEqual(
+                TEXT("suggestion record contains the exact source pin"),
+                Record.Context.SourcePinId,
+                Context.Value);
+        }
+    }
+
+    const TSharedPtr<FJsonObject> IntegerPage = Suggest(
+        IntegerPinId, TEXT(""), TEXT(""), 1);
+    TestTrue(
+        TEXT("bounded integer suggestion page succeeds"),
+        IntegerPage.IsValid() && IntegerPage->GetBoolField(TEXT("success")));
+    const FString IntegerCursor = IntegerPage &&
+        IntegerPage->GetBoolField(TEXT("success"))
+        ? IntegerPage->GetObjectField(TEXT("data"))->GetStringField(TEXT("next_cursor"))
+        : FString();
+    TestFalse(TEXT("bounded pin suggestions return a cursor"), IntegerCursor.IsEmpty());
+    const TSharedPtr<FJsonObject> CrossPinCursor = Suggest(
+        BooleanPinId, TEXT(""), IntegerCursor, 1);
+    TestTrue(
+        TEXT("pin cursor cannot be replayed for another pin"),
+        CrossPinCursor.IsValid() &&
+            !CrossPinCursor->GetBoolField(TEXT("success")));
+    TestEqual(
+        TEXT("cross-pin cursor replay is a precondition"),
+        FirstErrorCode(CrossPinCursor),
+        FString(TEXT("PRECONDITION_FAILED")));
+
+    UEdGraph* OtherGraph = FBlueprintEditorUtils::CreateNewGraph(
+        Fixture.Blueprint,
+        TEXT("PaletteOtherGraph"),
+        UEdGraph::StaticClass(),
+        UEdGraphSchema_K2::StaticClass());
+    Fixture.Blueprint->FunctionGraphs.Add(OtherGraph);
+    FGraphNodeCreator<UK2Node_CustomEvent> OtherCreator(*OtherGraph);
+    UK2Node_CustomEvent* OtherNode = OtherCreator.CreateNode(false);
+    OtherNode->CustomFunctionName = TEXT("PaletteOtherSource");
+    OtherCreator.Finalize();
+    UEdGraphPin* OtherPin = OtherNode->CreatePin(
+        EGPD_Output, UEdGraphSchema_K2::PC_Int, TEXT("OtherValue"));
+    const FString OtherPinId = DescribePinTarget(Fixture.Blueprint, OtherPin).Id;
+    const int32 MainCountBeforeCrossGraph = Fixture.Graph->Nodes.Num();
+    const int32 OtherCountBeforeCrossGraph = OtherGraph->Nodes.Num();
+    const TSharedPtr<FJsonObject> CrossGraph = Suggest(OtherPinId);
+    TestTrue(
+        TEXT("pin from another graph is rejected"),
+        CrossGraph.IsValid() && !CrossGraph->GetBoolField(TEXT("success")));
+    TestEqual(
+        TEXT("cross-graph pin rejection is a precondition"),
+        FirstErrorCode(CrossGraph),
+        FString(TEXT("PRECONDITION_FAILED")));
+    TestEqual(
+        TEXT("cross-graph pin rejection leaves requested graph unchanged"),
+        Fixture.Graph->Nodes.Num(),
+        MainCountBeforeCrossGraph);
+    TestEqual(
+        TEXT("cross-graph pin rejection leaves source graph unchanged"),
+        OtherGraph->Nodes.Num(),
+        OtherCountBeforeCrossGraph);
+
+    const TSharedPtr<FJsonObject> AddSuggestions = Suggest(
+        IntegerPinId, TEXT("Add"), TEXT(""), 200);
+    TestTrue(
+        TEXT("integer Add suggestions succeed"),
+        AddSuggestions.IsValid() &&
+            AddSuggestions->GetBoolField(TEXT("success")));
+    TSharedPtr<FJsonObject> AddAction;
+    if (AddSuggestions && AddSuggestions->GetBoolField(TEXT("success")))
+    {
+        const TSharedPtr<FJsonObject> AddData =
+            AddSuggestions->GetObjectField(TEXT("data"));
+        for (const TSharedPtr<FJsonValue>& Item : AddData->GetArrayField(TEXT("items")))
+        {
+            const TSharedPtr<FJsonObject> Candidate = Item->AsObject();
+            if (Candidate->GetStringField(TEXT("title")) == TEXT("Add") &&
+                Candidate->GetStringField(TEXT("node_class_path")).EndsWith(
+                    TEXT("K2Node_PromotableOperator")) &&
+                Candidate->GetStringField(TEXT("action_kind")) == TEXT("operator") &&
+                !Candidate->GetBoolField(TEXT("requires_binding")))
+            {
+                AddAction = Candidate;
+                break;
+            }
+        }
+    }
+    TestTrue(
+        TEXT("promotable Add is suggested for an integer output"),
+        AddAction.IsValid());
+    if (AddAction)
+    {
+        const FString ActionId = AddAction->GetStringField(TEXT("action_id"));
+        const TSharedRef<FJsonObject> DescribeRequest = MakeShared<FJsonObject>();
+        DescribeRequest->SetStringField(TEXT("action_id"), ActionId);
+        const TSharedPtr<FJsonObject> Description = ParseJsonObject(
+            UMCPythonHelper::DescribeBlueprintNodeAction(
+                SerializeJsonObject(DescribeRequest)));
+        TestTrue(
+            TEXT("pin suggestion action can be described"),
+            Description.IsValid() && Description->GetBoolField(TEXT("success")));
+        if (Description && Description->GetBoolField(TEXT("success")))
+        {
+            TestEqual(
+                TEXT("description preserves suggestion source pin"),
+                Description->GetObjectField(TEXT("data"))->GetStringField(
+                    TEXT("source_pin_id")),
+                IntegerPinId);
+        }
+
+        const int32 CountBeforeSpawn = Fixture.Graph->Nodes.Num();
+        const TSharedPtr<FJsonObject> Spawn = ParseJsonObject(
+            UMCPythonHelper::AddBlueprintActionNode(
+                Fixture.Blueprint,
+                SerializeJsonObject(MakeSpawnRequest(
+                    Fixture.GraphId, ActionId, 1600.0, 400.0))));
+        TestTrue(
+            TEXT("pin suggestion action can be spawned while source pin is valid"),
+            Spawn.IsValid() && Spawn->GetBoolField(TEXT("success")));
+        TestEqual(
+            TEXT("pin suggestion spawn adds one node"),
+            Fixture.Graph->Nodes.Num(),
+            CountBeforeSpawn + 1);
+        FTargetRef PinTarget;
+        PinTarget.Id = IntegerPinId;
+        FString ResolveError;
+        const FResolvedTarget ResolvedPin = ResolveTarget(
+            Fixture.Blueprint, ETargetKind::Pin, PinTarget, ResolveError);
+        TestTrue(
+            TEXT("source pin remains valid after suggestion spawn"),
+            ResolvedPin.bStable && ResolvedPin.Pin == IntegerPin);
     }
     return true;
 }

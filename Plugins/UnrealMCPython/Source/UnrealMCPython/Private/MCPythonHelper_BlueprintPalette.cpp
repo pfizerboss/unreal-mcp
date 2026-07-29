@@ -536,6 +536,79 @@ bool ParseSpawnRequest(
             Position, TEXT("y"), OutRequest.PositionY, OutError);
 }
 
+bool ParseSuggestionRequest(
+    const FString& RequestJson,
+    FPaletteRequest& OutRequest,
+    FString& OutPinId,
+    FError& OutError)
+{
+    TSharedPtr<FJsonObject> Request;
+    if (!ParseObject(RequestJson, Request, OutError))
+    {
+        return false;
+    }
+    static const TSet<FString> AllowedFields = {
+        TEXT("graph_id"), TEXT("pin_id"), TEXT("query"), TEXT("cursor"),
+        TEXT("limit")};
+    if (!ValidateClosedObject(Request.ToSharedRef(), AllowedFields, TEXT("params"), OutError) ||
+        !ReadString(
+            Request.ToSharedRef(),
+            TEXT("graph_id"),
+            TEXT("params.graph_id"),
+            true,
+            128,
+            OutRequest.GraphId,
+            OutError) ||
+        !ReadString(
+            Request.ToSharedRef(),
+            TEXT("pin_id"),
+            TEXT("params.pin_id"),
+            true,
+            128,
+            OutPinId,
+            OutError) ||
+        !ReadString(
+            Request.ToSharedRef(),
+            TEXT("query"),
+            TEXT("params.query"),
+            false,
+            256,
+            OutRequest.Query,
+            OutError) ||
+        !ReadString(
+            Request.ToSharedRef(),
+            TEXT("cursor"),
+            TEXT("params.cursor"),
+            false,
+            4096,
+            OutRequest.Cursor,
+            OutError))
+    {
+        return false;
+    }
+    const TSharedPtr<FJsonValue>* Limit = FindField(
+        Request.ToSharedRef(), TEXT("limit"));
+    if (Limit)
+    {
+        if (!Limit->IsValid() || (*Limit)->Type != EJson::Number)
+        {
+            return SetInvalid(OutError, TEXT("params.limit"), TEXT("Expected an integer."));
+        }
+        const double Number = (*Limit)->AsNumber();
+        if (!FMath::IsFinite(Number) || FMath::FloorToDouble(Number) != Number ||
+            Number < 1.0 || Number > 200.0)
+        {
+            return SetInvalid(
+                OutError,
+                TEXT("params.limit"),
+                TEXT("limit must be an integer from 1 through 200."));
+        }
+        OutRequest.Limit = static_cast<int32>(Number);
+    }
+    OutRequest.FiltersJson = TEXT("{}");
+    return true;
+}
+
 bool ParseStoredFilters(
     const FString& FiltersJson,
     FPaletteFilters& OutFilters,
@@ -1015,6 +1088,28 @@ bool BuildCandidates(
     if (SourcePin)
     {
         NativeFilter.Context.Pins.Add(SourcePin);
+        if (UClass* PinClass = Cast<UClass>(
+                SourcePin->PinType.PinSubCategoryObject.Get()))
+        {
+            FBlueprintActionFilter::AddUnique(
+                NativeFilter.TargetClasses, PinClass);
+        }
+        const UEdGraphSchema_K2* K2Schema = Cast<UEdGraphSchema_K2>(
+            Graph->GetSchema());
+        UEdGraphNode* OwningNode = SourcePin->GetOwningNodeUnchecked();
+        if (K2Schema && OwningNode)
+        {
+            if (UEdGraphPin* SelfPin = K2Schema->FindSelfPin(
+                    *OwningNode, EGPD_Input))
+            {
+                if (UClass* SelfClass = Cast<UClass>(
+                        SelfPin->PinType.PinSubCategoryObject.Get()))
+                {
+                    FBlueprintActionFilter::AddUnique(
+                        NativeFilter.TargetClasses, SelfClass);
+                }
+            }
+        }
     }
     if (Blueprint->SkeletonGeneratedClass)
     {
@@ -1247,7 +1342,9 @@ TSharedRef<FJsonObject> SerializeCard(
     Card->SetBoolField(TEXT("compatible"), true);
     Card->SetStringField(
         TEXT("compatibility_summary"),
-        TEXT("Available in the requested graph context."));
+        Context.SourcePinId.IsEmpty()
+            ? TEXT("Available in the requested graph context.")
+            : TEXT("Compatible according to the current native action filter."));
     Card->SetBoolField(
         TEXT("requires_binding"), !Candidate.BindingDetails.IsEmpty());
     TArray<TSharedPtr<FJsonValue>> Bindings;
@@ -1649,9 +1746,19 @@ FString UMCPythonHelper::DescribeBlueprintNodeAction(
             TEXT("The action's stored search context is no longer valid."),
             TEXT("Repeat palette search."));
     }
+    UEdGraphPin* SourcePin = nullptr;
+    if (!ResolveActionSourcePin(
+            Blueprint,
+            Graph,
+            ActionRecord.Context.SourcePinId,
+            SourcePin,
+            Error))
+    {
+        return Failure(Error);
+    }
     TArray<FPaletteCandidate> Candidates;
     BuildCandidates(
-        Blueprint, Graph, nullptr, ActionRecord.Query, Filters, Candidates);
+        Blueprint, Graph, SourcePin, ActionRecord.Query, Filters, Candidates);
     if (ResultDigest(Candidates) != ActionRecord.Context.ResultDigest)
     {
         return Failure(
@@ -1978,11 +2085,71 @@ FString UMCPythonHelper::SuggestBlueprintNodesForPin(
     UBlueprint* Blueprint,
     const FString& RequestJson)
 {
-    (void)Blueprint;
-    (void)RequestJson;
+#if UE_VERSION_NEWER_THAN(5, 7, 99) || UE_VERSION_OLDER_THAN(5, 7, 0)
     return Failure(
         TEXT("UE_VERSION_UNSUPPORTED"),
         TEXT("params.pin_id"),
-        TEXT("Pin-context Blueprint palette suggestions are not available in this adapter phase."),
-        TEXT("Use graph-context palette search until the pin adapter is installed."));
+        TEXT("Pin-context Blueprint palette suggestions are not validated for this Unreal Engine version."),
+        TEXT("Use the validated UE 5.7 adapter or add an explicit compatibility guard."));
+#else
+    if (!Blueprint)
+    {
+        return Failure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.asset_path"),
+            TEXT("A loaded Blueprint asset is required."),
+            TEXT("Pass a valid Blueprint asset path."));
+    }
+
+    FPaletteRequest Request;
+    FString PinId;
+    FError Error;
+    if (!ParseSuggestionRequest(RequestJson, Request, PinId, Error))
+    {
+        return Failure(Error);
+    }
+
+    UEdGraph* Graph = nullptr;
+    if (!ResolveStableGraph(
+            Blueprint, Request.GraphId, Graph, Error, false))
+    {
+        return Failure(Error);
+    }
+
+    FTargetRef PinTarget;
+    PinTarget.Id = PinId;
+    FString ResolveError;
+    const FResolvedTarget Resolved = ResolveTarget(
+        Blueprint, ETargetKind::Pin, PinTarget, ResolveError);
+    if (!Resolved.Pin || !Resolved.Node || !Resolved.bStable)
+    {
+        return Failure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.pin_id"),
+            ResolveError.IsEmpty()
+                ? TEXT("A stable pin_id is required.")
+                : ResolveError,
+            TEXT("Inspect the Blueprint and use a current stable pin ID."));
+    }
+    if (Resolved.Node->GetGraph() != Graph)
+    {
+        return Failure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.pin_id"),
+            TEXT("The source pin does not belong to the requested graph."),
+            TEXT("Use a pin_id from graph_id and request new suggestions."));
+    }
+
+    const TSharedRef<FJsonObject> Data = SearchPalette(
+        Blueprint, Graph, Resolved.Pin, PinId, Request, Error);
+    if (!Error.Code.IsEmpty())
+    {
+        return Failure(Error);
+    }
+    return SerializeResult(MakeSuccess(
+        FString::Printf(
+            TEXT("Returned %d Blueprint actions compatible according to the current native action filter."),
+            Data->GetIntegerField(TEXT("returned_count"))),
+        Data));
+#endif
 }
