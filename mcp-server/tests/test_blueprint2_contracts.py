@@ -49,6 +49,17 @@ NEW_BLUEPRINT2_ACTIONS = {
     "get_blueprint_health",
     "snapshot_blueprint_graph",
     "diff_blueprint_graphs",
+    "search_blueprint_node_actions",
+    "describe_blueprint_node_action",
+    "add_blueprint_action_node",
+    "suggest_blueprint_nodes_for_pin",
+}
+
+PALETTE_ACTIONS = {
+    "search_blueprint_node_actions",
+    "describe_blueprint_node_action",
+    "add_blueprint_action_node",
+    "suggest_blueprint_nodes_for_pin",
 }
 
 
@@ -57,6 +68,9 @@ READ_ACTIONS = {
     "inspect_blueprint",
     "snapshot_blueprint_graph",
     "diff_blueprint_graphs",
+    "search_blueprint_node_actions",
+    "describe_blueprint_node_action",
+    "suggest_blueprint_nodes_for_pin",
 }
 
 WRITE_ACTIONS = {
@@ -73,6 +87,7 @@ WRITE_ACTIONS = {
     "set_blueprint_variable_metadata",
     "set_blueprint_variable_replication",
     "set_blueprint_component_transform",
+    "add_blueprint_action_node",
 }
 
 DESTRUCTIVE_ACTIONS = {
@@ -104,8 +119,73 @@ def test_blueprint2_actions_are_additive_and_registry_aligned():
     assert NEW_BLUEPRINT2_ACTIONS <= set(catalog["blueprint"])
     assert set(catalog["blueprint"]) == set(registry["blueprint"])
     # The 19 legacy Blueprint actions remain available alongside all 29 additions.
-    assert len(catalog["blueprint"]) == 48
-    assert sum(len(actions) for actions in catalog.values()) == 290
+    assert len(catalog["blueprint"]) == 52
+    assert sum(len(actions) for actions in catalog.values()) == 294
+
+
+def test_blueprint_palette_contracts_are_closed_bounded_and_opaque():
+    specs = _new_specs()
+    search = specs["search_blueprint_node_actions"]["input_schema"]
+    describe = specs["describe_blueprint_node_action"]["input_schema"]
+    spawn = specs["add_blueprint_action_node"]["input_schema"]
+    suggest = specs["suggest_blueprint_nodes_for_pin"]["input_schema"]
+
+    assert search["required"] == ["asset_path", "graph_id"]
+    assert search["properties"]["limit"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200,
+        "default": 50,
+    }
+    assert search["properties"]["filters"]["additionalProperties"] is False
+    assert describe["required"] == ["action_id"]
+    assert spawn["required"] == [
+        "asset_path",
+        "graph_id",
+        "action_id",
+        "position",
+    ]
+    assert suggest["required"] == ["asset_path", "graph_id", "pin_id"]
+    assert spawn["properties"]["action_id"]["pattern"] == (
+        r"^action:[0-9a-f]{40}$"
+    )
+    assert spawn["properties"]["bindings"]["maxItems"] == 32
+
+    for action in PALETTE_ACTIONS:
+        Draft202012Validator.check_schema(specs[action]["input_schema"])
+        Draft202012Validator.check_schema(specs[action]["output_schema"])
+
+    search_data = specs["search_blueprint_node_actions"]["output_schema"][
+        "allOf"
+    ][0]["then"]["properties"]["data"]
+    assert search_data["additionalProperties"] is False
+    assert search_data["required"] == [
+        "asset_path",
+        "graph_id",
+        "source_pin_id",
+        "items",
+        "total_count",
+        "returned_count",
+        "next_cursor",
+        "result_digest",
+    ]
+    card = search_data["properties"]["items"]["items"]
+    assert card["additionalProperties"] is False
+    assert set(card["required"]) == {
+        "action_id",
+        "title",
+        "category",
+        "keywords",
+        "action_kind",
+        "node_class_path",
+        "owner_path",
+        "member_path",
+        "pure",
+        "compatible",
+        "compatibility_summary",
+        "requires_binding",
+        "bindings",
+    }
 
 
 def test_canonical_blueprint_type_schema_is_exact_and_bounded():
@@ -882,9 +962,11 @@ def test_blueprint_brief_success_data_schema_is_strict():
                 "all_graphs_k2_schema": True,
                 "k2_schema": True,
                 "compiler_tokens": True,
-                "has_scs": True,
-                "scs_operations": True,
-            },
+                    "has_scs": True,
+                    "scs_operations": True,
+                    "supports_blueprint_node_palette": True,
+                    "has_palette_compatible_graphs": True,
+                },
         },
         "changes": [],
         "warnings": [],
@@ -1132,6 +1214,10 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
             "get_blueprint_health",
             "snapshot_blueprint_graph",
             "diff_blueprint_graphs",
+            "search_blueprint_node_actions",
+            "describe_blueprint_node_action",
+            "add_blueprint_action_node",
+            "suggest_blueprint_nodes_for_pin",
         }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()
@@ -1228,9 +1314,9 @@ def test_live_e2e_accounts_for_every_json_action():
     sweep_pair_set = set(sweep_pairs)
 
     assert excluded == {("vision", "capture_viewport")}
-    assert len(all_pairs) == 290
+    assert len(all_pairs) == 294
     assert len(sweep_pairs) == len(sweep_pair_set)
     assert sweep_pair_set.isdisjoint(excluded)
     assert sweep_pair_set | excluded == all_pairs
-    assert len(sweep_pair_set) == 289
+    assert len(sweep_pair_set) == 293
     assert "test_vision_capture_returns_image" in test_names

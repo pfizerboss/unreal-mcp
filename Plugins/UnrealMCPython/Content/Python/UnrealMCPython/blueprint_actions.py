@@ -702,6 +702,82 @@ def ue_inspect_blueprint(asset_path: str = None, queries: list[dict] = (),
     return blueprint2.call_asset_helper("inspect_blueprint", asset_path, request)
 
 
+def ue_search_blueprint_node_actions(
+    asset_path: str = None,
+    graph_id: str = None,
+    query: str = "",
+    filters: dict = None,
+    cursor: str = "",
+    limit: int = 50,
+) -> str:
+    """Search Unreal's native Blueprint action palette for one graph."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "query": query,
+        "filters": deepcopy(filters) if filters is not None else {},
+        "cursor": cursor,
+        "limit": limit,
+    }
+    return blueprint2.call_asset_helper(
+        "search_blueprint_node_actions", asset_path, request
+    )
+
+
+def ue_describe_blueprint_node_action(action_id: str = None) -> str:
+    """Describe one opaque Blueprint palette action."""
+    from UnrealMCPython import blueprint2
+
+    return blueprint2.call_json_helper(
+        "describe_blueprint_node_action", {"action_id": action_id}
+    )
+
+
+def ue_add_blueprint_action_node(
+    asset_path: str = None,
+    graph_id: str = None,
+    action_id: str = None,
+    position: dict = None,
+    bindings: list[str] = (),
+) -> str:
+    """Spawn one native palette action in a Blueprint graph."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "action_id": action_id,
+        "position": deepcopy(position),
+        "bindings": list(bindings),
+    }
+    return blueprint2.call_asset_helper(
+        "add_blueprint_action_node", asset_path, request
+    )
+
+
+def ue_suggest_blueprint_nodes_for_pin(
+    asset_path: str = None,
+    graph_id: str = None,
+    pin_id: str = None,
+    query: str = "",
+    cursor: str = "",
+    limit: int = 50,
+) -> str:
+    """Return native palette actions compatible with one stable pin."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "pin_id": pin_id,
+        "query": query,
+        "cursor": cursor,
+        "limit": limit,
+    }
+    return blueprint2.call_asset_helper(
+        "suggest_blueprint_nodes_for_pin", asset_path, request
+    )
+
+
 def ue_create_blueprint_function(asset_path: str = None, function_name: str = None,
                                        inputs: list = [], outputs: list = [],
                                        pure: bool = False, const: bool = False,

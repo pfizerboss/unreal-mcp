@@ -398,6 +398,8 @@ CAPABILITIES_DATA = _object(
         "compiler_tokens": {"type": "boolean"},
         "has_scs": {"type": "boolean"},
         "scs_operations": {"type": "boolean"},
+        "supports_blueprint_node_palette": {"type": "boolean"},
+        "has_palette_compatible_graphs": {"type": "boolean"},
     },
     (
         "api_version",
@@ -414,6 +416,8 @@ CAPABILITIES_DATA = _object(
         "compiler_tokens",
         "has_scs",
         "scs_operations",
+        "supports_blueprint_node_palette",
+        "has_palette_compatible_graphs",
     ),
 )
 BLUEPRINT_BRIEF_COUNTS = _object(
@@ -591,6 +595,7 @@ def _write(
     example_params: dict,
     *,
     idempotent: bool,
+    success_data_schema: dict | None = None,
 ) -> dict:
     return _spec(
         action,
@@ -603,6 +608,7 @@ def _write(
         supports_preview=True,
         supports_undo=True,
         requires_confirmation=True,
+        success_data_schema=success_data_schema,
     )
 
 
@@ -636,6 +642,185 @@ POSITION = _object(
         "y": {"type": "number", "minimum": -1_000_000_000, "maximum": 1_000_000_000},
     },
     ("x", "y"),
+)
+
+ACTION_ID = {"type": "string", "pattern": r"^action:[0-9a-f]{40}$"}
+BINDING_ID = {"type": "string", "pattern": r"^binding:[0-9a-f]{40}$"}
+SHA1_DIGEST = {"type": "string", "pattern": r"^sha1:[0-9a-f]{40}$"}
+PALETTE_CURSOR = {
+    "type": "string",
+    "maxLength": 4096,
+    "default": "",
+}
+PALETTE_LIMIT = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 200,
+    "default": 50,
+}
+PALETTE_QUERY = {"type": "string", "maxLength": 256, "default": ""}
+PALETTE_ACTION_KINDS = [
+    "function",
+    "event",
+    "variable",
+    "macro",
+    "delegate",
+    "cast",
+    "async",
+    "flow_control",
+    "operator",
+    "struct",
+    "other",
+]
+PALETTE_FILTERS = _object(
+    {
+        "action_kinds": _array(
+            {"type": "string", "enum": PALETTE_ACTION_KINDS},
+            maxItems=11,
+            uniqueItems=True,
+        ),
+        "categories": _array(
+            {"type": "string", "minLength": 1, "maxLength": 256},
+            maxItems=32,
+            uniqueItems=True,
+        ),
+        "owner_paths": _array(
+            {"type": "string", "minLength": 1, "maxLength": 1024},
+            maxItems=32,
+            uniqueItems=True,
+        ),
+        "pure_only": {"type": "boolean", "default": False},
+    }
+)
+PALETTE_FILTERS_WITH_DEFAULT = deepcopy(PALETTE_FILTERS)
+PALETTE_FILTERS_WITH_DEFAULT["default"] = {}
+
+PALETTE_BINDING = _object(
+    {
+        "binding_id": BINDING_ID,
+        "object_path": {"type": "string", "minLength": 1},
+        "class_path": {"type": "string", "minLength": 1},
+    },
+    ("binding_id", "object_path", "class_path"),
+)
+PALETTE_ACTION_CARD_REQUIRED = (
+    "action_id",
+    "title",
+    "category",
+    "keywords",
+    "action_kind",
+    "node_class_path",
+    "owner_path",
+    "member_path",
+    "pure",
+    "compatible",
+    "compatibility_summary",
+    "requires_binding",
+    "bindings",
+)
+PALETTE_ACTION_CARD_PROPERTIES = {
+    "action_id": ACTION_ID,
+    "title": {"type": "string", "minLength": 1},
+    "category": {"type": "string"},
+    "keywords": _array({"type": "string", "minLength": 1}, maxItems=128),
+    "action_kind": {"type": "string", "enum": PALETTE_ACTION_KINDS},
+    "node_class_path": {"type": "string", "minLength": 1},
+    "owner_path": {"type": "string"},
+    "member_path": {"type": "string"},
+    "pure": {"type": ["boolean", "null"]},
+    "compatible": {"type": "boolean", "const": True},
+    "compatibility_summary": {"type": "string", "minLength": 1},
+    "requires_binding": {"type": "boolean"},
+    "bindings": _array(PALETTE_BINDING, maxItems=32),
+}
+PALETTE_ACTION_CARD = _object(
+    PALETTE_ACTION_CARD_PROPERTIES,
+    PALETTE_ACTION_CARD_REQUIRED,
+)
+PALETTE_PAGE_DATA = _object(
+    {
+        "asset_path": ASSET_PATH,
+        "graph_id": GRAPH_ID,
+        "source_pin_id": {"anyOf": [deepcopy(PIN_ID), {"type": "null"}]},
+        "items": _array(PALETTE_ACTION_CARD, maxItems=200),
+        "total_count": {"type": "integer", "minimum": 0},
+        "returned_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 200,
+        },
+        "next_cursor": {"type": "string", "maxLength": 4096},
+        "result_digest": SHA1_DIGEST,
+    },
+    (
+        "asset_path",
+        "graph_id",
+        "source_pin_id",
+        "items",
+        "total_count",
+        "returned_count",
+        "next_cursor",
+        "result_digest",
+    ),
+)
+PALETTE_PIN_PREVIEW = _object(
+    {
+        "name": {"type": "string"},
+        "direction": {"type": "string", "enum": ["input", "output"]},
+        "type": SNAPSHOT_PIN_TYPE,
+        "default": {},
+    },
+    ("name", "direction", "type", "default"),
+)
+PALETTE_DESCRIBE_DATA = _object(
+    {
+        "asset_path": ASSET_PATH,
+        "graph_id": GRAPH_ID,
+        "source_pin_id": {"anyOf": [deepcopy(PIN_ID), {"type": "null"}]},
+        **deepcopy(PALETTE_ACTION_CARD_PROPERTIES),
+        "tooltip": {"type": "string"},
+        "documentation_link": {"type": "string"},
+        "documentation_excerpt": {"type": "string"},
+        "restrictions": _array({"type": "string", "minLength": 1}),
+        "pin_preview_available": {"type": "boolean"},
+        "template_pins": _array(PALETTE_PIN_PREVIEW, maxItems=256),
+    },
+    (
+        "asset_path",
+        "graph_id",
+        "source_pin_id",
+        *PALETTE_ACTION_CARD_REQUIRED,
+        "tooltip",
+        "documentation_link",
+        "documentation_excerpt",
+        "restrictions",
+        "pin_preview_available",
+        "template_pins",
+    ),
+)
+PALETTE_SPAWN_DATA = _object(
+    {
+        "asset_path": ASSET_PATH,
+        "graph_id": GRAPH_ID,
+        "action_id": ACTION_ID,
+        "node_id": NODE_ID,
+        "class_path": {"type": "string", "minLength": 1},
+        "position": POSITION,
+        "pin_ids": _array(PIN_ID, maxItems=256, uniqueItems=True),
+        "pins": _array(SNAPSHOT_PIN, maxItems=256),
+        "auxiliary_node_ids": _array(NODE_ID, maxItems=256, uniqueItems=True),
+    },
+    (
+        "asset_path",
+        "graph_id",
+        "action_id",
+        "node_id",
+        "class_path",
+        "position",
+        "pin_ids",
+        "pins",
+        "auxiliary_node_ids",
+    ),
 )
 
 INSPECT_OPS = [
@@ -748,6 +933,87 @@ BLUEPRINT2_ACTION_SPECS = {
             "asset_path": "/Game/BP_Player",
             "queries": [{"op": "functions", "limit": 100}],
         },
+    ),
+    "search_blueprint_node_actions": _read(
+        "search_blueprint_node_actions",
+        "Search Unreal's native Blueprint action palette for one graph.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "query": PALETTE_QUERY,
+                "filters": PALETTE_FILTERS_WITH_DEFAULT,
+                "cursor": PALETTE_CURSOR,
+                "limit": PALETTE_LIMIT,
+            },
+            ("asset_path", "graph_id"),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "query": "Get Actor Location",
+            "filters": {"action_kinds": ["function"], "pure_only": True},
+            "limit": 50,
+        },
+        success_data_schema=PALETTE_PAGE_DATA,
+    ),
+    "describe_blueprint_node_action": _read(
+        "describe_blueprint_node_action",
+        "Describe one opaque Blueprint palette action.",
+        _object({"action_id": ACTION_ID}, ("action_id",)),
+        {"action_id": "action:0123456789abcdef0123456789abcdef01234567"},
+        success_data_schema=PALETTE_DESCRIBE_DATA,
+    ),
+    "add_blueprint_action_node": _write(
+        "add_blueprint_action_node",
+        "Spawn one native palette action in a Blueprint graph.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "action_id": ACTION_ID,
+                "position": POSITION,
+                "bindings": _array(
+                    BINDING_ID,
+                    maxItems=32,
+                    uniqueItems=True,
+                    default=[],
+                ),
+            },
+            ("asset_path", "graph_id", "action_id", "position"),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "action_id": "action:0123456789abcdef0123456789abcdef01234567",
+            "position": {"x": 320, "y": 160},
+            "bindings": [],
+        },
+        idempotent=False,
+        success_data_schema=PALETTE_SPAWN_DATA,
+    ),
+    "suggest_blueprint_nodes_for_pin": _read(
+        "suggest_blueprint_nodes_for_pin",
+        "Return native palette actions compatible with one stable pin.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "pin_id": PIN_ID,
+                "query": PALETTE_QUERY,
+                "cursor": PALETTE_CURSOR,
+                "limit": PALETTE_LIMIT,
+            },
+            ("asset_path", "graph_id", "pin_id"),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "query": "Branch",
+            "limit": 50,
+        },
+        success_data_schema=PALETTE_PAGE_DATA,
     ),
     "create_blueprint_function": _write(
         "create_blueprint_function",

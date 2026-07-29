@@ -179,6 +179,109 @@ def test_rename_blueprint_variable(monkeypatch):
     ]
 
 
+def test_search_blueprint_node_actions_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_search_blueprint_node_actions(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        query="Get Actor Location",
+        filters={"action_kinds": ["function"], "pure_only": True},
+        cursor="palette-cursor:page-two",
+        limit=25,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "search_blueprint_node_actions",
+            "/Game/BP.BP",
+            {
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "query": "Get Actor Location",
+                "filters": {
+                    "action_kinds": ["function"],
+                    "pure_only": True,
+                },
+                "cursor": "palette-cursor:page-two",
+                "limit": 25,
+            },
+        )
+    ]
+
+
+def test_describe_blueprint_node_action_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_describe_blueprint_node_action(
+        action_id="action:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "describe_blueprint_node_action",
+            {"action_id": "action:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        )
+    ]
+
+
+def test_add_blueprint_action_node_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_add_blueprint_action_node(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        action_id="action:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        position={"x": 320, "y": 160},
+        bindings=["binding:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "add_blueprint_action_node",
+            "/Game/BP.BP",
+            {
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "action_id": "action:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "position": {"x": 320, "y": 160},
+                "bindings": [
+                    "binding:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                ],
+            },
+        )
+    ]
+
+
+def test_suggest_blueprint_nodes_for_pin_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_suggest_blueprint_nodes_for_pin(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        pin_id="pin:22222222-2222-4222-8222-222222222222",
+        query="Branch",
+        cursor="palette-cursor:page-two",
+        limit=10,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "suggest_blueprint_nodes_for_pin",
+            "/Game/BP.BP",
+            {
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "pin_id": "pin:22222222-2222-4222-8222-222222222222",
+                "query": "Branch",
+                "cursor": "palette-cursor:page-two",
+                "limit": 10,
+            },
+        )
+    ]
+
+
 def test_remove_blueprint_variable(monkeypatch):
     module, calls = _load_variable_wrapper(monkeypatch)
 

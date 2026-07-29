@@ -90,7 +90,7 @@ def test_all_blueprint_actions_are_referenced_by_split_editor_suites():
     actions = set(CATALOG["blueprint"])
     referenced = _referenced("blueprint")
 
-    assert len(actions) == 48
+    assert len(actions) == 52
     assert actions <= referenced
     assert not KNOWN_UNTESTED.get("blueprint")
 

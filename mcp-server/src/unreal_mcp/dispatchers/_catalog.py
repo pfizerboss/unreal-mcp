@@ -375,6 +375,10 @@ CATALOG = {
         },
     },
     'blueprint': {
+        'add_blueprint_action_node': {
+            'params': 'asset_path, graph_id, action_id, position, bindings=()',
+            'doc': 'Spawn one native palette action in a Blueprint graph.',
+        },
         'add_blueprint_interface': {
             'params': 'asset_path, interface_path',
             'doc': 'Adds a Blueprint interface by full Unreal object path.',
@@ -442,6 +446,10 @@ CATALOG = {
         'delete_custom_event': {
             'params': "asset_path, event_id, allow_name_fallback=False, event_name='', owner_graph_id='', event_type_path=''",
             'doc': 'Deletes a custom event targeted by stable ID.',
+        },
+        'describe_blueprint_node_action': {
+            'params': 'action_id',
+            'doc': 'Describe one opaque Blueprint palette action.',
         },
         'diff_blueprint_graphs': {
             'params': 'before_snapshot, after_snapshot, queries=()',
@@ -527,6 +535,10 @@ CATALOG = {
             'params': 'asset_path, component_id, parent_component_id',
             'doc': 'Reparents an SCS component using stable component IDs.',
         },
+        'search_blueprint_node_actions': {
+            'params': "asset_path, graph_id, query='', filters, cursor='', limit=50",
+            'doc': "Search Unreal's native Blueprint action palette for one graph.",
+        },
         'set_blueprint_component_transform': {
             'params': 'asset_path, component_id, transform',
             'doc': 'Sets bounded relative transform fields on an SCS component.',
@@ -566,6 +578,10 @@ CATALOG = {
         'snapshot_blueprint_graph': {
             'params': 'asset_path, graph_ids=()',
             'doc': 'Returns a deterministic compact graph snapshot ordered by stable ID.',
+        },
+        'suggest_blueprint_nodes_for_pin': {
+            'params': "asset_path, graph_id, pin_id, query='', cursor='', limit=50",
+            'doc': 'Return native palette actions compatible with one stable pin.',
         },
     },
     'control_rig': {
