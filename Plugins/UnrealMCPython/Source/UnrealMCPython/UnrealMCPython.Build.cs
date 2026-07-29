@@ -7,6 +7,7 @@ public class UnrealMCPython : ModuleRules
 	public UnrealMCPython(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+		bUseUnity = false;
 		
 		PublicIncludePaths.AddRange(
 			new string[] {

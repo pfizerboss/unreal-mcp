@@ -409,7 +409,7 @@ CATALOG = {
         },
         'compile_blueprint': {
             'params': 'asset_path',
-            'doc': 'Compiles a Blueprint and returns the result.',
+            'doc': 'Compiles a Blueprint with stable structured compiler diagnostics and recovery actions.',
         },
         'connect_blueprint_pins': {
             'params': "asset_path, graph_name='EventGraph', source_node, source_pin, target_node, target_pin",

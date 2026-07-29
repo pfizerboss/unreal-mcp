@@ -45,6 +45,8 @@ INSPECTION_SOURCE = PRIVATE / "MCPythonHelper_BlueprintInspection.cpp"
 GRAPH_SOURCE = PRIVATE / "MCPythonHelper_BlueprintGraph.cpp"
 VARIABLE_SOURCE = PRIVATE / "MCPythonHelper_BlueprintVariables.cpp"
 COMPONENT_SOURCE = PRIVATE / "MCPythonHelper_BlueprintComponents.cpp"
+DIAGNOSTICS_SOURCE = PRIVATE / "MCPythonHelper_BlueprintDiagnostics.cpp"
+BUILD_SOURCE = PRIVATE.parent / "UnrealMCPython.Build.cs"
 BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
 EDITOR_TESTS = (
     ROOT
@@ -1334,6 +1336,60 @@ def test_component_authoring_is_transactional_safe_and_never_compiles_or_saves()
     for body in component_wrappers:
         assert "save_asset(" not in body
         assert "compile_blueprint(" not in body
+
+
+def test_compile_blueprint_uses_structured_diagnostics_without_saving():
+    assert DIAGNOSTICS_SOURCE.exists(), "Task 14 diagnostic helper is missing"
+    source = DIAGNOSTICS_SOURCE.read_text(encoding="utf-8")
+    legacy_source = HELPER_SOURCE.read_text(encoding="utf-8")
+    runner = EDITOR_RUN_ALL.read_text(encoding="utf-8")
+    actions = BLUEPRINT_ACTIONS.read_text(encoding="utf-8")
+
+    assert "UMCPythonHelper::CompileBlueprint" not in legacy_source
+    assert "UMCPythonHelper::CompileBlueprint" in source
+    for contract in (
+        "FCompilerResultsLog",
+        "bSilentMode",
+        "bAnnotateMentionedNodes",
+        "EBlueprintCompileOptions::None",
+        "Results.Messages",
+        "FEdGraphToken",
+        "GetMessageTokens",
+        "GetPin",
+        "GetGraphObject",
+        "DescribeGraphTarget",
+        "DescribeNodeTarget",
+        "DescribePinTarget",
+        "BP_MISSING_REQUIRED_PIN",
+        "BP_UNRESOLVED_MEMBER",
+        "BP_TYPE_MISMATCH",
+        "BP_DUPLICATE_MEMBER",
+        "BP_POSSIBLE_NULL_ACCESS",
+        "BP_COMPILE_ERROR",
+        "BP_COMPILE_WARNING",
+        "BS_UpToDateWithWarnings",
+        "COMPILE_FAILED",
+        'TEXT("diagnostics")',
+        'TEXT("result_status")',
+        'TEXT("error_count")',
+        'TEXT("warning_count")',
+        'TEXT("next_actions")',
+    ):
+        assert contract in source
+    for forbidden in ("SavePackage(", "save_asset(", "FMutationScope"):
+        assert forbidden not in source
+    assert "UnrealMCPython.tests.test_blueprint2_diagnostics" in runner
+    compile_wrapper = actions[
+        actions.index("def ue_compile_blueprint") :
+        actions.index("# ─── Component Management")
+    ]
+    assert "stable structured compiler diagnostics" in compile_wrapper
+
+
+def test_blueprint_helpers_compile_as_isolated_translation_units():
+    build_source = BUILD_SOURCE.read_text(encoding="utf-8")
+
+    assert "bUseUnity = false;" in build_source
 
 
 def test_cpp_core_uses_persisted_guids_bounded_owners_and_guarded_undo():

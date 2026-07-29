@@ -226,37 +226,6 @@ TArray<FMCPythonBlueprintNodeInfo> UMCPythonHelper::GetSelectedBlueprintNodeInfo
 
 // ─── CompileBlueprint UFUNCTION ──────────────────────────────────────────────
 
-FString UMCPythonHelper::CompileBlueprint(UBlueprint* Blueprint)
-{
-    if (!Blueprint)
-        return MakeJsonError(TEXT("Invalid Blueprint."));
-
-    FKismetEditorUtilities::CompileBlueprint(Blueprint);
-
-    // Check compile status
-    bool bHasError = (Blueprint->Status == BS_Error);
-    bool bUpToDate = (Blueprint->Status == BS_UpToDate);
-
-    TSharedPtr<FJsonObject> Result = MakeShareable(new FJsonObject());
-    Result->SetBoolField(TEXT("success"), !bHasError);
-
-    FString StatusStr;
-    switch (Blueprint->Status)
-    {
-    case BS_UpToDate: StatusStr = TEXT("UpToDate"); break;
-    case BS_Error: StatusStr = TEXT("Error"); break;
-    case BS_Dirty: StatusStr = TEXT("Dirty"); break;
-    case BS_BeingCreated: StatusStr = TEXT("BeingCreated"); break;
-    default: StatusStr = TEXT("Unknown"); break;
-    }
-    Result->SetStringField(TEXT("status"), StatusStr);
-    Result->SetStringField(TEXT("message"),
-        bHasError ? TEXT("Blueprint compilation failed. Check the output log for details.")
-                  : TEXT("Blueprint compiled successfully."));
-
-    return SerializeJsonObj(Result);
-}
-
 // ─── SetBlueprintCDOProperty UFUNCTION ───────────────────────────────────────
 
 FString UMCPythonHelper::SetBlueprintCDOProperty(UBlueprint* Blueprint, const FString& PropertyName, const FString& ValueStr)

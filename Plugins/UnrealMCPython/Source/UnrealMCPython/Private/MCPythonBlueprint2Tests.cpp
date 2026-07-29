@@ -10,6 +10,7 @@
 #include "Components/SceneComponent.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphNodeUtils.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
@@ -20,7 +21,10 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "K2Node_CallDelegate.h"
+#include "K2Node_CallFunction.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_IfThenElse.h"
+#include "Kismet/KismetMathLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
@@ -1265,6 +1269,144 @@ bool FMCPythonBlueprint2BriefCountsTest::RunTest(const FString& Parameters)
                 Interface->GetStringField(TEXT("class_path")),
                 UInterface::StaticClass()->GetPathName());
         }
+    }
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2CompileDiagnosticsTest,
+    "UnrealMCPython.Blueprint2.CompileDiagnostics",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2CompileDiagnosticsTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+
+    const FString Root = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    UPackage* Package = CreatePackage(
+        *FString::Printf(TEXT("%s/CompileDiagnostics"), *Root));
+    const TArray<UPackage*> FixturePackages = {Package};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+    UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        Package,
+        TEXT("BP_CompileDiagnostics"),
+        BPTYPE_Normal,
+        TEXT("MCPythonBlueprint2CompileDiagnosticsTest"));
+    TestNotNull(TEXT("Compile diagnostic fixture Blueprint is created"), Blueprint);
+    if (!Blueprint || Blueprint->UbergraphPages.IsEmpty())
+    {
+        return false;
+    }
+    UEdGraph* Graph = Blueprint->UbergraphPages[0];
+
+    FGraphNodeCreator<UK2Node_CustomEvent> EventCreator(*Graph);
+    UK2Node_CustomEvent* Event = EventCreator.CreateNode(false);
+    Event->CustomFunctionName = TEXT("RunCompileDiagnosticFixture");
+    Event->NodePosX = -160;
+    Event->NodePosY = 160;
+    EventCreator.Finalize();
+
+    FGraphNodeCreator<UK2Node_CallFunction> SourceCreator(*Graph);
+    UK2Node_CallFunction* Source = SourceCreator.CreateNode(false);
+    Source->FunctionReference.SetExternalMember(
+        GET_FUNCTION_NAME_CHECKED(UKismetMathLibrary, RandomInteger),
+        UKismetMathLibrary::StaticClass());
+    Source->NodePosX = 160;
+    Source->NodePosY = 160;
+    SourceCreator.Finalize();
+
+    FGraphNodeCreator<UK2Node_IfThenElse> BranchCreator(*Graph);
+    UK2Node_IfThenElse* Branch = BranchCreator.CreateNode(false);
+    Branch->NodePosX = 480;
+    Branch->NodePosY = 160;
+    BranchCreator.Finalize();
+
+    UEdGraphPin* IntegerOutput = Source->FindPin(
+        UEdGraphSchema_K2::PN_ReturnValue,
+        EGPD_Output);
+    UEdGraphPin* BooleanInput = Branch->GetConditionPin();
+    UEdGraphPin* EventOutput = Event->FindPin(
+        UEdGraphSchema_K2::PN_Then,
+        EGPD_Output);
+    UEdGraphPin* BranchInput = Branch->FindPin(
+        UEdGraphSchema_K2::PN_Execute,
+        EGPD_Input);
+    TestNotNull(TEXT("Type mismatch source pin exists"), IntegerOutput);
+    TestNotNull(TEXT("Type mismatch target pin exists"), BooleanInput);
+    TestNotNull(TEXT("Diagnostic event output pin exists"), EventOutput);
+    TestNotNull(TEXT("Diagnostic branch input pin exists"), BranchInput);
+    if (!IntegerOutput || !BooleanInput || !EventOutput || !BranchInput)
+    {
+        return false;
+    }
+    EventOutput->MakeLinkTo(BranchInput);
+    IntegerOutput->MakeLinkTo(BooleanInput);
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const FString ResponseJson = UMCPythonHelper::CompileBlueprint(Blueprint);
+    const TSharedPtr<FJsonObject> Response = ParseJsonObject(ResponseJson);
+    TestNotNull(TEXT("Compile diagnostic response is JSON"), Response.Get());
+    if (!Response)
+    {
+        return false;
+    }
+    TestFalse(
+        TEXT("Incompatible pins fail Blueprint compilation"),
+        Response->GetBoolField(TEXT("success")));
+    TestEqualSensitive(
+        TEXT("Compile failure preserves the legacy status"),
+        Response->GetStringField(TEXT("status")),
+        TEXT("Error"));
+    const TArray<TSharedPtr<FJsonValue>>* Diagnostics = nullptr;
+    TestTrue(
+        TEXT("Compile response contains structured diagnostics"),
+        Response->TryGetArrayField(TEXT("diagnostics"), Diagnostics) &&
+            Diagnostics);
+    if (!Diagnostics)
+    {
+        return false;
+    }
+    const TSharedPtr<FJsonValue>* TypeMismatchValue = Diagnostics->FindByPredicate(
+        [](const TSharedPtr<FJsonValue>& Value)
+        {
+            const TSharedPtr<FJsonObject> Diagnostic =
+                Value.IsValid() ? Value->AsObject() : nullptr;
+            return Diagnostic &&
+                Diagnostic->GetStringField(TEXT("code")) ==
+                    TEXT("BP_TYPE_MISMATCH");
+        });
+    TestTrue(
+        TEXT("Incompatible pins emit BP_TYPE_MISMATCH"),
+        TypeMismatchValue != nullptr);
+    if (!TypeMismatchValue)
+    {
+        AddError(FString::Printf(
+            TEXT("Compile diagnostics response: %s"), *ResponseJson));
+    }
+    if (TypeMismatchValue)
+    {
+        const TSharedPtr<FJsonObject> TypeMismatch =
+            (*TypeMismatchValue)->AsObject();
+        TestEqualSensitive(
+            TEXT("Type mismatch diagnostic targets the source graph"),
+            TypeMismatch->GetStringField(TEXT("graph_id")),
+            UE::MCPython::Blueprint2::DescribeGraphTarget(Blueprint, Graph).Id);
+        TestTrue(
+            TEXT("Type mismatch diagnostic includes a stable node ID"),
+            TypeMismatch->GetStringField(TEXT("node_id")).StartsWith(
+                TEXT("node:")));
+        TestTrue(
+            TEXT("Type mismatch diagnostic includes a stable pin ID"),
+            TypeMismatch->GetStringField(TEXT("pin_id")).StartsWith(
+                TEXT("pin:")));
     }
 
     return true;

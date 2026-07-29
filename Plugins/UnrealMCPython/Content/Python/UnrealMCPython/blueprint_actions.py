@@ -366,7 +366,7 @@ def ue_build_blueprint_graph(asset_path: str = None, graph_name: str = "EventGra
 
 
 def ue_compile_blueprint(asset_path: str = None) -> str:
-    """Compiles a Blueprint and returns the result."""
+    """Compiles a Blueprint with stable structured compiler diagnostics and recovery actions."""
     if asset_path is None:
         return json.dumps({"success": False, "message": "Required parameter 'asset_path' is missing."})
     try:
@@ -1209,7 +1209,7 @@ ACTION_METADATA = {'add_blueprint_node': {'asset_path_params': ['asset_path'],
                            'title': 'Build Blueprint Graph',
                            'ue_versions': ['5.6', '5.7', '5.8']},
  'compile_blueprint': {'asset_path_params': ['asset_path'],
-                       'description': 'Compiles a Blueprint and returns the result.',
+                       'description': 'Compiles a Blueprint with stable structured compiler diagnostics and recovery actions.',
                        'effect': 'write',
                        'idempotent': False,
                        'required_plugins': [],
