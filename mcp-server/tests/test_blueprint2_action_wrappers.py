@@ -376,6 +376,74 @@ def test_set_blueprint_component_transform_copies_input(monkeypatch):
     assert calls[0][2]["transform"] is not transform
 
 
+def test_get_blueprint_health_calls_native_helper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_get_blueprint_health(
+        asset_path="/Game/BP.BP",
+        include_warnings=True,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "get_blueprint_health",
+            "/Game/BP.BP",
+            None,
+        )
+    ]
+
+
+def test_get_blueprint_health_can_hide_warning_records(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    native_result = {
+        "success": True,
+        "status": "succeeded",
+        "summary": "health complete",
+        "data": {
+            "healthy": False,
+            "issue_count": 2,
+            "error_count": 1,
+            "warning_count": 1,
+            "issues": [
+                {"code": "BP_COMPILE_WARNING", "severity": "warning"},
+                {"code": "BP_DUPLICATE_MEMBER", "severity": "error"},
+            ],
+        },
+        "warnings": [{"code": "BP_COMPILE_WARNING"}],
+        "errors": [],
+        "next_actions": [],
+        "trace_id": "health-trace",
+    }
+
+    def call_asset_helper(helper_name, asset_path, request=None):
+        calls.append((helper_name, asset_path, request))
+        return json.dumps(native_result, separators=(",", ":"))
+
+    monkeypatch.setattr(
+        sys.modules["UnrealMCPython.blueprint2"],
+        "call_asset_helper",
+        call_asset_helper,
+    )
+
+    result = json.loads(
+        module.ue_get_blueprint_health(
+            asset_path="/Game/BP.BP",
+            include_warnings=False,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["data"]["healthy"] is False
+    assert result["data"]["issues"] == [
+        {"code": "BP_DUPLICATE_MEMBER", "severity": "error"}
+    ]
+    assert result["data"]["issue_count"] == 1
+    assert result["data"]["error_count"] == 1
+    assert result["data"]["warning_count"] == 0
+    assert result["warnings"] == []
+
+
 def test_load_blueprint_accepts_blueprint_subclasses(monkeypatch):
     module, calls, loaded, _ = _load(monkeypatch)
 
@@ -1384,6 +1452,54 @@ def test_compile_blueprint_uses_structured_diagnostics_without_saving():
         actions.index("# ─── Component Management")
     ]
     assert "stable structured compiler diagnostics" in compile_wrapper
+
+
+def test_blueprint_health_compiles_once_and_checks_structural_invariants():
+    source = DIAGNOSTICS_SOURCE.read_text(encoding="utf-8")
+    header = HELPER_HEADER.read_text(encoding="utf-8")
+    actions = BLUEPRINT_ACTIONS.read_text(encoding="utf-8")
+
+    assert (
+        "static FString GetBlueprintHealth(UBlueprint* Blueprint);" in header
+    )
+    health_body = source[source.index("FString UMCPythonHelper::GetBlueprintHealth") :]
+    assert health_body.count("CompileBlueprint(Blueprint)") == 1
+    assert "FKismetEditorUtilities::CompileBlueprint" not in health_body
+    for contract in (
+        "CollectStructuralHealthIssues",
+        "DefaultValueSimpleValidation",
+        "IsPinDefaultValid",
+        "GetTargetFunction",
+        "ResolveMember<FProperty>",
+        "FindOverrideForFunction",
+        "NormalizeHealthIssues",
+        "GetAllNodes",
+        "GetRootNodes",
+        "GetChildNodes",
+        "BP_MISSING_REQUIRED_PIN",
+        "BP_UNRESOLVED_MEMBER",
+        "BP_MISSING_INTERFACE_IMPLEMENTATION",
+        "BP_DUPLICATE_MEMBER",
+        "BP_INVALID_VARIABLE_DEFAULT",
+        "BP_INVALID_OBJECT_DEFAULT",
+        "BP_INVALID_CLASS_DEFAULT",
+        "BP_SCS_CYCLE",
+        "BP_SCS_ORPHAN",
+        "BP_SCS_NODE_MISSING_FROM_ALL_NODES",
+        "BP_SCS_DUPLICATE_GUID",
+        "BP_SCS_MULTIPLE_PARENTS",
+    ):
+        assert contract in source
+    for forbidden in ("FMutationScope", "SavePackage(", "save_asset("):
+        assert forbidden not in health_body
+
+    wrapper = actions[
+        actions.index("def ue_get_blueprint_health") :
+        actions.index("def ue_snapshot_blueprint_graph")
+    ]
+    assert 'call_asset_helper("get_blueprint_health", asset_path)' not in wrapper
+    assert '"get_blueprint_health", asset_path' in wrapper
+    assert 'issue.get("severity") != "warning"' in wrapper
 
 
 def test_blueprint_helpers_compile_as_isolated_translation_units():

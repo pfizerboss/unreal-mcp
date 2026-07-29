@@ -7,6 +7,7 @@
 
 #include "Dom/JsonObject.h"
 #include "AI/Navigation/NavAgentInterface.h"
+#include "Audio/SoundSubmixWidgetInterface.h"
 #include "Components/SceneComponent.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
@@ -24,6 +25,7 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_IfThenElse.h"
+#include "K2Node_VariableGet.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
@@ -1408,6 +1410,579 @@ bool FMCPythonBlueprint2CompileDiagnosticsTest::RunTest(
             TypeMismatch->GetStringField(TEXT("pin_id")).StartsWith(
                 TEXT("pin:")));
     }
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2HealthStructuralTest,
+    "UnrealMCPython.Blueprint2.HealthStructural",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2HealthStructuralTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+
+    const FString Root = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    UPackage* Package = CreatePackage(
+        *FString::Printf(TEXT("%s/HealthStructural"), *Root));
+    const TArray<UPackage*> FixturePackages = {Package};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+    UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        Package,
+        TEXT("BP_HealthStructural"),
+        BPTYPE_Normal,
+        TEXT("MCPythonBlueprint2HealthStructuralTest"));
+    TestNotNull(TEXT("Health fixture Blueprint is created"), Blueprint);
+    if (!Blueprint || !Blueprint->SimpleConstructionScript)
+    {
+        return false;
+    }
+
+    USCS_Node* First = Blueprint->SimpleConstructionScript->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthFirst"));
+    USCS_Node* Second = Blueprint->SimpleConstructionScript->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthSecond"));
+    Blueprint->SimpleConstructionScript->AddNode(First);
+    Blueprint->SimpleConstructionScript->AddNode(Second);
+    const FGuid DuplicateGuid = FGuid::NewGuid();
+    First->VariableGuid = DuplicateGuid;
+    Second->VariableGuid = DuplicateGuid;
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+    const FString ResponseJson = UMCPythonHelper::GetBlueprintHealth(Blueprint);
+    const TSharedPtr<FJsonObject> Response = ParseJsonObject(ResponseJson);
+    TestNotNull(TEXT("Health response is JSON"), Response.Get());
+    if (!Response)
+    {
+        return false;
+    }
+    const TSharedPtr<FJsonObject> Data = Response->GetObjectField(TEXT("data"));
+    const TArray<TSharedPtr<FJsonValue>>& Issues =
+        Data->GetArrayField(TEXT("issues"));
+    const TSharedPtr<FJsonValue>* DuplicateIssue = Issues.FindByPredicate(
+        [](const TSharedPtr<FJsonValue>& Value)
+        {
+            const TSharedPtr<FJsonObject> Issue =
+                Value.IsValid() ? Value->AsObject() : nullptr;
+            return Issue &&
+                Issue->GetStringField(TEXT("code")) ==
+                    TEXT("BP_SCS_DUPLICATE_GUID");
+        });
+    TestTrue(
+        TEXT("Duplicate SCS GUID emits BP_SCS_DUPLICATE_GUID"),
+        DuplicateIssue != nullptr);
+    if (DuplicateIssue)
+    {
+        const TSharedPtr<FJsonObject> Issue = (*DuplicateIssue)->AsObject();
+        TestEqualSensitive(
+            TEXT("Duplicate SCS GUID issue is an error"),
+            Issue->GetStringField(TEXT("severity")),
+            TEXT("error"));
+        TestTrue(
+            TEXT("Duplicate SCS GUID issue targets a stable component"),
+            Issue->GetStringField(TEXT("member_id")).StartsWith(
+                TEXT("component:")));
+    }
+    TestFalse(
+        TEXT("Duplicate SCS GUID makes the Blueprint unhealthy"),
+        Data->GetBoolField(TEXT("healthy")));
+
+    USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+    USCS_Node* ParentA = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthParentA"));
+    USCS_Node* ParentB = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthParentB"));
+    SCS->AddNode(ParentA);
+    SCS->AddNode(ParentB);
+
+    USCS_Node* SharedChild = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthSharedChild"));
+    ParentA->AddChildNode(SharedChild, true);
+    ParentB->AddChildNode(SharedChild, false);
+
+    USCS_Node* MissingFromAllNodes = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthMissingFromAllNodes"));
+    ParentA->AddChildNode(MissingFromAllNodes, false);
+
+    USCS_Node* Orphan = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthOrphan"));
+    ParentA->AddChildNode(Orphan, true);
+    ParentA->RemoveChildNode(Orphan, false);
+
+    USCS_Node* CycleA = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthCycleA"));
+    USCS_Node* CycleB = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HealthCycleB"));
+    SCS->AddNode(CycleA);
+    CycleA->AddChildNode(CycleB, true);
+    CycleB->AddChildNode(CycleA, false);
+
+    FBPVariableDescription CollisionVariable;
+    CollisionVariable.VarName = TEXT("healthfirst");
+    CollisionVariable.VarGuid = FGuid::NewGuid();
+    CollisionVariable.VarType.PinCategory = UEdGraphSchema_K2::PC_Int;
+    CollisionVariable.DefaultValue = TEXT("0");
+    Blueprint->NewVariables.Add(CollisionVariable);
+
+    FBPVariableDescription InvalidInteger;
+    InvalidInteger.VarName = TEXT("BrokenIntegerDefault");
+    InvalidInteger.VarGuid = FGuid::NewGuid();
+    InvalidInteger.VarType.PinCategory = UEdGraphSchema_K2::PC_Int;
+    InvalidInteger.DefaultValue = TEXT("not-an-integer");
+    Blueprint->NewVariables.Add(InvalidInteger);
+
+    FBPVariableDescription InvalidObject;
+    InvalidObject.VarName = TEXT("BrokenObjectDefault");
+    InvalidObject.VarGuid = FGuid::NewGuid();
+    InvalidObject.VarType.PinCategory = UEdGraphSchema_K2::PC_Object;
+    InvalidObject.VarType.PinSubCategoryObject = UObject::StaticClass();
+    InvalidObject.DefaultValue = TEXT("/Game/Missing.HealthObject");
+    Blueprint->NewVariables.Add(InvalidObject);
+
+    FBPVariableDescription InvalidClass;
+    InvalidClass.VarName = TEXT("BrokenClassDefault");
+    InvalidClass.VarGuid = FGuid::NewGuid();
+    InvalidClass.VarType.PinCategory = UEdGraphSchema_K2::PC_Class;
+    InvalidClass.VarType.PinSubCategoryObject = UObject::StaticClass();
+    InvalidClass.DefaultValue = TEXT("/Game/Missing.HealthClass_C");
+    Blueprint->NewVariables.Add(InvalidClass);
+
+    UEdGraph* Graph = Blueprint->UbergraphPages[0];
+    FGraphNodeCreator<UK2Node_CallFunction> MissingCallCreator(*Graph);
+    UK2Node_CallFunction* MissingCall = MissingCallCreator.CreateNode(false);
+    MissingCall->FunctionReference.SetSelfMember(TEXT("MissingHealthFunction"));
+    MissingCallCreator.Finalize();
+
+    FGraphNodeCreator<UK2Node_VariableGet> MissingVariableCreator(*Graph);
+    UK2Node_VariableGet* MissingVariable =
+        MissingVariableCreator.CreateNode(false);
+    MissingVariable->VariableReference.SetSelfMember(
+        TEXT("MissingHealthVariable"));
+    MissingVariableCreator.Finalize();
+
+    UEdGraphNode* RequiredNode = NewObject<UEdGraphNode>(Graph);
+    RequiredNode->CreateNewGuid();
+    Graph->AddNode(RequiredNode, false, false);
+    UEdGraphPin* RequiredPin = RequiredNode->CreatePin(
+        EGPD_Input,
+        UEdGraphSchema_K2::PC_Int,
+        TEXT("RequiredReference"));
+    RequiredPin->PinType.bIsReference = true;
+
+    FBPInterfaceDescription MissingInterface;
+    MissingInterface.Interface = USoundSubmixWidgetInterface::StaticClass();
+    Blueprint->ImplementedInterfaces.Add(MissingInterface);
+
+    TArray<TSharedPtr<FJsonValue>> StructuralIssues;
+    UE::MCPython::Blueprint2::CollectStructuralHealthIssues(
+        Blueprint, StructuralIssues);
+    const auto MakeSortIssue = [](
+        const FString& Code,
+        const FString& MemberId)
+    {
+        const TSharedRef<FJsonObject> Issue = MakeShared<FJsonObject>();
+        Issue->SetStringField(TEXT("code"), Code);
+        Issue->SetStringField(TEXT("severity"), TEXT("error"));
+        Issue->SetStringField(TEXT("message"), TEXT("sort fixture"));
+        Issue->SetStringField(TEXT("hint"), TEXT("sort fixture"));
+        Issue->SetStringField(TEXT("graph_id"), FString());
+        Issue->SetStringField(TEXT("node_id"), FString());
+        Issue->SetStringField(TEXT("pin_id"), FString());
+        Issue->SetStringField(TEXT("member_id"), MemberId);
+        return MakeShared<FJsonValueObject>(Issue);
+    };
+    TArray<TSharedPtr<FJsonValue>> SortIssues = {
+        MakeSortIssue(TEXT("BP_A_CODE_FIRST"), TEXT("component:ffffffff-ffff-ffff-ffff-ffffffffffff")),
+        MakeSortIssue(TEXT("BP_Z_CODE_LAST"), TEXT("component:00000000-0000-0000-0000-000000000001")),
+    };
+    UE::MCPython::Blueprint2::NormalizeHealthIssues(SortIssues);
+    TestEqualSensitive(
+        TEXT("Equal-severity health issues sort by stable target ID"),
+        SortIssues[0]->AsObject()->GetStringField(TEXT("member_id")),
+        TEXT("component:00000000-0000-0000-0000-000000000001"));
+    const auto MakeDuplicateIssue = [](const FString& Message)
+    {
+        const TSharedRef<FJsonObject> Issue = MakeShared<FJsonObject>();
+        Issue->SetStringField(TEXT("code"), TEXT("BP_DUPLICATE_TEST"));
+        Issue->SetStringField(TEXT("severity"), TEXT("error"));
+        Issue->SetStringField(TEXT("message"), Message);
+        Issue->SetStringField(TEXT("hint"), Message);
+        Issue->SetStringField(TEXT("graph_id"), FString());
+        Issue->SetStringField(TEXT("node_id"), TEXT("node:11111111-1111-1111-1111-111111111111"));
+        Issue->SetStringField(TEXT("pin_id"), FString());
+        Issue->SetStringField(TEXT("member_id"), FString());
+        return MakeShared<FJsonValueObject>(Issue);
+    };
+    TArray<TSharedPtr<FJsonValue>> ForwardDuplicates = {
+        MakeDuplicateIssue(TEXT("z-source")),
+        MakeDuplicateIssue(TEXT("a-source")),
+    };
+    TArray<TSharedPtr<FJsonValue>> ReverseDuplicates = {
+        MakeDuplicateIssue(TEXT("a-source")),
+        MakeDuplicateIssue(TEXT("z-source")),
+    };
+    UE::MCPython::Blueprint2::NormalizeHealthIssues(ForwardDuplicates);
+    UE::MCPython::Blueprint2::NormalizeHealthIssues(ReverseDuplicates);
+    TestEqual(
+        TEXT("Equivalent health issues deduplicate to one record"),
+        ForwardDuplicates.Num(),
+        int32(1));
+    TestEqualSensitive(
+        TEXT("Health deduplication is independent of source order"),
+        ForwardDuplicates[0]->AsObject()->GetStringField(TEXT("message")),
+        ReverseDuplicates[0]->AsObject()->GetStringField(TEXT("message")));
+    const auto CountCode = [&StructuralIssues](const FString& Code)
+    {
+        return StructuralIssues.FilterByPredicate(
+            [&Code](const TSharedPtr<FJsonValue>& Value)
+            {
+                const TSharedPtr<FJsonObject> Issue =
+                    Value.IsValid() ? Value->AsObject() : nullptr;
+                return Issue &&
+                    Issue->GetStringField(TEXT("code")) == Code;
+            }).Num();
+    };
+    TestEqual(
+        TEXT("SCS cycle emits one normalized issue"),
+        CountCode(TEXT("BP_SCS_CYCLE")),
+        int32(1));
+    TestEqual(
+        TEXT("SCS orphan emits one normalized issue"),
+        CountCode(TEXT("BP_SCS_ORPHAN")),
+        int32(1));
+    TestEqual(
+        TEXT("SCS child missing from AllNodes emits one normalized issue"),
+        CountCode(TEXT("BP_SCS_NODE_MISSING_FROM_ALL_NODES")),
+        int32(1));
+    TestEqual(
+        TEXT("SCS multiple parent emits one normalized issue"),
+        CountCode(TEXT("BP_SCS_MULTIPLE_PARENTS")),
+        int32(1));
+    TestEqual(
+        TEXT("Case-insensitive member collision emits one normalized issue"),
+        CountCode(TEXT("BP_DUPLICATE_MEMBER")),
+        int32(1));
+    TestEqual(
+        TEXT("Invalid scalar variable default emits one normalized issue"),
+        CountCode(TEXT("BP_INVALID_VARIABLE_DEFAULT")),
+        int32(1));
+    TestEqual(
+        TEXT("Invalid object path emits one normalized issue"),
+        CountCode(TEXT("BP_INVALID_OBJECT_DEFAULT")),
+        int32(1));
+    TestEqual(
+        TEXT("Invalid class path emits one normalized issue"),
+        CountCode(TEXT("BP_INVALID_CLASS_DEFAULT")),
+        int32(1));
+    TestEqual(
+        TEXT("Disconnected required pin emits one normalized issue"),
+        CountCode(TEXT("BP_MISSING_REQUIRED_PIN")),
+        int32(1));
+    TestEqual(
+        TEXT("Unresolved call and variable emit two normalized issues"),
+        CountCode(TEXT("BP_UNRESOLVED_MEMBER")),
+        int32(2));
+    TestEqual(
+        TEXT("Missing interface function emits one normalized issue"),
+        CountCode(TEXT("BP_MISSING_INTERFACE_IMPLEMENTATION")),
+        int32(1));
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2HealthInvalidVariableDefaultsTest,
+    "UnrealMCPython.Blueprint2.HealthInvalidVariableDefaults",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2HealthInvalidVariableDefaultsTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+
+    const FString Root = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    UPackage* Package = CreatePackage(
+        *FString::Printf(TEXT("%s/HealthInvalidVariableDefaults"), *Root));
+    const TArray<UPackage*> FixturePackages = {Package};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+    UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        Package,
+        TEXT("BP_HealthInvalidVariableDefaults"),
+        BPTYPE_Normal,
+        TEXT("MCPythonBlueprint2HealthInvalidVariableDefaultsTest"));
+    TestNotNull(TEXT("Invalid-default health fixture is created"), Blueprint);
+    if (!Blueprint)
+    {
+        return false;
+    }
+
+    auto AddVariable = [Blueprint](
+        const FName Name,
+        const FName Category,
+        const EPinContainerType Container,
+        const FString& DefaultValue)
+    {
+        FBPVariableDescription Variable;
+        Variable.VarName = Name;
+        Variable.VarGuid = FGuid::NewGuid();
+        Variable.VarType.PinCategory = Category;
+        Variable.VarType.ContainerType = Container;
+        Variable.DefaultValue = DefaultValue;
+        Blueprint->NewVariables.Add(MoveTemp(Variable));
+    };
+    AddVariable(
+        TEXT("BrokenBooleanDefault"),
+        UEdGraphSchema_K2::PC_Boolean,
+        EPinContainerType::None,
+        TEXT("definitely"));
+    AddVariable(
+        TEXT("BrokenArrayDefault"),
+        UEdGraphSchema_K2::PC_Int,
+        EPinContainerType::Array,
+        TEXT("not-an-array"));
+    AddVariable(
+        TEXT("BrokenSetDefault"),
+        UEdGraphSchema_K2::PC_Int,
+        EPinContainerType::Set,
+        TEXT("not-a-set"));
+    AddVariable(
+        TEXT("BrokenMapDefault"),
+        UEdGraphSchema_K2::PC_String,
+        EPinContainerType::Map,
+        TEXT("not-a-map"));
+    Blueprint->NewVariables.Last().VarType.PinValueType.TerminalCategory =
+        UEdGraphSchema_K2::PC_Int;
+    AddVariable(
+        TEXT("BrokenTextDefault"),
+        UEdGraphSchema_K2::PC_Text,
+        EPinContainerType::None,
+        TEXT("NSLOCTEXT(\"HealthNamespace\", \"HealthKey\", \"unterminated\""));
+
+    TArray<TSharedPtr<FJsonValue>> Issues;
+    UE::MCPython::Blueprint2::CollectStructuralHealthIssues(Blueprint, Issues);
+    const TArray<FName> InvalidNames = {
+        TEXT("BrokenBooleanDefault"),
+        TEXT("BrokenArrayDefault"),
+        TEXT("BrokenSetDefault"),
+        TEXT("BrokenMapDefault"),
+        TEXT("BrokenTextDefault"),
+    };
+    for (const FName InvalidName : InvalidNames)
+    {
+        const FBPVariableDescription* Variable = Blueprint->NewVariables.FindByPredicate(
+            [InvalidName](const FBPVariableDescription& Candidate)
+            {
+                return Candidate.VarName == InvalidName;
+            });
+        TestNotNull(
+            *FString::Printf(TEXT("%s fixture variable exists"), *InvalidName.ToString()),
+            Variable);
+        if (!Variable)
+        {
+            continue;
+        }
+        const FString VariableId =
+            UE::MCPython::Blueprint2::DescribeVariableTarget(
+                Blueprint, *Variable).Id;
+        const bool bHasInvalidDefaultIssue = Issues.ContainsByPredicate(
+            [&VariableId](const TSharedPtr<FJsonValue>& Value)
+            {
+                const TSharedPtr<FJsonObject> Issue =
+                    Value.IsValid() ? Value->AsObject() : nullptr;
+                return Issue &&
+                    Issue->GetStringField(TEXT("code")) ==
+                        TEXT("BP_INVALID_VARIABLE_DEFAULT") &&
+                    Issue->GetStringField(TEXT("member_id")) == VariableId;
+            });
+        TestTrue(
+            *FString::Printf(
+                TEXT("%s emits BP_INVALID_VARIABLE_DEFAULT"),
+                *InvalidName.ToString()),
+            bHasInvalidDefaultIssue);
+    }
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2HealthHierarchyOnlyDuplicateGuidTest,
+    "UnrealMCPython.Blueprint2.HealthHierarchyOnlyDuplicateGuid",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2HealthHierarchyOnlyDuplicateGuidTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+
+    const FString Root = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    UPackage* Package = CreatePackage(
+        *FString::Printf(TEXT("%s/HealthHierarchyOnlyDuplicateGuid"), *Root));
+    const TArray<UPackage*> FixturePackages = {Package};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+    UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        Package,
+        TEXT("BP_HealthHierarchyOnlyDuplicateGuid"),
+        BPTYPE_Normal,
+        TEXT("MCPythonBlueprint2HealthHierarchyOnlyDuplicateGuidTest"));
+    TestNotNull(TEXT("Hierarchy-only GUID fixture is created"), Blueprint);
+    if (!Blueprint || !Blueprint->SimpleConstructionScript)
+    {
+        return false;
+    }
+
+    USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+    USCS_Node* Parent = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HierarchyGuidParent"));
+    SCS->AddNode(Parent);
+    USCS_Node* RegisteredChild = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("RegisteredGuidChild"));
+    Parent->AddChildNode(RegisteredChild, true);
+    USCS_Node* HierarchyOnlyChild = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("HierarchyOnlyGuidChild"));
+    Parent->AddChildNode(HierarchyOnlyChild, false);
+    const FGuid DuplicateGuid = FGuid::NewGuid();
+    RegisteredChild->VariableGuid = DuplicateGuid;
+    HierarchyOnlyChild->VariableGuid = DuplicateGuid;
+
+    TArray<TSharedPtr<FJsonValue>> Issues;
+    UE::MCPython::Blueprint2::CollectStructuralHealthIssues(Blueprint, Issues);
+    const auto CountCode = [&Issues](const FString& Code)
+    {
+        return Issues.FilterByPredicate(
+            [&Code](const TSharedPtr<FJsonValue>& Value)
+            {
+                const TSharedPtr<FJsonObject> Issue =
+                    Value.IsValid() ? Value->AsObject() : nullptr;
+                return Issue &&
+                    Issue->GetStringField(TEXT("code")) == Code;
+            }).Num();
+    };
+    TestEqual(
+        TEXT("Hierarchy-only child emits missing-from-AllNodes"),
+        CountCode(TEXT("BP_SCS_NODE_MISSING_FROM_ALL_NODES")),
+        int32(1));
+    TestEqual(
+        TEXT("GUID collision includes hierarchy-only child"),
+        CountCode(TEXT("BP_SCS_DUPLICATE_GUID")),
+        int32(1));
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2HealthDistinctSCSParentsTest,
+    "UnrealMCPython.Blueprint2.HealthDistinctSCSParents",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2HealthDistinctSCSParentsTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+
+    const FString Root = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    UPackage* Package = CreatePackage(
+        *FString::Printf(TEXT("%s/HealthDistinctSCSParents"), *Root));
+    const TArray<UPackage*> FixturePackages = {Package};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+    UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(
+        AActor::StaticClass(),
+        Package,
+        TEXT("BP_HealthDistinctSCSParents"),
+        BPTYPE_Normal,
+        TEXT("MCPythonBlueprint2HealthDistinctSCSParentsTest"));
+    TestNotNull(TEXT("Distinct-parent health fixture is created"), Blueprint);
+    if (!Blueprint || !Blueprint->SimpleConstructionScript)
+    {
+        return false;
+    }
+
+    USimpleConstructionScript* SCS = Blueprint->SimpleConstructionScript;
+    USCS_Node* RepeatedParent = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("RepeatedChildParent"));
+    USCS_Node* SharedParentA = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("SharedChildParentA"));
+    USCS_Node* SharedParentB = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("SharedChildParentB"));
+    SCS->AddNode(RepeatedParent);
+    SCS->AddNode(SharedParentA);
+    SCS->AddNode(SharedParentB);
+
+    USCS_Node* RepeatedChild = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("RepeatedChild"));
+    RepeatedParent->AddChildNode(RepeatedChild, true);
+    const FArrayProperty* ChildNodesProperty = FindFProperty<FArrayProperty>(
+        USCS_Node::StaticClass(), TEXT("ChildNodes"));
+    TestNotNull(TEXT("USCS_Node ChildNodes property is reflected"), ChildNodesProperty);
+    if (!ChildNodesProperty)
+    {
+        return false;
+    }
+    FScriptArrayHelper ChildNodesHelper(
+        ChildNodesProperty,
+        ChildNodesProperty->ContainerPtrToValuePtr<void>(RepeatedParent));
+    const int32 RepeatedIndex = ChildNodesHelper.AddValue();
+    FObjectPropertyBase* ChildProperty = CastFieldChecked<FObjectPropertyBase>(
+        ChildNodesProperty->Inner);
+    ChildProperty->SetObjectPropertyValue(
+        ChildNodesHelper.GetRawPtr(RepeatedIndex), RepeatedChild);
+
+    USCS_Node* SharedChild = SCS->CreateNode(
+        USceneComponent::StaticClass(), TEXT("SharedChild"));
+    SharedParentA->AddChildNode(SharedChild, true);
+    SharedParentB->AddChildNode(SharedChild, false);
+
+    TArray<TSharedPtr<FJsonValue>> Issues;
+    UE::MCPython::Blueprint2::CollectStructuralHealthIssues(Blueprint, Issues);
+    const FString RepeatedChildId =
+        UE::MCPython::Blueprint2::DescribeComponentTarget(
+            Blueprint, RepeatedChild).Id;
+    const FString SharedChildId =
+        UE::MCPython::Blueprint2::DescribeComponentTarget(
+            Blueprint, SharedChild).Id;
+    const auto HasMultipleParentsIssue = [&Issues](const FString& MemberId)
+    {
+        return Issues.ContainsByPredicate(
+            [&MemberId](const TSharedPtr<FJsonValue>& Value)
+            {
+                const TSharedPtr<FJsonObject> Issue =
+                    Value.IsValid() ? Value->AsObject() : nullptr;
+                return Issue &&
+                    Issue->GetStringField(TEXT("code")) ==
+                        TEXT("BP_SCS_MULTIPLE_PARENTS") &&
+                    Issue->GetStringField(TEXT("member_id")) == MemberId;
+            });
+    };
+    TestFalse(
+        TEXT("Repeated child entry in one parent is not multiple parents"),
+        HasMultipleParentsIssue(RepeatedChildId));
+    TestTrue(
+        TEXT("Child under two distinct parents is multiple parents"),
+        HasMultipleParentsIssue(SharedChildId));
 
     return true;
 }

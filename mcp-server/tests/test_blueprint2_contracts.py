@@ -934,6 +934,7 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
             "reparent_blueprint_component",
             "reorder_blueprint_component",
             "set_blueprint_component_transform",
+            "get_blueprint_health",
         }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()

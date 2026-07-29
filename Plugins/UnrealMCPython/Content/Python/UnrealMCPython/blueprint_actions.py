@@ -1129,7 +1129,34 @@ def ue_set_blueprint_component_transform(asset_path: str = None,
 def ue_get_blueprint_health(asset_path: str = None,
                                   include_warnings: bool = True) -> str:
     """Compiles explicitly and returns structured Blueprint health diagnostics."""
-    return _blueprint2_unsupported("get_blueprint_health")
+    from UnrealMCPython import blueprint2
+
+    native_result = blueprint2.call_asset_helper(
+        "get_blueprint_health", asset_path
+    )
+    if include_warnings:
+        return native_result
+    try:
+        result = json.loads(native_result)
+    except (TypeError, ValueError):
+        return native_result
+    data = result.get("data")
+    if isinstance(data, dict) and isinstance(data.get("issues"), list):
+        issues = [
+            issue
+            for issue in data["issues"]
+            if not isinstance(issue, dict)
+            or issue.get("severity") != "warning"
+        ]
+        data["issues"] = issues
+        data["issue_count"] = len(issues)
+        data["error_count"] = sum(
+            isinstance(issue, dict) and issue.get("severity") == "error"
+            for issue in issues
+        )
+        data["warning_count"] = 0
+    result["warnings"] = []
+    return json.dumps(result, separators=(",", ":"), ensure_ascii=False)
 
 
 def ue_snapshot_blueprint_graph(asset_path: str = None, graph_id: str = None,

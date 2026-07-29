@@ -334,6 +334,10 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString CompileBlueprint(UBlueprint* Blueprint);
 
+    /** Compile exactly once and return deterministic Blueprint health issues. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString GetBlueprintHealth(UBlueprint* Blueprint);
+
     /** Set any CDO property including inherited C++ UPROPERTYs (e.g. DefaultPawnClass on GameModeBase BPs).
      *  Uses TFieldIterator with IncludeSuper to bypass the Python set_editor_property limitation. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")

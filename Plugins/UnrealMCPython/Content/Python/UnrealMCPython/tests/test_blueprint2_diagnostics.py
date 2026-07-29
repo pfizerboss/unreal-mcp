@@ -176,6 +176,78 @@ class TestBlueprint2Diagnostics(MCPTestCase):
             asset_path=self.asset_path,
         )
 
+    def _health(self, include_warnings=True):
+        return call_action(
+            "blueprint_actions",
+            "ue_get_blueprint_health",
+            asset_path=self.asset_path,
+            include_warnings=include_warnings,
+        )
+
+    def _assert_health_envelope(self, result):
+        for field in (
+            "success",
+            "status",
+            "summary",
+            "data",
+            "warnings",
+            "errors",
+            "next_actions",
+            "trace_id",
+        ):
+            self.assertIn(field, result)
+        for field in (
+            "asset_path",
+            "healthy",
+            "compile_status",
+            "issue_count",
+            "error_count",
+            "warning_count",
+            "issues",
+        ):
+            self.assertIn(field, result["data"])
+        self.assertEqual(
+            result["data"]["issue_count"], len(result["data"]["issues"])
+        )
+        self.assertEqual(
+            result["data"]["error_count"],
+            sum(
+                issue["severity"] == "error"
+                for issue in result["data"]["issues"]
+            ),
+        )
+        self.assertEqual(
+            result["data"]["warning_count"],
+            sum(
+                issue["severity"] == "warning"
+                for issue in result["data"]["issues"]
+            ),
+        )
+        for issue in result["data"]["issues"]:
+            self.assertEqual(
+                set(issue),
+                {
+                    "code",
+                    "severity",
+                    "message",
+                    "hint",
+                    "graph_id",
+                    "node_id",
+                    "pin_id",
+                    "member_id",
+                },
+            )
+            self.assertIn(issue["severity"], ("error", "warning"))
+            self.assertTrue(issue["message"])
+            self.assertTrue(issue["hint"])
+            for field, prefix in (
+                ("graph_id", "graph:"),
+                ("node_id", "node:"),
+                ("pin_id", "pin:"),
+            ):
+                if issue[field]:
+                    self.assertTrue(issue[field].startswith(prefix), issue)
+
     def _is_dirty(self):
         package_name = self.blueprint.get_outer().get_name()
         return any(
@@ -288,6 +360,15 @@ class TestBlueprint2Diagnostics(MCPTestCase):
         self.assertTrue(self._is_dirty())
         self.assertTrue(result["next_actions"])
 
+    def test_get_blueprint_health_reports_a_healthy_asset(self):
+        result = self._health()
+
+        self._assert_health_envelope(result)
+        self.assertSuccess(result)
+        self.assertTrue(result["data"]["healthy"], result)
+        self.assertEqual(result["data"]["issues"], [])
+        self.assertEqual(result["data"]["compile_status"], "UpToDate")
+
     def test_warning_compile_returns_stable_node_diagnostic(self):
         analog_input = self._add_common(
             type="InputKey",
@@ -321,6 +402,31 @@ class TestBlueprint2Diagnostics(MCPTestCase):
             any(item["node_id"] == analog_input for item in warnings), result
         )
 
+        health = self._health()
+        self._assert_health_envelope(health)
+        self.assertSuccess(health)
+        self.assertTrue(health["data"]["healthy"], health)
+        self.assertGreater(health["data"]["warning_count"], 0)
+        self.assertTrue(
+            any(
+                issue["severity"] == "warning"
+                for issue in health["data"]["issues"]
+            ),
+            health,
+        )
+
+        filtered = self._health(include_warnings=False)
+        self._assert_health_envelope(filtered)
+        self.assertEqual(filtered["warnings"], [])
+        self.assertEqual(filtered["data"]["warning_count"], 0)
+        self.assertFalse(
+            any(
+                issue["severity"] == "warning"
+                for issue in filtered["data"]["issues"]
+            ),
+            filtered,
+        )
+
     def test_missing_required_pin_returns_pin_targeted_diagnostic(self):
         begin_play = self._begin_play()
         timer = self._add_reflected(
@@ -340,6 +446,23 @@ class TestBlueprint2Diagnostics(MCPTestCase):
             if item["code"] == "BP_MISSING_REQUIRED_PIN"
         ]
         self.assertTrue(any(item["pin_id"] for item in matches), result)
+
+        health = self._health()
+        self._assert_health_envelope(health)
+        self.assertFalse(health["success"], health)
+        self.assertFalse(health["data"]["healthy"], health)
+        self.assertEqual(len(health["errors"]), 1)
+        self.assertEqual(health["errors"][0]["code"], "COMPILE_FAILED")
+        health_matches = [
+            issue
+            for issue in health["data"]["issues"]
+            if issue["code"] == "BP_MISSING_REQUIRED_PIN"
+        ]
+        self.assertEqual(len(health_matches), 2, health)
+        targeted_pin_ids = {
+            issue["pin_id"] for issue in health_matches if issue["pin_id"]
+        }
+        self.assertEqual(len(targeted_pin_ids), 2, health)
 
     def test_deleted_function_returns_unresolved_member_diagnostic(self):
         function_name = "RemovedDiagnosticFunction"
@@ -377,6 +500,17 @@ class TestBlueprint2Diagnostics(MCPTestCase):
         self.assertSuccess(deleted)
 
         self._assert_compile_failure("BP_UNRESOLVED_MEMBER")
+
+        health = self._health()
+        self._assert_health_envelope(health)
+        self.assertFalse(health["success"], health)
+        unresolved = [
+            issue
+            for issue in health["data"]["issues"]
+            if issue["code"] == "BP_UNRESOLVED_MEMBER"
+        ]
+        self.assertEqual(len(unresolved), 1, health)
+        self.assertEqual(unresolved[0]["node_id"], caller)
 
 if __name__ == "__main__":
     import unittest

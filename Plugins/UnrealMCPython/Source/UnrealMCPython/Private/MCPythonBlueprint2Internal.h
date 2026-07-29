@@ -152,4 +152,8 @@ bool NormalizeDefaultValue(
     FNormalizedDefault& OutDefault,
     FError& OutError,
     const FString& Path);
+void CollectStructuralHealthIssues(
+    UBlueprint* Blueprint,
+    TArray<TSharedPtr<FJsonValue>>& OutIssues);
+void NormalizeHealthIssues(TArray<TSharedPtr<FJsonValue>>& Issues);
 }
