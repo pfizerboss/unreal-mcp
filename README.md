@@ -30,7 +30,7 @@
 
 Unreal MCP connects AI assistants to the Unreal Editor through the [Model Context Protocol](https://modelcontextprotocol.io/). Spawn actors, build Blueprint graphs, construct Behavior Trees, design UMG widgets, edit materials, author cinematics — all from natural language.
 
-**253 actions across 21 domains**, plus `execute_python` as an escape hatch — run any BlueprintCallable function or editor subsystem the engine exposes to Python, on the fly.
+**290 actions across 22 domains**, plus `execute_python` as an escape hatch — run any BlueprintCallable function or editor subsystem the engine exposes to Python, on the fly.
 
 **Easy to extend.** Adding an action is a Python function plus a catalog regen — no C++ and no editor rebuild on the Python path. When you need something Python doesn't expose (e.g. reference-skeleton bones), an optional C++ helper layer is there too. See [CLAUDE.md](CLAUDE.md) for the step-by-step workflow.
 
@@ -44,15 +44,15 @@ Unreal MCP connects AI assistants to the Unreal Editor through the [Model Contex
 
 ## Features
 
-Each row is one **namespace tool**. The action set is large but the tool list stays small, so it never bloats the model's context. **253 actions across 21 domains.**
+Each row is one **namespace tool**. The action set is large but the tool list stays small, so it never bloats the model's context. **290 actions across 22 domains.**
 
 | Domain | Capabilities | Actions |
 |---|---|:---:|
 | **actor** | Spawn (class/object/surface raycast), transform get/set, properties, live component properties, hierarchy (attach/detach), folders, tags, bounds, selection, duplication, class queries. | 36 |
 | **asset** | Duplicate/rename/delete/save, list, dependencies & referencers, metadata tags, directories, search, FBX import/export, texture import, glTF/glb import. | 21 |
 | **material** | Create materials & instances, author expression graphs, connect to material properties, MI parameters (scalar/vector/texture/switch), reparent, auto-layout, introspection. | 20 |
-| **blueprint** | Create Blueprints, read/build graphs, add/connect/remove nodes, member variables (+ flags), SCS components, compile, auto-layout. | 19 |
-| **util** | Run arbitrary Unreal Python, console commands, CVar get/set, world↔screen projection, viewport camera, PIE control, project info, class/enum reflection, output log, log verbosity, LiveCoding compile. | 19 |
+| **blueprint** | Universal Blueprint inspection and authoring: stable-ID functions, macros, events, dispatchers, interfaces, reflected/common nodes, pins, variables, SCS components, diagnostics, health, deterministic snapshots and diff. | 48 |
+| **util** | Run arbitrary Unreal Python, discover actions/capabilities, console commands, CVar get/set, world↔screen projection, viewport camera, PIE control, project info, class/enum reflection, output log, log verbosity, LiveCoding compile. | 22 |
 | **animation** | AnimSequence info, notify tracks, sync markers, float curves; SkeletalMesh sockets & bones (C++-backed); skeleton info. | 17 |
 | **umg** | Create Widget Blueprints, add/remove widgets, reparent/wrap/replace, properties, slot layout, text style, event binding, compile. | 15 |
 | **level_sequence** | Create cinematics, camera with Camera Cut track, spawnable/possessable bindings, transform & skeletal-anim tracks, keyframes, Sequencer open/close. | 13 |
@@ -69,6 +69,50 @@ Each row is one **namespace tool**. The action set is large but the tool list st
 | **game** | Game mode, Enhanced Input actions & mappings. | 3 |
 | **texture** | Texture info, sRGB and compression settings. | 3 |
 | **vision** | Capture the viewport / any pose / auto-framed actors as MCP Images with on-image actor labels — the assistant sees and identifies the scene. | 3 |
+| **workflow** | Plan, inspect, apply, cancel, and undo guarded multi-action workflows with confirmation tokens and transaction rollback. | 5 |
+
+### Universal Blueprint 2.0 workflow
+
+For bounded, undoable Blueprint editing, use this sequence:
+
+```text
+get_blueprint_brief -> inspect_blueprint -> workflow.plan -> workflow.apply
+-> compile_blueprint -> get_blueprint_health / snapshot_blueprint_graph
+-> diff_blueprint_graphs -> workflow.undo
+```
+
+`get_blueprint_brief` is the bounded orientation call; use filtered
+`inspect_blueprint` queries for details. Each query accepts `limit` from 1 to
+500 (default 100) and returns an opaque `next_cursor`. A cursor is invalidated
+when the query, asset, or editor session changes, and must not be reused across
+queries.
+
+Persisted stable IDs use `graph:`, `node:`, `pin:`, `variable:`, and
+`component:` GUID prefixes. Implemented interfaces use `interface:` followed by
+the full class path. Legacy objects without a persisted GUID are reported as
+`fallback:<kind>:<sha1>` with `stable=false`; display names and array indexes
+are not stable IDs.
+
+Canonical type examples include `{"kind":"int"}`,
+`{"kind":"real","precision":"double"}`,
+`{"kind":"struct","type_path":"/Script/CoreUObject.Vector"}`, and
+`{"kind":"class","class_path":"/Script/Engine.Actor"}`. Generated
+Blueprint class/type paths use the complete object path, for example
+`/Game/Characters/BP_Hero.BP_Hero_C`. Reflected nodes require an exact full
+path such as `/Script/Engine.Actor:K2_GetActorLocation` or
+`/Script/Engine.Actor:CustomTimeDilation`; short names are not reflection
+fallbacks. In `build_blueprint_graph`, each node `id` is a client-local
+reference used by `source_node` and `target_node` connections.
+
+Mutation actions dirty the package but never compile or save implicitly.
+Call `compile_blueprint` explicitly after a batch; `get_blueprint_health` is an
+explicit compile-backed diagnostic call. Save separately with
+`asset.save_asset` when desired. Blueprint 2.0 advertises runtime capabilities
+for UE 5.6-5.8, but local source/build verification is currently limited to UE
+5.7: UE 5.6 is not installed and UE 5.8 source headers are not available in
+this workspace. Check the returned capability flags before mutation on those
+versions. This surface provides universal Blueprint primitives; a one-click
+base-game generator is not included.
 
 ## How Tools Work
 
@@ -191,7 +235,7 @@ Add the server to your MCP client config:
 
 1. Restart your MCP client
 2. The MCP server starts automatically
-3. Verify — you should see the 19 Unreal-MCPython domain tools listed in your client
+3. Verify — you should see the 22 Unreal-MCPython domain tools listed in your client
 
 ## Usage
 
@@ -235,16 +279,16 @@ Pass any action below to its domain tool. Use `{ "action": "list_actions" }` on 
 </details>
 
 <details>
-<summary><strong>blueprint</strong> (19)</summary>
+<summary><strong>blueprint</strong> (48)</summary>
 
-`add_blueprint_node` · `add_component_to_blueprint` · `add_variable` · `auto_layout_graph` · `build_blueprint_graph` · `compile_blueprint` · `connect_blueprint_pins` · `create_blueprint` · `get_blueprint_graph_info` · `get_selected_bp_node_infos` · `get_selected_bp_nodes` · `list_blueprint_components` · `list_blueprint_variables` · `list_callable_functions` · `remove_blueprint_node` · `remove_component_from_blueprint` · `set_blueprint_node_position` · `set_component_property` · `set_variable_flags`
+`add_blueprint_interface` · `add_blueprint_node` · `add_component_to_blueprint` · `add_event_dispatcher` · `add_reflected_blueprint_node` · `add_variable` · `auto_layout_graph` · `build_blueprint_graph` · `compile_blueprint` · `connect_blueprint_pins` · `create_blueprint` · `create_blueprint_function` · `create_blueprint_macro` · `create_custom_event` · `delete_blueprint_function` · `delete_blueprint_macro` · `delete_custom_event` · `diff_blueprint_graphs` · `disconnect_blueprint_pins` · `get_blueprint_brief` · `get_blueprint_graph_info` · `get_blueprint_health` · `get_selected_bp_node_infos` · `get_selected_bp_nodes` · `inspect_blueprint` · `list_blueprint_components` · `list_blueprint_variables` · `list_callable_functions` · `remove_blueprint_interface` · `remove_blueprint_node` · `remove_blueprint_variable` · `remove_component_from_blueprint` · `remove_event_dispatcher` · `rename_blueprint_component` · `rename_blueprint_function` · `rename_blueprint_variable` · `reorder_blueprint_component` · `reparent_blueprint_component` · `set_blueprint_component_transform` · `set_blueprint_function_signature` · `set_blueprint_node_position` · `set_blueprint_node_properties` · `set_blueprint_variable_default` · `set_blueprint_variable_metadata` · `set_blueprint_variable_replication` · `set_component_property` · `set_variable_flags` · `snapshot_blueprint_graph`
 
 </details>
 
 <details>
-<summary><strong>util</strong> (19)</summary>
+<summary><strong>util</strong> (22)</summary>
 
-`execute_console_command` · `execute_python` · `get_cvar` · `get_output_log` · `get_project_info` · `get_viewport_camera` · `is_in_pie` · `list_class_properties` · `list_enum_values` · `livecoding_compile` · `print_message` · `save_all_dirty` · `screen_to_world` · `set_cvar` · `set_log_verbosity` · `set_viewport_camera` · `start_pie` · `stop_pie` · `world_to_screen`
+`describe_action` · `execute_console_command` · `execute_python` · `get_capabilities` · `get_cvar` · `get_output_log` · `get_project_info` · `get_viewport_camera` · `is_in_pie` · `list_class_properties` · `list_enum_values` · `livecoding_compile` · `print_message` · `save_all_dirty` · `screen_to_world` · `search_actions` · `set_cvar` · `set_log_verbosity` · `set_viewport_camera` · `start_pie` · `stop_pie` · `world_to_screen`
 
 </details>
 
@@ -357,6 +401,13 @@ Pass any action below to its domain tool. Use `{ "action": "list_actions" }` on 
 <summary><strong>vision</strong> (3)</summary>
 
 `capture_actors` · `capture_from` · `capture_viewport`
+
+</details>
+
+<details>
+<summary><strong>workflow</strong> (5)</summary>
+
+`apply` · `cancel` · `get` · `plan` · `undo`
 
 </details>
 

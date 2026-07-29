@@ -27,20 +27,9 @@ from unreal_mcp.dispatchers._catalog import CATALOG
 
 HOST, PORT = "127.0.0.1", 12029
 
-# Actions excluded from the exhaustive empty-param round-trip:
-#   execute_python   — needs {code}; empty-param hits a dispatcher guard, not TCP
-#   livecoding_compile — triggers a real C++ compile (slow, side-effecting)
-#   start_pie/stop_pie — change editor PIE mode (no params to guard); would leave
-#                        the editor in PIE during the sweep
+# The only action excluded from the exhaustive JSON round-trip returns a typed
+# MCP Image and is covered by test_vision_capture_returns_image below.
 _EXCLUDE = {
-    ("util", "execute_python"),
-    ("util", "livecoding_compile"),
-    ("util", "start_pie"),
-    ("util", "stop_pie"),
-    # save_current_level can raise a modal Save-As dialog on an untitled level.
-    ("level", "save_current_level"),
-    ("level", "save_all_levels"),
-    # vision returns an MCP Image (not a dict) — covered by a dedicated E2E test below.
     ("vision", "capture_viewport"),
 }
 
@@ -336,6 +325,201 @@ def test_workflow_plan_apply_undo_round_trip():
             run(disp._dispatch(
                 "actor", "delete_by_label", {"actor_label": actor_label}
             ))
+
+
+def test_blueprint2_workflow_round_trip():
+    """A mixed Blueprint workflow compiles, diffs, and restores its graph."""
+    asset_path = f"/Game/__MCPTests/Blueprint2_{uuid4().hex}"
+    try:
+        created = run(disp._dispatch(
+            "blueprint",
+            "create_blueprint",
+            {"asset_path": asset_path, "parent_class_path": "/Script/Engine.Actor"},
+        ))
+        assert created.get("success") is True, created
+        assert created.get("saved") is False, created
+        saved = run(disp._dispatch(
+            "asset", "save_asset", {"asset_path": asset_path}
+        ))
+        assert saved.get("success") is True, saved
+
+        brief = run(disp._dispatch(
+            "blueprint", "get_blueprint_brief", {"asset_path": asset_path}
+        ))
+        assert brief.get("success") is True, brief
+        assert "EventGraph" in brief["data"]["graphs"], brief
+        inspected = run(disp._dispatch(
+            "blueprint",
+            "inspect_blueprint",
+            {
+                "asset_path": asset_path,
+                "queries": [{"op": "events", "detail": "detailed", "limit": 100}],
+            },
+        ))
+        assert inspected.get("success") is True, inspected
+        event_items = inspected["data"]["results"][0]["items"]
+        assert event_items, inspected
+        graph_info = run(disp._dispatch(
+            "blueprint",
+            "get_blueprint_graph_info",
+            {"asset_path": asset_path, "graph_name": "EventGraph"},
+        ))
+        assert graph_info.get("success") is True, graph_info
+        graph_id = graph_info["graph_id"]
+        assert graph_id.startswith("graph:"), graph_info
+        assert not graph_id.startswith("fallback:"), graph_info
+        assert graph_info["id_kind"] == "graph_guid", graph_info
+        assert graph_info["stable"] is True, graph_info
+        event_graphs = [
+            item for item in event_items
+            if item.get("graph_id") == graph_id
+        ]
+        assert event_graphs, (inspected, graph_info)
+        event_record = event_graphs[0]
+        assert event_record["graph_id"] == graph_id, event_record
+        assert event_record["graph_id_kind"] == "graph_guid", event_record
+        assert event_record["graph_stable"] is True, event_record
+
+        pre = run(disp._dispatch(
+            "blueprint",
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        ))
+        assert pre.get("success") is True, pre
+
+        operations = [
+            {
+                "id": "create-function",
+                "domain": "blueprint",
+                "action": "create_blueprint_function",
+                "params": {
+                    "asset_path": asset_path,
+                    "function_name": "ComputeValue",
+                    "inputs": [],
+                    "outputs": [{"name": "Value", "type": {"kind": "int"}}],
+                },
+            },
+            {
+                "id": "add-variable",
+                "domain": "blueprint",
+                "action": "add_variable",
+                "params": {
+                    "asset_path": asset_path,
+                    "variable_name": "Counter",
+                    "variable_type": "int",
+                },
+            },
+            {
+                "id": "add-component",
+                "domain": "blueprint",
+                "action": "add_component_to_blueprint",
+                "params": {
+                    "asset_path": asset_path,
+                    "component_class_path": "/Script/Engine.SceneComponent",
+                    "component_name": "WorkflowRoot",
+                },
+            },
+            {
+                "id": "build-graph",
+                "domain": "blueprint",
+                "action": "build_blueprint_graph",
+                "params": {
+                    "asset_path": asset_path,
+                    "graph_name": "EventGraph",
+                    "graph_structure": {
+                        "nodes": [
+                            {"id": "branch", "type": "Branch"},
+                            {"id": "sequence", "type": "Sequence"},
+                            {
+                                "id": "actor_location",
+                                "type": "CallFunction",
+                                "target": "Actor",
+                                "function_name": "K2_GetActorLocation",
+                            },
+                        ],
+                        "connections": [
+                            {
+                                "source_node": "branch",
+                                "source_pin": "then",
+                                "target_node": "sequence",
+                                "target_pin": "execute",
+                            }
+                        ],
+                    },
+                },
+            },
+        ]
+        planned = run(disp.workflow(action="plan", params={"operations": operations}))
+        assert planned.get("success") is True, planned
+        plan_id = planned["data"]["workflow_id"]
+        applied = run(disp.workflow(action="apply", params={
+            "plan_id": plan_id,
+            "confirmation_token": planned["data"]["confirmation_token"],
+            "wait_for_completion": True,
+        }))
+        assert applied.get("success") is True, applied
+        assert applied["data"].get("transaction_recorded") is True, applied
+        undo_token = applied["data"].get("undo_token")
+        assert undo_token, applied
+
+        compiled = run(disp._dispatch(
+            "blueprint", "compile_blueprint", {"asset_path": asset_path}
+        ))
+        assert compiled.get("success") is True, compiled
+        health = run(disp._dispatch(
+            "blueprint", "get_blueprint_health", {"asset_path": asset_path}
+        ))
+        assert health.get("success") is True, health
+        assert health["data"]["healthy"] is True, health
+
+        post = run(disp._dispatch(
+            "blueprint",
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        ))
+        assert post.get("success") is True, post
+        changed = run(disp._dispatch(
+            "blueprint",
+            "diff_blueprint_graphs",
+            {
+                "before_snapshot": pre["data"],
+                "after_snapshot": post["data"],
+                "queries": [],
+            },
+        ))
+        assert changed.get("success") is True, changed
+        assert any(
+            section["total_count"] > 0
+            for section in changed["data"]["sections"]
+        ), changed
+
+        undone = run(disp.workflow(action="undo", params={
+            "plan_id": plan_id,
+            "undo_token": undo_token,
+        }))
+        assert undone.get("success") is True, undone
+        restored = run(disp._dispatch(
+            "blueprint",
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        ))
+        assert restored.get("success") is True, restored
+        assert restored["data"] == pre["data"], (pre, restored)
+    finally:
+        present = run(disp._dispatch(
+            "asset", "asset_exists", {"asset_path": asset_path}
+        ))
+        if present.get("exists") is True:
+            deleted = run(disp._dispatch(
+                "asset", "delete_asset", {"asset_path": asset_path}
+            ))
+            assert deleted.get("success") is True, deleted
+        exists = run(disp._dispatch(
+            "asset", "asset_exists", {"asset_path": asset_path}
+        ))
+        assert exists.get("exists") is False, exists
+        canary = run(disp._dispatch("actor", "list_all_with_locations", {}))
+        assert canary.get("success") is True, canary
 
 
 def test_zzz_editor_survived_suite():

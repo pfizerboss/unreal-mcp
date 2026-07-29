@@ -70,7 +70,7 @@ EXTRA_ACTIONS = {
             "doc": "Runs arbitrary Unreal Python code. Full API access; fastest path to prototype new actions.",
         },
         "livecoding_compile": {
-            "params": "",
+            "params": "confirm=False",
             "doc": "Triggers C++ Live Coding and waits for the compile result.",
         },
         "search_actions": {

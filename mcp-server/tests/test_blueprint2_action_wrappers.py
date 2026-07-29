@@ -438,7 +438,7 @@ def test_get_blueprint_health_can_hide_warning_records(monkeypatch):
         )
     )
 
-    assert result["success"] is True
+    assert result["success"] is True, result
     assert result["data"]["healthy"] is False
     assert result["data"]["issues"] == [
         {"code": "BP_DUPLICATE_MEMBER", "severity": "error"}
@@ -447,6 +447,51 @@ def test_get_blueprint_health_can_hide_warning_records(monkeypatch):
     assert result["data"]["error_count"] == 1
     assert result["data"]["warning_count"] == 0
     assert result["warnings"] == []
+
+
+def test_create_blueprint_leaves_new_asset_dirty_and_unsaved(monkeypatch):
+    created = []
+    blueprint = SimpleNamespace()
+
+    class Factory:
+        def set_editor_property(self, name, value):
+            assert name == "parent_class"
+            assert value is not None
+
+    class AssetTools:
+        def create_asset(self, name, package, asset_class, factory):
+            created.append((name, package, asset_class, factory))
+            return blueprint
+
+    unreal = SimpleNamespace(
+        MCPythonHelper=SimpleNamespace(),
+        EditorAssetLibrary=SimpleNamespace(
+            does_asset_exist=lambda _path: False,
+            save_loaded_asset=lambda _asset: pytest.fail(
+                "create_blueprint must not save implicitly"
+            ),
+        ),
+        load_class=lambda _outer, _path: object(),
+        Blueprint=object(),
+        BlueprintFactory=Factory,
+        AssetToolsHelpers=SimpleNamespace(
+            get_asset_tools=lambda: AssetTools()
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "unreal", unreal)
+    spec = importlib.util.spec_from_file_location(
+        "_blueprint_actions_create_test", BLUEPRINT_ACTIONS
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    result = json.loads(module.ue_create_blueprint("/Game/Tests/BP_Unsaved"))
+
+    assert result["success"] is True, result
+    assert result["asset_path"] == "/Game/Tests/BP_Unsaved"
+    assert result["saved"] is False
+    assert created and created[0][0:2] == ("BP_Unsaved", "/Game/Tests")
 
 
 def test_snapshot_blueprint_graph_copies_graph_ids_and_calls_native_helper(
@@ -1527,6 +1572,44 @@ def test_compile_blueprint_uses_structured_diagnostics_without_saving():
     assert "stable structured compiler diagnostics" in compile_wrapper
 
 
+def test_compile_and_health_gate_unsupported_compiler_tokens_before_compile():
+    source = DIAGNOSTICS_SOURCE.read_text(encoding="utf-8")
+    core = CORE_SOURCE.read_text(encoding="utf-8")
+    header = CORE_HEADER.read_text(encoding="utf-8")
+
+    assert "bool SupportsCompilerTokens();" in header
+    assert "bool SupportsCompilerTokens()" in core
+    capabilities = core[core.index("TSharedRef<FJsonObject> BuildCapabilities") :]
+    assert 'TEXT("supports_compiler_tokens")' in capabilities
+    assert "SupportsCompilerTokens()" in capabilities
+
+    compile_body = source[
+        source.index("FString UMCPythonHelper::CompileBlueprint") :
+        source.index("FString UMCPythonHelper::GetBlueprintHealth")
+    ]
+    health_body = source[source.index("FString UMCPythonHelper::GetBlueprintHealth") :]
+    assert compile_body.index("if (!SupportsCompilerTokens())") < (
+        compile_body.index("FKismetEditorUtilities::CompileBlueprint")
+    )
+    assert health_body.index("if (!SupportsCompilerTokens())") < (
+        health_body.index("CompileBlueprint(Blueprint)")
+    )
+    assert "CompilerTokensUnsupportedResult()" in compile_body
+    assert "CompilerTokensUnsupportedResult()" in health_body
+
+    unsupported = source[
+        source.index("FString CompilerTokensUnsupportedResult()") :
+        source.index("void UE::MCPython::Blueprint2::CollectStructuralHealthIssues")
+    ]
+    for token in (
+        'TEXT("UE_VERSION_UNSUPPORTED")',
+        'TEXT("supports_compiler_tokens")',
+        'TEXT("5.7")',
+        "FEngineVersion::Current().ToString()",
+    ):
+        assert token in unsupported
+
+
 def test_blueprint_health_compiles_once_and_checks_structural_invariants():
     source = DIAGNOSTICS_SOURCE.read_text(encoding="utf-8")
     header = HELPER_HEADER.read_text(encoding="utf-8")
@@ -1604,6 +1687,23 @@ def test_cpp_core_uses_persisted_guids_bounded_owners_and_guarded_undo():
         assert token in source
     assert "const FGuid& UE::MCPython::GetEditorSessionId()" in workflow
     assert "bool UE::MCPython::HasActiveWorkflowTransaction()" in workflow
+
+
+def test_workflow_fingerprints_read_saved_metadata_from_package_file():
+    workflow = WORKFLOW_SOURCE.read_text(encoding="utf-8")
+
+    for token in (
+        '"UObject/PackageFileSummary.h"',
+        "CreateFileReader",
+        "FPackageFileSummary",
+        "GetSavedHash()",
+        "FileSize(*Filename)",
+        "GetTimeStamp(*Filename)",
+    ):
+        assert token in workflow
+    assert workflow.index("CreateFileReader") < workflow.index(
+        "GetAssetPackageDataCopy"
+    )
 
 
 def test_graph_node_and_pin_ids_share_deterministic_fallback_helpers():

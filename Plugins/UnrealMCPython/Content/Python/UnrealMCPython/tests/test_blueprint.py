@@ -288,7 +288,18 @@ class TestBlueprintActions(MCPTestCase):
             r = self.call("blueprint_actions", "ue_create_blueprint",
                           asset_path=path, parent_class_path="/Script/Engine.Actor")
             self.assertSuccess(r)
+            self.assertFalse(r.get("saved", True))
             self.assertTrue(unreal.EditorAssetLibrary.does_asset_exist(path))
+            created = unreal.EditorAssetLibrary.load_asset(path)
+            self.assertIsNotNone(created)
+            package_name = created.get_outer().get_name()
+            dirty_packages = (
+                unreal.EditorLoadingAndSavingUtils.get_dirty_content_packages()
+            )
+            self.assertIn(
+                package_name,
+                [package.get_name() for package in dirty_packages],
+            )
         finally:
             self.delete_asset(path)
 

@@ -21,6 +21,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/Package.h"
+#include "UObject/PackageFileSummary.h"
 #include "UObject/UObjectGlobals.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogWorkflowLease, Log, All);
@@ -376,8 +377,6 @@ FString UMCPythonHelper::GetWorkflowEditorContext(const TArray<FString>& AssetPa
     {
         const FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
         const FName PackageFName(*PackageName);
-        const TOptional<FAssetPackageData> PackageData =
-            AssetRegistry.GetAssetPackageDataCopy(PackageFName);
         TArray<FAssetData> AssetsInPackage;
         AssetRegistry.GetAssetsByPackageName(
             PackageFName, AssetsInPackage, false);
@@ -385,20 +384,51 @@ FString UMCPythonHelper::GetWorkflowEditorContext(const TArray<FString>& AssetPa
         Fingerprint->SetStringField(TEXT("asset_path"), AssetPath);
         Fingerprint->SetBoolField(TEXT("exists"), !AssetsInPackage.IsEmpty());
 
-        if (PackageData.IsSet())
+        const FString Filename = PackageFilename(PackageName);
+        bool bReadPackageFile = false;
+        if (IFileManager::Get().FileExists(*Filename))
         {
-            TStringBuilder<40> HashBuilder;
-            HashBuilder << PackageData->GetPackageSavedHash();
-            Fingerprint->SetStringField(
-                TEXT("package_guid"), FString(HashBuilder.ToString()));
-            Fingerprint->SetNumberField(
-                TEXT("disk_size"), static_cast<double>(PackageData->DiskSize));
-            const FString Filename = PackageFilename(PackageName);
-            if (IFileManager::Get().FileExists(*Filename))
+            TUniquePtr<FArchive> FileReader(
+                IFileManager::Get().CreateFileReader(*Filename, FILEREAD_Silent));
+            if (FileReader)
             {
+                FPackageFileSummary PackageSummary;
+                *FileReader << PackageSummary;
+                if (!FileReader->IsError() &&
+                    PackageSummary.Tag == PACKAGE_FILE_TAG)
+                {
+                    TStringBuilder<40> HashBuilder;
+                    HashBuilder << PackageSummary.GetSavedHash();
+                    Fingerprint->SetStringField(
+                        TEXT("package_guid"), FString(HashBuilder.ToString()));
+                    Fingerprint->SetNumberField(
+                        TEXT("disk_size"),
+                        static_cast<double>(IFileManager::Get().FileSize(*Filename)));
+                    Fingerprint->SetStringField(
+                        TEXT("modified_time"),
+                        IFileManager::Get().GetTimeStamp(*Filename).ToIso8601());
+                    bReadPackageFile = true;
+                }
+            }
+        }
+        if (!bReadPackageFile)
+        {
+            const TOptional<FAssetPackageData> PackageData =
+                AssetRegistry.GetAssetPackageDataCopy(PackageFName);
+            if (PackageData.IsSet())
+            {
+                TStringBuilder<40> HashBuilder;
+                HashBuilder << PackageData->GetPackageSavedHash();
                 Fingerprint->SetStringField(
-                    TEXT("modified_time"),
-                    IFileManager::Get().GetTimeStamp(*Filename).ToIso8601());
+                    TEXT("package_guid"), FString(HashBuilder.ToString()));
+                Fingerprint->SetNumberField(
+                    TEXT("disk_size"), static_cast<double>(PackageData->DiskSize));
+                if (IFileManager::Get().FileExists(*Filename))
+                {
+                    Fingerprint->SetStringField(
+                        TEXT("modified_time"),
+                        IFileManager::Get().GetTimeStamp(*Filename).ToIso8601());
+                }
             }
         }
 

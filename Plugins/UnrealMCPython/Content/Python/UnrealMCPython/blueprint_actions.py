@@ -603,8 +603,12 @@ def ue_create_blueprint(asset_path: str = None, parent_class_path: str = "/Scrip
         bp = unreal.AssetToolsHelpers.get_asset_tools().create_asset(name, package, unreal.Blueprint, factory)
         if not bp:
             return json.dumps({"success": False, "message": f"Failed to create Blueprint at {asset_path}."})
-        unreal.EditorAssetLibrary.save_loaded_asset(bp)
-        return json.dumps({"success": True, "asset_path": asset_path, "parent_class": parent_class_path})
+        return json.dumps({
+            "success": True,
+            "asset_path": asset_path,
+            "parent_class": parent_class_path,
+            "saved": False,
+        })
     except Exception as e:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
 
@@ -1248,7 +1252,7 @@ ACTION_METADATA = {'add_blueprint_node': {'asset_path_params': ['asset_path'],
                            'result_kind': 'json',
                            'risk': 'high',
                            'supports_preview': True,
-                           'supports_undo': False,
+                           'supports_undo': True,
                            'title': 'Build Blueprint Graph',
                            'ue_versions': ['5.6', '5.7', '5.8']},
  'compile_blueprint': {'asset_path_params': ['asset_path'],
@@ -1285,7 +1289,7 @@ ACTION_METADATA = {'add_blueprint_node': {'asset_path_params': ['asset_path'],
                       'result_kind': 'json',
                       'risk': 'medium',
                       'supports_preview': True,
-                      'supports_undo': True,
+                      'supports_undo': False,
                       'title': 'Create Blueprint',
                       'ue_versions': ['5.6', '5.7', '5.8']},
  'get_blueprint_graph_info': {'asset_path_params': ['asset_path'],
@@ -1370,7 +1374,7 @@ ACTION_METADATA = {'add_blueprint_node': {'asset_path_params': ['asset_path'],
                            'result_kind': 'json',
                            'risk': 'high',
                            'supports_preview': True,
-                           'supports_undo': False,
+                           'supports_undo': True,
                            'title': 'Remove Blueprint Node',
                            'ue_versions': ['5.6', '5.7', '5.8']},
  'remove_component_from_blueprint': {'asset_path_params': ['asset_path'],
@@ -1383,7 +1387,7 @@ ACTION_METADATA = {'add_blueprint_node': {'asset_path_params': ['asset_path'],
                                      'result_kind': 'json',
                                      'risk': 'high',
                                      'supports_preview': True,
-                                     'supports_undo': False,
+                                     'supports_undo': True,
                                      'title': 'Remove Component From Blueprint',
                                      'ue_versions': ['5.6', '5.7', '5.8']},
  'set_blueprint_node_position': {'asset_path_params': ['asset_path'],

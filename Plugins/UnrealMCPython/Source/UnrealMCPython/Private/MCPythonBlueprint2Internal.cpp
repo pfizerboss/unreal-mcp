@@ -2352,6 +2352,15 @@ bool NormalizeDefaultValue(
     return true;
 }
 
+bool SupportsCompilerTokens()
+{
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
+    return true;
+#else
+    return false;
+#endif
+}
+
 TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint)
 {
     const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -2401,11 +2410,7 @@ TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint)
     }
     bAllGraphsUseK2Schema &= bHasGraph;
     const bool bHasSCS = Blueprint && Blueprint->SimpleConstructionScript;
-#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
-    constexpr bool bSupportsCompilerTokens = true;
-#else
-    constexpr bool bSupportsCompilerTokens = false;
-#endif
+    const bool bSupportsCompilerTokens = SupportsCompilerTokens();
     Result->SetBoolField(TEXT("supports_k2_schema"), true);
     Result->SetBoolField(TEXT("supports_scs_operations"), true);
     Result->SetBoolField(

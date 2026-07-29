@@ -401,6 +401,15 @@ async def util(
             return _local_exception_result("util", action, exc)
 
     if action == "livecoding_compile":
+        if params.get("confirm") is not True:
+            return _structured_result(
+                code=ErrorCode.CONFIRMATION_REQUIRED,
+                message="util.livecoding_compile requires params.confirm=true",
+                path="params.confirm",
+                retryable=True,
+                hint="Set params.confirm=true to run one Live Coding compilation.",
+                details={"action": "livecoding_compile"},
+            )
         try:
             return await send_livecoding_compile()
         except UnrealExecutionError as e:

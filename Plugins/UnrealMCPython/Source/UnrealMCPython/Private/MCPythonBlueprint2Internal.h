@@ -134,6 +134,7 @@ TSharedRef<FJsonObject> MakeFailure(
     const TSharedPtr<FJsonObject>& Details = nullptr);
 FString SerializeResult(const TSharedRef<FJsonObject>& Result);
 TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint);
+bool SupportsCompilerTokens();
 bool IsSupportedBlueprintSelectionEditor(const FName& EditorName);
 bool ParseTypeSpec(
     const TSharedRef<FJsonObject>& Spec,

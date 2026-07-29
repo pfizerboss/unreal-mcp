@@ -124,8 +124,18 @@ def ue_get_current_level_path() -> str:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
 
 
-def ue_save_current_level() -> str:
+def _confirmation_required(action: str) -> str:
+    return json.dumps({
+        "success": False,
+        "code": "CONFIRMATION_REQUIRED",
+        "message": f"{action} requires confirm=true before saving editor state.",
+    })
+
+
+def ue_save_current_level(confirm: bool = False) -> str:
     """Saves the currently open level. Returns success=False for an unsaved/untitled level."""
+    if not confirm:
+        return _confirmation_required("save_current_level")
     try:
         ok = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_current_level()
         return json.dumps({"success": bool(ok),
@@ -134,8 +144,10 @@ def ue_save_current_level() -> str:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
 
 
-def ue_save_all_levels() -> str:
+def ue_save_all_levels(confirm: bool = False) -> str:
     """Saves all dirty levels."""
+    if not confirm:
+        return _confirmation_required("save_all_levels")
     try:
         ok = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_all_dirty_levels()
         return json.dumps({"success": bool(ok),
@@ -195,6 +207,7 @@ ACTION_METADATA = {'create_level': {'asset_path_params': ['level_path'],
                 'ue_versions': ['5.6', '5.7', '5.8']},
  'save_all_levels': {'description': 'Saves all dirty levels.',
                      'effect': 'write',
+                     'examples': [{'action': 'save_all_levels', 'params': {'confirm': True}}],
                      'idempotent': False,
                      'required_plugins': [],
                      'requires_confirmation': True,
@@ -207,6 +220,7 @@ ACTION_METADATA = {'create_level': {'asset_path_params': ['level_path'],
  'save_current_level': {'description': 'Saves the currently open level. Returns success=False for '
                                        'an unsaved/untitled level.',
                         'effect': 'write',
+                        'examples': [{'action': 'save_current_level', 'params': {'confirm': True}}],
                         'idempotent': False,
                         'required_plugins': [],
                         'requires_confirmation': True,

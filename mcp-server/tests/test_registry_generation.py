@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
@@ -79,6 +80,24 @@ def test_opaque_saves_compiles_and_project_config_do_not_claim_undo_or_preview()
     project_config = registry["gas"]["add_gameplay_tag"]
     assert project_config["effect"] == "destructive"
     assert project_config["risk"] == "high"
+
+
+@pytest.mark.parametrize(
+    "domain,action",
+    (
+        ("util", "livecoding_compile"),
+        ("util", "start_pie"),
+        ("util", "stop_pie"),
+        ("level", "save_current_level"),
+        ("level", "save_all_levels"),
+    ),
+)
+def test_opaque_no_arg_actions_require_explicit_confirm(domain, action):
+    spec = build_registry()[domain][action]
+    confirm = spec["input_schema"]["properties"]["confirm"]
+
+    assert confirm == {"type": "boolean", "default": False}
+    assert spec["examples"][0]["params"] == {"confirm": True}
 
 
 def test_whole_structure_replacements_are_classified_as_destructive():

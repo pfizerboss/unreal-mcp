@@ -2288,6 +2288,11 @@ bool FMCPythonBlueprint2HealthStructuralTest::RunTest(
         TEXT("RequiredReference"));
     RequiredPin->PinType.bIsReference = true;
 
+    FGraphNodeCreator<UK2Node_IfThenElse> ValidBranchCreator(*Graph);
+    UK2Node_IfThenElse* ValidBranch =
+        ValidBranchCreator.CreateNode(false);
+    ValidBranchCreator.Finalize();
+
     FBPInterfaceDescription MissingInterface;
     MissingInterface.Interface = USoundSubmixWidgetInterface::StaticClass();
     Blueprint->ImplementedInterfaces.Add(MissingInterface);
@@ -2397,6 +2402,10 @@ bool FMCPythonBlueprint2HealthStructuralTest::RunTest(
         TEXT("Disconnected required pin emits one normalized issue"),
         CountCode(TEXT("BP_MISSING_REQUIRED_PIN")),
         int32(1));
+    TestEqual(
+        TEXT("Execution pins are not treated as invalid value defaults"),
+        CountCode(TEXT("BP_INVALID_PIN_DEFAULT")),
+        int32(0));
     TestEqual(
         TEXT("Unresolved call and variable emit two normalized issues"),
         CountCode(TEXT("BP_UNRESOLVED_MEMBER")),

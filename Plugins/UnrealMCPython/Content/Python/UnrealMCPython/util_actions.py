@@ -203,8 +203,18 @@ def ue_is_in_pie() -> str:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
 
 
-def ue_start_pie() -> str:
+def _confirmation_required(action: str) -> str:
+    return json.dumps({
+        "success": False,
+        "code": "CONFIRMATION_REQUIRED",
+        "message": f"{action} requires confirm=true before changing editor state.",
+    })
+
+
+def ue_start_pie(confirm: bool = False) -> str:
     """Starts Play-In-Editor (asynchronous; begins on the next frame)."""
+    if not confirm:
+        return _confirmation_required("start_pie")
     try:
         unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_begin_play()
         return json.dumps({"success": True, "message": "Requested PIE begin."})
@@ -212,8 +222,10 @@ def ue_start_pie() -> str:
         return json.dumps({"success": False, "message": str(e), "traceback": traceback.format_exc()})
 
 
-def ue_stop_pie() -> str:
+def ue_stop_pie(confirm: bool = False) -> str:
     """Stops Play-In-Editor."""
+    if not confirm:
+        return _confirmation_required("stop_pie")
     try:
         unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).editor_request_end_play()
         return json.dumps({"success": True, "message": "Requested PIE end."})
@@ -520,6 +532,7 @@ ACTION_METADATA = {'execute_console_command': {'description': "Executes an edito
                          'ue_versions': ['5.6', '5.7', '5.8']},
  'start_pie': {'description': 'Starts Play-In-Editor (asynchronous; begins on the next frame).',
                'effect': 'write',
+               'examples': [{'action': 'start_pie', 'params': {'confirm': True}}],
                'idempotent': False,
                'required_plugins': [],
                'requires_confirmation': True,
@@ -531,6 +544,7 @@ ACTION_METADATA = {'execute_console_command': {'description': "Executes an edito
                'ue_versions': ['5.6', '5.7', '5.8']},
  'stop_pie': {'description': 'Stops Play-In-Editor.',
               'effect': 'write',
+              'examples': [{'action': 'stop_pie', 'params': {'confirm': True}}],
               'idempotent': False,
               'required_plugins': [],
               'requires_confirmation': True,

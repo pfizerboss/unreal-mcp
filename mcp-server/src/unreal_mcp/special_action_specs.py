@@ -41,9 +41,17 @@ SPECIAL_ACTION_SPECS = {
             "required_plugins": [],
             "input_schema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "confirm": {"type": "boolean", "default": False}
+                },
                 "additionalProperties": False,
             },
+            "examples": [
+                {
+                    "action": "livecoding_compile",
+                    "params": {"confirm": True},
+                }
+            ],
             "output_schema": {
                 "type": "object",
                 "properties": {"success": {"type": "boolean"}},

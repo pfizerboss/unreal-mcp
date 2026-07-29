@@ -54,6 +54,81 @@ def planner():
     )
 
 
+def _blueprint_specs():
+    return {
+        spec.action: spec
+        for spec in ActionRegistry().iter_actions()
+        if spec.domain == "blueprint"
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    tuple(
+        sorted(
+            name
+            for name, spec in _blueprint_specs().items()
+            if spec.effect.value != "read"
+            and name
+            not in {"compile_blueprint", "create_blueprint", "get_blueprint_health"}
+        )
+    ),
+)
+async def test_blueprint_mutations_are_confirmed_undoable_and_plan_without_opt_in(
+    action,
+):
+    registry = ActionRegistry()
+    spec = registry.get("blueprint", action)
+    assert spec.effect.value in {"write", "destructive"}
+    assert spec.supports_undo is True
+    assert spec.requires_confirmation is True
+
+    service = WorkflowPlanner(
+        registry,
+        FakeContext(),
+        token_service=TokenService(secret=b"x" * 32, ttl=timedelta(minutes=10)),
+    )
+    plan = await service.plan(
+        [
+            ActionInvocation(
+                id=action,
+                domain="blueprint",
+                action=action,
+                params=dict(spec.examples[0]["params"]),
+            )
+        ]
+    )
+    assert plan.allow_non_undoable is False
+
+
+@pytest.mark.parametrize(
+    "action",
+    ("compile_blueprint", "create_blueprint", "get_blueprint_health"),
+)
+def test_blueprint_non_undoable_policy_is_explicit(action):
+    spec = ActionRegistry().get("blueprint", action)
+    assert spec.effect.value == "write"
+    assert spec.supports_undo is False
+    assert spec.requires_confirmation is True
+    if action == "create_blueprint":
+        assert spec.risk.value == "medium"
+    else:
+        assert spec.risk.value == "high"
+
+
+def test_blueprint_reads_are_low_risk_and_idempotent():
+    reads = [
+        spec for spec in _blueprint_specs().values() if spec.effect.value == "read"
+    ]
+    assert reads
+    for spec in reads:
+        assert spec.risk.value == "low", spec.action
+        assert spec.idempotent is True, spec.action
+        assert spec.requires_confirmation is False, spec.action
+        assert spec.supports_undo is False, spec.action
+
+
 @pytest.mark.asyncio
 async def test_plan_orders_dependencies_and_collects_assets(planner):
     plan = await planner.plan(

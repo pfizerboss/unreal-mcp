@@ -153,7 +153,14 @@ def test_util_livecoding_compile(monkeypatch):
         return {"success": True}
 
     monkeypatch.setattr(disp, "send_livecoding_compile", fake_compile)
-    result = run(disp.util(action="livecoding_compile", params={}))
+    blocked = run(disp.util(action="livecoding_compile", params={}))
+    assert blocked["success"] is False
+    assert blocked["errors"][0]["code"] == "CONFIRMATION_REQUIRED"
+    assert called["n"] == 0
+
+    result = run(disp.util(
+        action="livecoding_compile", params={"confirm": True}
+    ))
     assert result["success"] is True
     assert called["n"] == 1
 

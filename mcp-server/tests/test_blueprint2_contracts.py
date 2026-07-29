@@ -1157,3 +1157,80 @@ def test_inspection_materializes_detailed_records_after_pagination():
     append_item = source.index("Items.Add", page_start)
 
     assert page_start < materialize < append_item
+
+
+def test_live_blueprint2_workflow_uses_safe_graph_and_diff_contracts():
+    e2e_path = Path(__file__).with_name("test_e2e.py")
+    tree = ast.parse(e2e_path.read_text(encoding="utf-8"))
+    workflow = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_blueprint2_workflow_round_trip"
+    )
+    source = ast.unparse(workflow)
+
+    assert "'type': 'Event'" not in source
+    assert "get_blueprint_graph_info" in source
+    assert "['graph_id']" in source
+    assert "startswith('graph:')" in source
+    assert "['id_kind'] == 'graph_guid'" in source
+    assert "['stable'] is True" in source
+    assert "['graph_id'] == graph_id" in source
+    assert "['graph_id_kind'] == 'graph_guid'" in source
+    assert "['graph_stable'] is True" in source
+    assert source.index("get('saved') is False") < source.index("'save_asset'")
+    assert source.index("'save_asset'") < source.index("action='plan'")
+    for value in (
+        "Branch",
+        "Sequence",
+        "CallFunction",
+        "Actor",
+        "K2_GetActorLocation",
+        "source_node': 'branch",
+        "target_node': 'sequence",
+        "total_count",
+        "delete_asset",
+    ):
+        assert value in source
+    assert "execute_python" not in source
+
+
+def test_live_e2e_accounts_for_every_json_action():
+    e2e_path = Path(__file__).with_name("test_e2e.py")
+    tree = ast.parse(e2e_path.read_text(encoding="utf-8"))
+    exclude_node = next(
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_EXCLUDE"
+            for target in node.targets
+        )
+    )
+    excluded = ast.literal_eval(exclude_node.value)
+
+    catalog = build()
+    all_pairs = {
+        (domain, action)
+        for domain, actions in catalog.items()
+        for action in actions
+    }
+    test_names = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    spec = importlib.util.spec_from_file_location(
+        "_blueprint2_e2e_accounting", e2e_path
+    )
+    e2e = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(e2e)
+    sweep_pairs = e2e._all_action_pairs()
+    sweep_pair_set = set(sweep_pairs)
+
+    assert excluded == {("vision", "capture_viewport")}
+    assert len(all_pairs) == 290
+    assert len(sweep_pairs) == len(sweep_pair_set)
+    assert sweep_pair_set.isdisjoint(excluded)
+    assert sweep_pair_set | excluded == all_pairs
+    assert len(sweep_pair_set) == 289
+    assert "test_vision_capture_returns_image" in test_names

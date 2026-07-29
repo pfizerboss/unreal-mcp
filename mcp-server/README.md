@@ -26,8 +26,36 @@ It enables smooth communication between MCP clients (e.g., Claude, Cursor, Winds
 ## Key Features
 
 - MCP server for communication with Unreal Engine
-- 16 namespace dispatcher tools (actor, material, blueprint, animation, asset, …) exposing 191 actions, each callable as `{action, params}`
+- 22 namespace dispatcher tools exposing 290 actions, each callable as `{action, params}`
 - Supports Python 3.11 and later
+
+## Universal Blueprint 2.0
+
+Recommended sequence:
+
+```text
+get_blueprint_brief -> inspect_blueprint -> workflow.plan -> workflow.apply
+-> compile_blueprint -> get_blueprint_health / snapshot_blueprint_graph
+-> diff_blueprint_graphs -> workflow.undo
+```
+
+Inspection is paginated per query with `limit` 1-500 (default 100). Its opaque
+cursor becomes invalid when the query, asset, or editor session changes.
+Stable IDs use `graph:`, `node:`, `pin:`, `variable:`, `component:`, and
+`interface:` prefixes; legacy records use `fallback:<kind>:<sha1>` and report
+`stable=false`. Canonical types include `{"kind":"int"}`,
+`{"kind":"struct","type_path":"/Script/CoreUObject.Vector"}`, and
+`{"kind":"class","class_path":"/Script/Engine.Actor"}`; generated asset
+classes use full paths such as `/Game/Characters/BP_Hero.BP_Hero_C`.
+Reflected members also require exact paths, for example
+`/Script/Engine.Actor:K2_GetActorLocation`.
+
+Blueprint mutations do not compile or save implicitly. Compile explicitly,
+run the compile-backed health check as a separate diagnostic call, and save
+with `asset.save_asset` only when wanted. Runtime capabilities target UE
+5.6-5.8; this workspace has locally verified only UE 5.7 because UE 5.6 is not
+installed and UE 5.8 source headers are unavailable. Check capability flags on
+those versions. A base-game generator is not included.
 
 # Installation
 

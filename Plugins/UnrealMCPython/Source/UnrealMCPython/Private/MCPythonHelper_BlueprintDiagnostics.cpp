@@ -21,6 +21,7 @@
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Logging/TokenizedMessage.h"
+#include "Misc/EngineVersion.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/UnrealType.h"
@@ -43,6 +44,27 @@ FString CompileStatus(const UBlueprint* Blueprint)
     case BS_BeingCreated: return TEXT("BeingCreated");
     default: return TEXT("Unknown");
     }
+}
+
+FString CompilerTokensUnsupportedResult()
+{
+    using namespace UE::MCPython::Blueprint2;
+
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(
+        TEXT("capability"), TEXT("supports_compiler_tokens"));
+    Details->SetStringField(
+        TEXT("engine_version"), FEngineVersion::Current().ToString());
+    Details->SetArrayField(
+        TEXT("supported_engine_versions"),
+        {MakeShared<FJsonValueString>(TEXT("5.7"))});
+    return SerializeResult(MakeFailure(
+        TEXT("UE_VERSION_UNSUPPORTED"),
+        TEXT("engine_version"),
+        TEXT("Structured Blueprint compiler diagnostics are unavailable on this Unreal Engine version."),
+        false,
+        TEXT("Use Unreal Engine 5.7 or a plugin build with compiler-token support."),
+        Details));
 }
 
 void NormalizeDiagnostic(
@@ -2097,7 +2119,8 @@ void AddGraphHealthIssues(
             for (UEdGraphPin* Pin : Node->Pins)
             {
                 if (!Pin || Pin->Direction != EGPD_Input || Pin->bHidden ||
-                    !Pin->LinkedTo.IsEmpty())
+                    !Pin->LinkedTo.IsEmpty() ||
+                    Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
                 {
                     continue;
                 }
@@ -2494,6 +2517,10 @@ FString UMCPythonHelper::CompileBlueprint(UBlueprint* Blueprint)
     {
         return InvalidBlueprintResult();
     }
+    if (!SupportsCompilerTokens())
+    {
+        return CompilerTokensUnsupportedResult();
+    }
 
     FCompilerResultsLog Results;
     Results.bSilentMode = true;
@@ -2595,6 +2622,10 @@ FString UMCPythonHelper::GetBlueprintHealth(UBlueprint* Blueprint)
     if (!Blueprint)
     {
         return InvalidBlueprintResult();
+    }
+    if (!SupportsCompilerTokens())
+    {
+        return CompilerTokensUnsupportedResult();
     }
 
     const TSharedPtr<FJsonObject> CompileResult = ParseJsonObject(

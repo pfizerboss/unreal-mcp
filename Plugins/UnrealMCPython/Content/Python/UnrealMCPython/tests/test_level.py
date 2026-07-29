@@ -64,6 +64,12 @@ class TestLevelActions(MCPTestCase):
         self.assertIn("level_path", r)
         self.assertTrue(r["level_path"])
 
-    # save_current_level / save_all_levels are not auto-tested: on an unsaved
-    # (untitled) level save_current_level can raise a modal Save-As dialog that
-    # would hang the headless suite. Verified manually instead (see KNOWN_UNTESTED).
+    def test_save_current_level_requires_confirmation(self):
+        r = self.call("level_actions", "ue_save_current_level")
+        self.assertFalse(r.get("success"))
+        self.assertEqual(r.get("code"), "CONFIRMATION_REQUIRED")
+
+    def test_save_all_levels_requires_confirmation(self):
+        r = self.call("level_actions", "ue_save_all_levels")
+        self.assertFalse(r.get("success"))
+        self.assertEqual(r.get("code"), "CONFIRMATION_REQUIRED")

@@ -109,6 +109,24 @@ class TestUtilActions(MCPTestCase):
         self.assertSuccess(r)
         self.assertIsInstance(r["in_pie"], bool)
 
+    def test_start_pie_requires_confirmation(self):
+        before = self.call("util_actions", "ue_is_in_pie")
+        self.assertSuccess(before)
+        result = self.call("util_actions", "ue_start_pie")
+        self.assertFalse(result.get("success"))
+        self.assertEqual(result.get("code"), "CONFIRMATION_REQUIRED")
+        after = self.call("util_actions", "ue_is_in_pie")
+        self.assertEqual(after.get("in_pie"), before.get("in_pie"))
+
+    def test_stop_pie_requires_confirmation(self):
+        before = self.call("util_actions", "ue_is_in_pie")
+        self.assertSuccess(before)
+        result = self.call("util_actions", "ue_stop_pie")
+        self.assertFalse(result.get("success"))
+        self.assertEqual(result.get("code"), "CONFIRMATION_REQUIRED")
+        after = self.call("util_actions", "ue_is_in_pie")
+        self.assertEqual(after.get("in_pie"), before.get("in_pie"))
+
     def test_list_class_properties(self):
         r = self.call("util_actions", "ue_list_class_properties",
                       class_path="/Script/Engine.PointLight")

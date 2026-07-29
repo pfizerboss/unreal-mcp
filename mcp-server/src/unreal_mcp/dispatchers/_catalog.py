@@ -782,11 +782,11 @@ CATALOG = {
             'doc': 'Opens (loads) an existing level in the editor.',
         },
         'save_all_levels': {
-            'params': '',
+            'params': 'confirm=False',
             'doc': 'Saves all dirty levels.',
         },
         'save_current_level': {
-            'params': '',
+            'params': 'confirm=False',
             'doc': 'Saves the currently open level. Returns success=False for an unsaved/untitled level.',
         },
         'set_world_settings': {
@@ -1128,7 +1128,7 @@ CATALOG = {
             'doc': "Lists the values of an Unreal enum by name (e.g. 'TextureCompressionSettings', 'CollisionTraceFlag').",
         },
         'livecoding_compile': {
-            'params': '',
+            'params': 'confirm=False',
             'doc': 'Triggers C++ Live Coding and waits for the compile result.',
         },
         'print_message': {
@@ -1160,11 +1160,11 @@ CATALOG = {
             'doc': 'Sets the level viewport camera. location=[x,y,z], rotation=[pitch,yaw,roll].',
         },
         'start_pie': {
-            'params': '',
+            'params': 'confirm=False',
             'doc': 'Starts Play-In-Editor (asynchronous; begins on the next frame).',
         },
         'stop_pie': {
-            'params': '',
+            'params': 'confirm=False',
             'doc': 'Stops Play-In-Editor.',
         },
         'world_to_screen': {
