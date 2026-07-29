@@ -1834,6 +1834,16 @@ FString CanonicalQueryDigest(const TSharedRef<FJsonObject>& Query)
     return Sha1(CanonicalJsonValue(MakeShared<FJsonValueObject>(Query)));
 }
 
+FString CanonicalJsonString(const TSharedPtr<FJsonValue>& Value)
+{
+    return CanonicalJsonValue(Value);
+}
+
+FString Sha1Hex(const FString& Value)
+{
+    return Sha1(Value);
+}
+
 FString EncodeCursor(const FString& AssetPath, const FPageRequest& Page)
 {
     const TSharedRef<FJsonObject> Cursor = MakeShared<FJsonObject>();

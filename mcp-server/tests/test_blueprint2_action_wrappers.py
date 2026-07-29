@@ -91,7 +91,12 @@ def _load_variable_wrapper(monkeypatch):
         calls.append((helper_name, asset_path, request))
         return '{"success":true,"marker":"native"}'
 
+    def call_json_helper(helper_name, request):
+        calls.append((helper_name, request))
+        return '{"success":true,"marker":"native"}'
+
     adapter.call_asset_helper = call_asset_helper
+    adapter.call_json_helper = call_json_helper
     package.blueprint2 = adapter
     monkeypatch.setitem(sys.modules, "UnrealMCPython", package)
     monkeypatch.setitem(sys.modules, "UnrealMCPython.blueprint2", adapter)
@@ -442,6 +447,74 @@ def test_get_blueprint_health_can_hide_warning_records(monkeypatch):
     assert result["data"]["error_count"] == 1
     assert result["data"]["warning_count"] == 0
     assert result["warnings"] == []
+
+
+def test_snapshot_blueprint_graph_copies_graph_ids_and_calls_native_helper(
+    monkeypatch,
+):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    graph_ids = [
+        "graph:11111111-1111-4111-8111-111111111111",
+        "graph:22222222-2222-4222-8222-222222222222",
+    ]
+    before = list(graph_ids)
+
+    result = module.ue_snapshot_blueprint_graph(
+        asset_path="/Game/BP.BP",
+        graph_ids=graph_ids,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert graph_ids == before
+    assert calls == [
+        (
+            "snapshot_blueprint_graph",
+            "/Game/BP.BP",
+            {"graph_ids": before},
+        )
+    ]
+    assert calls[0][2]["graph_ids"] is not graph_ids
+
+
+def test_diff_blueprint_graphs_copies_snapshots_and_calls_json_helper(
+    monkeypatch,
+):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    before_snapshot = {"snapshot_version": 1, "digest": "sha1:before"}
+    after_snapshot = {"snapshot_version": 1, "digest": "sha1:after"}
+    queries = [
+        {
+            "section": "nodes",
+            "detail": "detailed",
+            "limit": 25,
+            "cursor": "",
+        }
+    ]
+    original = json.loads(
+        json.dumps([before_snapshot, after_snapshot, queries])
+    )
+
+    result = module.ue_diff_blueprint_graphs(
+        before_snapshot=before_snapshot,
+        after_snapshot=after_snapshot,
+        queries=queries,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert [before_snapshot, after_snapshot, queries] == original
+    assert calls == [
+        (
+            "diff_blueprint_graphs",
+            {
+                "before_snapshot": original[0],
+                "after_snapshot": original[1],
+                "queries": original[2],
+            },
+        )
+    ]
+    assert calls[0][1]["before_snapshot"] is not before_snapshot
+    assert calls[0][1]["after_snapshot"] is not after_snapshot
+    assert calls[0][1]["queries"] is not queries
 
 
 def test_load_blueprint_accepts_blueprint_subclasses(monkeypatch):

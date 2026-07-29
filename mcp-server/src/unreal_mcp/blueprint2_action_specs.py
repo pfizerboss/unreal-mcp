@@ -9,10 +9,12 @@ LOWER_GUID = (
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12}"
 )
+ZERO_GUID = r"00000000-0000-0000-0000-000000000000"
+NON_ZERO_LOWER_GUID = rf"(?!{ZERO_GUID}$){LOWER_GUID}"
 
 
 def _guid_id(kind: str, *, allow_fallback: bool = False) -> dict:
-    persisted = rf"{kind}:{LOWER_GUID}"
+    persisted = rf"{kind}:{NON_ZERO_LOWER_GUID}"
     if allow_fallback:
         return {
             "type": "string",
@@ -36,7 +38,7 @@ INTERFACE_ID = {
 STABLE_ID = {
     "type": "string",
     "pattern": (
-        rf"^(?:(?:graph|node|pin|variable|component):{LOWER_GUID}"
+        rf"^(?:(?:graph|node|pin|variable|component):{NON_ZERO_LOWER_GUID}"
         r"|interface:/[A-Za-z][A-Za-z0-9_]*/[^\s:]+\.[^\s/:.]+"
         r"|fallback:(?:graph|node|pin|variable|component):[0-9a-f]{40})$"
     ),
@@ -82,7 +84,15 @@ def _array(items: dict, **keywords: Any) -> dict:
     return {"type": "array", "items": deepcopy(items), **deepcopy(keywords)}
 
 
-def _type_choices(scalar: dict | None = None) -> list[dict]:
+def _type_choices(
+    scalar: dict | None = None,
+    *,
+    reference_path: dict | None = None,
+) -> list[dict]:
+    path_schema = reference_path or {
+        "type": "string",
+        "pattern": r"^/Script/",
+    }
     choices = [
         _object({"kind": {"const": kind}}, ("kind",))
         for kind in ("bool", "byte", "int", "int64", "string", "name", "text")
@@ -101,7 +111,7 @@ def _type_choices(scalar: dict | None = None) -> list[dict]:
             _object(
                 {
                     "kind": {"const": kind},
-                    "type_path": {"type": "string", "pattern": r"^/Script/"},
+                    "type_path": path_schema,
                 },
                 ("kind", "type_path"),
             )
@@ -111,7 +121,7 @@ def _type_choices(scalar: dict | None = None) -> list[dict]:
             _object(
                 {
                     "kind": {"const": kind},
-                    "class_path": {"type": "string", "pattern": r"^/Script/"},
+                    "class_path": path_schema,
                 },
                 ("kind", "class_path"),
             )
@@ -156,6 +166,33 @@ def type_spec() -> dict:
 
 
 TYPE_SPEC = type_spec()
+
+
+def snapshot_type_spec() -> dict:
+    """Return serialized pin types, including types from mounted assets."""
+    resource_id = "urn:unreal-mcp:blueprint2:snapshot-type-spec"
+    reference_path = {
+        "type": "string",
+        "pattern": r"^/[A-Za-z][A-Za-z0-9_]*/[^\s:]+\.[^\s/:.]+$",
+        "minLength": 5,
+    }
+    scalar = {"$ref": f"{resource_id}#/$defs/scalar"}
+    choices = _type_choices(scalar, reference_path=reference_path)
+    choices[0]["$id"] = resource_id
+    choices[0]["$defs"] = {
+        "scalar": {
+            "oneOf": _type_choices(reference_path=reference_path),
+        }
+    }
+    choices.extend(
+        [
+            _object({"kind": {"const": "exec"}}, ("kind",)),
+            _object({"kind": {"const": "unknown"}}, ("kind",)),
+        ]
+    )
+    return {"oneOf": choices}
+
+
 PARAMETER = _object(
     {"name": NAME, "type": TYPE_SPEC, "default": {}},
     ("name", "type"),
@@ -166,6 +203,80 @@ FULL_UNREAL_PATH = {
     "type": "string",
     "pattern": r"^/Script/",
     "minLength": 9,
+}
+SNAPSHOT_PIN_TYPE = snapshot_type_spec()
+SNAPSHOT_POSITION = _object(
+    {
+        "x": {
+            "type": "integer",
+            "minimum": -2_147_483_648,
+            "maximum": 2_147_483_647,
+        },
+        "y": {
+            "type": "integer",
+            "minimum": -2_147_483_648,
+            "maximum": 2_147_483_647,
+        },
+    },
+    ("x", "y"),
+)
+SNAPSHOT_PIN = _object(
+    {
+        "id": PIN_ID,
+        "name": {"type": "string"},
+        "direction": {"type": "string", "enum": ["input", "output"]},
+        "type": SNAPSHOT_PIN_TYPE,
+        "default": {},
+    },
+    ("id", "name", "direction", "type", "default"),
+)
+SNAPSHOT_NODE = _object(
+    {
+        "id": NODE_ID,
+        "class_path": FULL_UNREAL_PATH,
+        "position": SNAPSHOT_POSITION,
+        "comment": {"type": "string"},
+        "properties": {"type": "object"},
+        "pins": _array(SNAPSHOT_PIN),
+    },
+    ("id", "class_path", "position", "comment", "properties", "pins"),
+)
+SNAPSHOT_CONNECTION = _object(
+    {
+        "source_pin_id": PIN_ID,
+        "target_pin_id": PIN_ID,
+    },
+    ("source_pin_id", "target_pin_id"),
+)
+SNAPSHOT_GRAPH = _object(
+    {
+        "id": GRAPH_ID,
+        "name": {"type": "string"},
+        "schema_path": FULL_UNREAL_PATH,
+        "nodes": _array(SNAPSHOT_NODE),
+        "connections": _array(SNAPSHOT_CONNECTION),
+    },
+    ("id", "name", "schema_path", "nodes", "connections"),
+)
+BLUEPRINT_GRAPH_SNAPSHOT = _object(
+    {
+        "snapshot_version": {"const": 1},
+        "asset_path": ASSET_PATH,
+        "blueprint_class": FULL_UNREAL_PATH,
+        "graphs": _array(SNAPSHOT_GRAPH),
+        "digest": {
+            "type": "string",
+            "pattern": r"^sha1:[0-9a-f]{40}$",
+        },
+    },
+    ("snapshot_version", "asset_path", "blueprint_class", "graphs", "digest"),
+)
+EMPTY_BLUEPRINT_GRAPH_SNAPSHOT_EXAMPLE = {
+    "snapshot_version": 1,
+    "asset_path": "/Game/BP_Player.BP_Player",
+    "blueprint_class": "/Script/Engine.Blueprint",
+    "graphs": [],
+    "digest": "sha1:2537c5fff3f344fa5f11db5ac3b896bcc4d35c1e",
 }
 INTERFACE_CLASS_PATH = {
     "type": "string",
@@ -1205,15 +1316,20 @@ BLUEPRINT2_ACTION_SPECS = {
         _object(
             {
                 "asset_path": ASSET_PATH,
-                "graph_id": STABLE_ID,
-                "detailed": {"type": "boolean", "default": False},
+                "graph_ids": _array(
+                    GRAPH_ID,
+                    maxItems=64,
+                    uniqueItems=True,
+                    default=[],
+                ),
             },
-            ("asset_path", "graph_id"),
+            ("asset_path",),
         ),
         {
             "asset_path": "/Game/BP_Player",
-            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
-            "detailed": False,
+            "graph_ids": [
+                "graph:11111111-1111-4111-8111-111111111111",
+            ],
         },
     ),
     "diff_blueprint_graphs": _read(
@@ -1221,8 +1337,8 @@ BLUEPRINT2_ACTION_SPECS = {
         "Diff two deterministic graph snapshots with independently paginated sections.",
         _object(
             {
-                "before_snapshot": {"type": "object", "minProperties": 1},
-                "after_snapshot": {"type": "object", "minProperties": 1},
+                "before_snapshot": BLUEPRINT_GRAPH_SNAPSHOT,
+                "after_snapshot": BLUEPRINT_GRAPH_SNAPSHOT,
                 "queries": _array(
                     _object(
                         {
@@ -1237,20 +1353,28 @@ BLUEPRINT2_ACTION_SPECS = {
                                 "default": 100,
                             },
                             "cursor": {"type": "string", "default": ""},
-                            "detailed": {"type": "boolean", "default": False},
+                            "detail": {
+                                "type": "string",
+                                "enum": ["compact", "detailed"],
+                                "default": "compact",
+                            },
                         },
                         ("section",),
                     ),
-                    minItems=1,
+                    minItems=0,
                     maxItems=5,
+                    uniqueItems=True,
+                    default=[],
                 ),
             },
-            ("before_snapshot", "after_snapshot", "queries"),
+            ("before_snapshot", "after_snapshot"),
         ),
         {
-            "before_snapshot": {"snapshot_id": "before"},
-            "after_snapshot": {"snapshot_id": "after"},
-            "queries": [{"section": "nodes", "limit": 100, "detailed": False}],
+            "before_snapshot": EMPTY_BLUEPRINT_GRAPH_SNAPSHOT_EXAMPLE,
+            "after_snapshot": EMPTY_BLUEPRINT_GRAPH_SNAPSHOT_EXAMPLE,
+            "queries": [
+                {"section": "nodes", "limit": 100, "detail": "compact"},
+            ],
         },
     ),
 }

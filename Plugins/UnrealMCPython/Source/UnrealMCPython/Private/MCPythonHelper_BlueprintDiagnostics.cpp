@@ -9,11 +9,13 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/SCS_Node.h"
+#include "Engine/MemberReference.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Internationalization/Text.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_Event.h"
+#include "K2Node_InputKey.h"
 #include "K2Node_Variable.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
@@ -22,6 +24,7 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/UnrealType.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -266,6 +269,1458 @@ TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
     TSharedPtr<FJsonObject> Result;
     const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
     return FJsonSerializer::Deserialize(Reader, Result) ? Result : nullptr;
+}
+
+FString SnapshotEnabledState(const ENodeEnabledState State)
+{
+    switch (State)
+    {
+    case ENodeEnabledState::Enabled: return TEXT("enabled");
+    case ENodeEnabledState::Disabled: return TEXT("disabled");
+    case ENodeEnabledState::DevelopmentOnly: return TEXT("development_only");
+    }
+    return TEXT("unknown");
+}
+
+TSharedRef<FJsonObject> SnapshotMemberReference(
+    const FMemberReference& Reference)
+{
+    const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(
+        TEXT("member_name"), Reference.GetMemberName().ToString());
+    Result->SetStringField(
+        TEXT("member_guid"),
+        Reference.GetMemberGuid().IsValid()
+            ? Reference.GetMemberGuid().ToString(
+                EGuidFormats::DigitsWithHyphensLower)
+            : FString());
+    Result->SetStringField(
+        TEXT("parent_class_path"),
+        GetPathNameSafe(Reference.GetMemberParentClass()));
+    Result->SetStringField(
+        TEXT("parent_package_path"),
+        GetPathNameSafe(Reference.GetMemberParentPackage()));
+    Result->SetBoolField(TEXT("self_context"), Reference.IsSelfContext());
+    Result->SetBoolField(TEXT("local_scope"), Reference.IsLocalScope());
+    return Result;
+}
+
+TSharedRef<FJsonObject> SnapshotNodeProperties(const UEdGraphNode* Node)
+{
+    const TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+    if (!Node)
+    {
+        return Properties;
+    }
+    Properties->SetStringField(
+        TEXT("enabled_state"),
+        SnapshotEnabledState(Node->GetDesiredEnabledState()));
+
+    if (const UK2Node_CallFunction* Call = Cast<UK2Node_CallFunction>(Node))
+    {
+        Properties->SetObjectField(
+            TEXT("function_reference"),
+            SnapshotMemberReference(Call->FunctionReference));
+        Properties->SetBoolField(
+            TEXT("defaults_to_pure"), Call->bDefaultsToPureFunc != 0);
+        Properties->SetBoolField(
+            TEXT("enum_exec_expansion"),
+            Call->bWantsEnumToExecExpansion != 0);
+    }
+    if (const UK2Node_Variable* Variable = Cast<UK2Node_Variable>(Node))
+    {
+        Properties->SetObjectField(
+            TEXT("variable_reference"),
+            SnapshotMemberReference(Variable->VariableReference));
+    }
+    if (const UK2Node_Event* Event = Cast<UK2Node_Event>(Node))
+    {
+        Properties->SetObjectField(
+            TEXT("event_reference"),
+            SnapshotMemberReference(Event->EventReference));
+        Properties->SetStringField(
+            TEXT("custom_function_name"),
+            Event->CustomFunctionName.ToString());
+        Properties->SetBoolField(
+            TEXT("override_function"), Event->bOverrideFunction != 0);
+        Properties->SetBoolField(
+            TEXT("internal_event"), Event->bInternalEvent != 0);
+        Properties->SetNumberField(
+            TEXT("function_flags"), Event->FunctionFlags);
+    }
+    if (const UK2Node_CustomEvent* CustomEvent =
+        Cast<UK2Node_CustomEvent>(Node))
+    {
+        Properties->SetBoolField(
+            TEXT("call_in_editor"), CustomEvent->bCallInEditor);
+        Properties->SetBoolField(
+            TEXT("deprecated"), CustomEvent->bIsDeprecated);
+    }
+    if (const UK2Node_InputKey* InputKey = Cast<UK2Node_InputKey>(Node))
+    {
+        const TSharedRef<FJsonObject> Input = MakeShared<FJsonObject>();
+        Input->SetStringField(TEXT("key"), InputKey->InputKey.GetFName().ToString());
+        Input->SetBoolField(TEXT("consume_input"), InputKey->bConsumeInput != 0);
+        Input->SetBoolField(
+            TEXT("execute_when_paused"), InputKey->bExecuteWhenPaused != 0);
+        Input->SetBoolField(
+            TEXT("override_parent_binding"),
+            InputKey->bOverrideParentBinding != 0);
+        Input->SetBoolField(TEXT("control"), InputKey->bControl != 0);
+        Input->SetBoolField(TEXT("alt"), InputKey->bAlt != 0);
+        Input->SetBoolField(TEXT("shift"), InputKey->bShift != 0);
+        Input->SetBoolField(TEXT("command"), InputKey->bCommand != 0);
+        Properties->SetObjectField(TEXT("input_key"), Input);
+    }
+    return Properties;
+}
+
+bool IsTransientSnapshotObject(const UObject* Object)
+{
+    if (!Object || Object->HasAnyFlags(RF_Transient))
+    {
+        return Object != nullptr;
+    }
+    const UPackage* Package = Object->GetOutermost();
+    return !Package || Package == GetTransientPackage();
+}
+
+bool IsTransientSnapshotPath(const FString& Path)
+{
+    return Path.StartsWith(TEXT("/Engine/Transient.")) ||
+        Path.StartsWith(TEXT("/Temp/"));
+}
+
+TSharedPtr<FJsonValue> SnapshotPinDefault(const UEdGraphPin* Pin)
+{
+    using namespace UE::MCPython::Blueprint2;
+    if (!Pin || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+    {
+        return MakeShared<FJsonValueNull>();
+    }
+    if (Pin->PinType.ContainerType == EPinContainerType::None &&
+        Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Text)
+    {
+        const FString* Source = FTextInspector::GetSourceString(
+            Pin->DefaultTextValue);
+        const TOptional<FString> TextNamespace = FTextInspector::GetNamespace(
+            Pin->DefaultTextValue);
+        const TOptional<FString> TextKey = FTextInspector::GetKey(
+            Pin->DefaultTextValue);
+        const TSharedRef<FJsonObject> TextDefault = MakeShared<FJsonObject>();
+        TextDefault->SetStringField(
+            TEXT("source"), Source ? *Source : Pin->DefaultValue);
+        TextDefault->SetStringField(
+            TEXT("namespace"), TextNamespace.Get(FString()));
+        TextDefault->SetStringField(TEXT("key"), TextKey.Get(FString()));
+        TextDefault->SetBoolField(
+            TEXT("culture_invariant"),
+            Pin->DefaultTextValue.IsCultureInvariant());
+        return MakeShared<FJsonValueObject>(TextDefault);
+    }
+
+    const bool bObjectLike =
+        Pin->PinType.ContainerType == EPinContainerType::None &&
+        (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object ||
+         Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class ||
+         Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface ||
+         Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_SoftObject ||
+         Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_SoftClass);
+    if (bObjectLike && IsTransientSnapshotObject(Pin->DefaultObject.Get()))
+    {
+        return MakeShared<FJsonValueNull>();
+    }
+    TSharedPtr<FJsonValue> Result = SerializeDefaultValue(
+        Pin->PinType,
+        Pin->DefaultValue,
+        Pin->DefaultObject,
+        Pin->DefaultTextValue);
+    if (!Result.IsValid())
+    {
+        return MakeShared<FJsonValueNull>();
+    }
+    if (bObjectLike && Result->Type == EJson::String &&
+        IsTransientSnapshotPath(Result->AsString()))
+    {
+        return MakeShared<FJsonValueNull>();
+    }
+    return Result;
+}
+
+struct FGraphDiffError
+{
+    FString Path;
+    FString Message;
+    FString Hint;
+};
+
+struct FGraphSnapshotIndex
+{
+    FString Digest;
+    TMap<FString, TSharedPtr<FJsonObject>> Nodes;
+    TMap<FString, TSharedPtr<FJsonObject>> Pins;
+    TMap<FString, TSharedPtr<FJsonObject>> Connections;
+};
+
+struct FGraphDiffRecord
+{
+    FString Id;
+    FString Change;
+    TArray<FString> ChangedFields;
+    TSharedPtr<FJsonValue> Before;
+    TSharedPtr<FJsonValue> After;
+};
+
+struct FGraphDiffQuery
+{
+    FString Section;
+    FString Detail = TEXT("compact");
+    int32 Limit = 100;
+    FString Cursor;
+    FString LastId;
+    FString Digest;
+    FString AssetKey;
+};
+
+bool SetGraphDiffError(
+    FGraphDiffError& OutError,
+    const FString& Path,
+    const FString& Message,
+    const FString& Hint = TEXT("Provide a complete canonical Blueprint graph snapshot and retry."))
+{
+    OutError.Path = Path;
+    OutError.Message = Message;
+    OutError.Hint = Hint;
+    return false;
+}
+
+bool ValidateJsonFields(
+    const TSharedRef<FJsonObject>& Object,
+    const TSet<FString>& SupportedFields,
+    const FString& Path,
+    FGraphDiffError& OutError)
+{
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+    {
+        if (!SupportedFields.Contains(Field.Key))
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path + TEXT(".") + Field.Key,
+                TEXT("Object contains an unknown field."));
+        }
+    }
+    return true;
+}
+
+bool ReadRequiredString(
+    const TSharedRef<FJsonObject>& Object,
+    const FString& Field,
+    const FString& Path,
+    FString& OutValue,
+    FGraphDiffError& OutError,
+    const bool bAllowEmpty = false)
+{
+    if (!Object->TryGetStringField(Field, OutValue) ||
+        (!bAllowEmpty && OutValue.IsEmpty()))
+    {
+        return SetGraphDiffError(
+            OutError,
+            Path,
+            bAllowEmpty
+                ? TEXT("Field must be a string.")
+                : TEXT("Field must be a non-empty string."));
+    }
+    return true;
+}
+
+bool IsSnapshotMountedObjectPath(const FString& Path)
+{
+    if (Path.Len() < 5 || Path[0] != TEXT('/'))
+    {
+        return false;
+    }
+
+    const auto IsAsciiLetter = [](const TCHAR Character)
+    {
+        return (Character >= TEXT('A') && Character <= TEXT('Z')) ||
+            (Character >= TEXT('a') && Character <= TEXT('z'));
+    };
+    const auto IsAsciiDigit = [](const TCHAR Character)
+    {
+        return Character >= TEXT('0') && Character <= TEXT('9');
+    };
+
+    int32 MountEnd = 1;
+    if (!IsAsciiLetter(Path[MountEnd]))
+    {
+        return false;
+    }
+    for (++MountEnd; MountEnd < Path.Len() && Path[MountEnd] != TEXT('/');
+         ++MountEnd)
+    {
+        if (!IsAsciiLetter(Path[MountEnd]) &&
+            !IsAsciiDigit(Path[MountEnd]) &&
+            Path[MountEnd] != TEXT('_'))
+        {
+            return false;
+        }
+    }
+    if (MountEnd >= Path.Len() || Path[MountEnd] != TEXT('/'))
+    {
+        return false;
+    }
+
+    int32 ObjectSeparator = INDEX_NONE;
+    if (!Path.FindLastChar(TEXT('.'), ObjectSeparator) ||
+        ObjectSeparator <= MountEnd + 1 ||
+        ObjectSeparator >= Path.Len() - 1)
+    {
+        return false;
+    }
+    for (int32 Index = MountEnd + 1; Index < ObjectSeparator; ++Index)
+    {
+        if (FChar::IsWhitespace(Path[Index]) || Path[Index] == TEXT(':'))
+        {
+            return false;
+        }
+    }
+    for (int32 Index = ObjectSeparator + 1; Index < Path.Len(); ++Index)
+    {
+        if (FChar::IsWhitespace(Path[Index]) || Path[Index] == TEXT('/') ||
+            Path[Index] == TEXT(':') || Path[Index] == TEXT('.'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsSnapshotFullUnrealPath(const FString& Path)
+{
+    return Path.Len() >= 9 && Path.StartsWith(TEXT("/Script/"));
+}
+
+bool ValidateSnapshotPinType(
+    const TSharedPtr<FJsonObject>& Type,
+    const FString& Path,
+    const bool bAllowOuterOnlyKinds,
+    FGraphDiffError& OutError)
+{
+    if (!Type.IsValid())
+    {
+        return SetGraphDiffError(
+            OutError, Path, TEXT("type must be a canonical pin-type object."));
+    }
+
+    FString Kind;
+    if (!ReadRequiredString(
+            Type.ToSharedRef(), TEXT("kind"), Path + TEXT(".kind"),
+            Kind, OutError))
+    {
+        return false;
+    }
+
+    static const TSet<FString> PrimitiveKinds = {
+        TEXT("bool"), TEXT("byte"), TEXT("int"), TEXT("int64"),
+        TEXT("string"), TEXT("name"), TEXT("text")};
+    static const TSet<FString> ReferenceKinds = {
+        TEXT("object"), TEXT("class"), TEXT("interface"),
+        TEXT("soft_object"), TEXT("soft_class")};
+    static const TSet<FString> KindOnlyFields = {TEXT("kind")};
+    static const TSet<FString> RealFields = {TEXT("kind"), TEXT("precision")};
+    static const TSet<FString> TypePathFields = {TEXT("kind"), TEXT("type_path")};
+    static const TSet<FString> ClassPathFields = {TEXT("kind"), TEXT("class_path")};
+    static const TSet<FString> ItemFields = {TEXT("kind"), TEXT("item")};
+    static const TSet<FString> MapFields = {TEXT("kind"), TEXT("key"), TEXT("value")};
+
+    if (PrimitiveKinds.Contains(Kind))
+    {
+        return ValidateJsonFields(
+            Type.ToSharedRef(), KindOnlyFields, Path, OutError);
+    }
+    if (Kind == TEXT("exec") || Kind == TEXT("unknown"))
+    {
+        if (!bAllowOuterOnlyKinds)
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path,
+                TEXT("Container item, key, and value types must be scalar pin types."));
+        }
+        return ValidateJsonFields(
+            Type.ToSharedRef(), KindOnlyFields, Path, OutError);
+    }
+    if (Kind == TEXT("real"))
+    {
+        if (!ValidateJsonFields(
+                Type.ToSharedRef(), RealFields, Path, OutError))
+        {
+            return false;
+        }
+        FString Precision;
+        if (!ReadRequiredString(
+                Type.ToSharedRef(), TEXT("precision"),
+                Path + TEXT(".precision"), Precision, OutError) ||
+            (Precision != TEXT("float") && Precision != TEXT("double")))
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path + TEXT(".precision"),
+                TEXT("real precision must be either 'float' or 'double'."));
+        }
+        return true;
+    }
+    if (Kind == TEXT("enum") || Kind == TEXT("struct"))
+    {
+        if (!ValidateJsonFields(
+                Type.ToSharedRef(), TypePathFields, Path, OutError))
+        {
+            return false;
+        }
+        FString TypePath;
+        if (!ReadRequiredString(
+                Type.ToSharedRef(), TEXT("type_path"),
+                Path + TEXT(".type_path"), TypePath, OutError) ||
+            !IsSnapshotMountedObjectPath(TypePath))
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path + TEXT(".type_path"),
+                TEXT("type_path must be a canonical mounted object path."));
+        }
+        return true;
+    }
+    if (ReferenceKinds.Contains(Kind))
+    {
+        if (!ValidateJsonFields(
+                Type.ToSharedRef(), ClassPathFields, Path, OutError))
+        {
+            return false;
+        }
+        FString ClassPath;
+        if (!ReadRequiredString(
+                Type.ToSharedRef(), TEXT("class_path"),
+                Path + TEXT(".class_path"), ClassPath, OutError) ||
+            !IsSnapshotMountedObjectPath(ClassPath))
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path + TEXT(".class_path"),
+                TEXT("class_path must be a canonical mounted object path."));
+        }
+        return true;
+    }
+    if (Kind == TEXT("array") || Kind == TEXT("set"))
+    {
+        if (!bAllowOuterOnlyKinds)
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path,
+                TEXT("Nested container pin types are not canonical."));
+        }
+        if (!ValidateJsonFields(
+                Type.ToSharedRef(), ItemFields, Path, OutError))
+        {
+            return false;
+        }
+        const TSharedPtr<FJsonObject>* Item = nullptr;
+        if (!Type->TryGetObjectField(TEXT("item"), Item) ||
+            !Item || !Item->IsValid())
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path + TEXT(".item"),
+                TEXT("Container item must be a scalar pin-type object."));
+        }
+        return ValidateSnapshotPinType(
+            *Item, Path + TEXT(".item"), false, OutError);
+    }
+    if (Kind == TEXT("map"))
+    {
+        if (!bAllowOuterOnlyKinds)
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path,
+                TEXT("Nested container pin types are not canonical."));
+        }
+        if (!ValidateJsonFields(
+                Type.ToSharedRef(), MapFields, Path, OutError))
+        {
+            return false;
+        }
+        const TSharedPtr<FJsonObject>* Key = nullptr;
+        const TSharedPtr<FJsonObject>* Value = nullptr;
+        if (!Type->TryGetObjectField(TEXT("key"), Key) ||
+            !Key || !Key->IsValid())
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path + TEXT(".key"),
+                TEXT("Map key must be a scalar pin-type object."));
+        }
+        if (!Type->TryGetObjectField(TEXT("value"), Value) ||
+            !Value || !Value->IsValid())
+        {
+            return SetGraphDiffError(
+                OutError,
+                Path + TEXT(".value"),
+                TEXT("Map value must be a scalar pin-type object."));
+        }
+        return ValidateSnapshotPinType(
+                   *Key, Path + TEXT(".key"), false, OutError) &&
+            ValidateSnapshotPinType(
+                   *Value, Path + TEXT(".value"), false, OutError);
+    }
+
+    return SetGraphDiffError(
+        OutError,
+        Path + TEXT(".kind"),
+        TEXT("kind is not a supported canonical snapshot pin type."));
+}
+
+bool ValidateSnapshotTargetId(
+    const FString& Id,
+    const UE::MCPython::Blueprint2::ETargetKind Kind,
+    const FString& Path,
+    FGraphDiffError& OutError)
+{
+    FGuid Guid;
+    if (!UE::MCPython::Blueprint2::ParseTargetId(Id, Kind, Guid) ||
+        !Guid.IsValid())
+    {
+        return SetGraphDiffError(
+            OutError,
+            Path,
+            TEXT("Snapshot IDs must use the expected kind and a non-zero lowercase canonical GUID."));
+    }
+    return true;
+}
+
+bool IsCanonicalSha1Digest(const FString& Digest)
+{
+    if (Digest.Len() != 45 || !Digest.StartsWith(TEXT("sha1:")))
+    {
+        return false;
+    }
+    for (int32 Index = 5; Index < Digest.Len(); ++Index)
+    {
+        const TCHAR Character = Digest[Index];
+        if (!((Character >= TEXT('0') && Character <= TEXT('9')) ||
+              (Character >= TEXT('a') && Character <= TEXT('f'))))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+FString GraphConnectionId(
+    const FString& SourcePinId,
+    const FString& TargetPinId)
+{
+    return TEXT("connection:") + SourcePinId + TEXT("->") + TargetPinId;
+}
+
+bool ValidateGraphSnapshot(
+    const TSharedPtr<FJsonObject>& Snapshot,
+    const FString& Path,
+    FGraphSnapshotIndex& OutIndex,
+    FGraphDiffError& OutError)
+{
+    using namespace UE::MCPython::Blueprint2;
+    if (!Snapshot.IsValid())
+    {
+        return SetGraphDiffError(
+            OutError, Path, TEXT("Snapshot must be a JSON object."));
+    }
+    static const TSet<FString> SnapshotFields = {
+        TEXT("snapshot_version"), TEXT("asset_path"),
+        TEXT("blueprint_class"), TEXT("graphs"), TEXT("digest")};
+    if (!ValidateJsonFields(
+            Snapshot.ToSharedRef(), SnapshotFields, Path, OutError))
+    {
+        return false;
+    }
+
+    double SnapshotVersion = 0.0;
+    if (!Snapshot->TryGetNumberField(
+            TEXT("snapshot_version"), SnapshotVersion) ||
+        SnapshotVersion != 1.0)
+    {
+        return SetGraphDiffError(
+            OutError,
+            Path + TEXT(".snapshot_version"),
+            TEXT("snapshot_version must be exactly 1."));
+    }
+    FString Ignored;
+    FString BlueprintClass;
+    if (!ReadRequiredString(
+            Snapshot.ToSharedRef(), TEXT("asset_path"),
+            Path + TEXT(".asset_path"), Ignored, OutError) ||
+        !ReadRequiredString(
+            Snapshot.ToSharedRef(), TEXT("blueprint_class"),
+            Path + TEXT(".blueprint_class"), BlueprintClass, OutError) ||
+        !ReadRequiredString(
+            Snapshot.ToSharedRef(), TEXT("digest"),
+            Path + TEXT(".digest"), OutIndex.Digest, OutError))
+    {
+        return false;
+    }
+    if (!IsSnapshotFullUnrealPath(BlueprintClass))
+    {
+        return SetGraphDiffError(
+            OutError,
+            Path + TEXT(".blueprint_class"),
+            TEXT("blueprint_class must be a /Script/ path."));
+    }
+    if (!IsCanonicalSha1Digest(OutIndex.Digest))
+    {
+        return SetGraphDiffError(
+            OutError,
+            Path + TEXT(".digest"),
+            TEXT("digest must be sha1: followed by 40 lowercase hexadecimal characters."));
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* GraphValues = nullptr;
+    if (!Snapshot->TryGetArrayField(TEXT("graphs"), GraphValues) ||
+        !GraphValues)
+    {
+        return SetGraphDiffError(
+            OutError,
+            Path + TEXT(".graphs"),
+            TEXT("graphs must be an array."));
+    }
+
+    static const TSet<FString> GraphFields = {
+        TEXT("id"), TEXT("name"), TEXT("schema_path"),
+        TEXT("nodes"), TEXT("connections")};
+    static const TSet<FString> NodeFields = {
+        TEXT("id"), TEXT("class_path"), TEXT("position"),
+        TEXT("comment"), TEXT("properties"), TEXT("pins")};
+    static const TSet<FString> PositionFields = {TEXT("x"), TEXT("y")};
+    static const TSet<FString> PinFields = {
+        TEXT("id"), TEXT("name"), TEXT("direction"),
+        TEXT("type"), TEXT("default")};
+    static const TSet<FString> ConnectionFields = {
+        TEXT("source_pin_id"), TEXT("target_pin_id")};
+    TSet<FString> GraphIds;
+    FString LastGraphId;
+    for (int32 GraphIndex = 0; GraphIndex < GraphValues->Num(); ++GraphIndex)
+    {
+        const FString GraphPath = FString::Printf(
+            TEXT("%s.graphs[%d]"), *Path, GraphIndex);
+        const TSharedPtr<FJsonValue>& GraphValue = (*GraphValues)[GraphIndex];
+        if (!GraphValue.IsValid() || GraphValue->Type != EJson::Object)
+        {
+            return SetGraphDiffError(
+                OutError, GraphPath, TEXT("Each graph must be an object."));
+        }
+        const TSharedPtr<FJsonObject> Graph = GraphValue->AsObject();
+        if (!ValidateJsonFields(
+                Graph.ToSharedRef(), GraphFields, GraphPath, OutError))
+        {
+            return false;
+        }
+        FString GraphId;
+        FString SchemaPath;
+        if (!ReadRequiredString(
+                Graph.ToSharedRef(), TEXT("id"), GraphPath + TEXT(".id"),
+                GraphId, OutError) ||
+            !ReadRequiredString(
+                Graph.ToSharedRef(), TEXT("name"), GraphPath + TEXT(".name"),
+                Ignored, OutError, true) ||
+            !ReadRequiredString(
+                Graph.ToSharedRef(), TEXT("schema_path"),
+                GraphPath + TEXT(".schema_path"), SchemaPath, OutError))
+        {
+            return false;
+        }
+        if (!ValidateSnapshotTargetId(
+                GraphId, ETargetKind::Graph,
+                GraphPath + TEXT(".id"), OutError))
+        {
+            return false;
+        }
+        if (!IsSnapshotFullUnrealPath(SchemaPath))
+        {
+            return SetGraphDiffError(
+                OutError,
+                GraphPath + TEXT(".schema_path"),
+                TEXT("schema_path must be a /Script/ path."));
+        }
+        if (GraphIds.Contains(GraphId))
+        {
+            return SetGraphDiffError(
+                OutError,
+                GraphPath + TEXT(".id"),
+                TEXT("Graph IDs must be unique within a snapshot."));
+        }
+        GraphIds.Add(GraphId);
+        if (!LastGraphId.IsEmpty() && !(LastGraphId < GraphId))
+        {
+            return SetGraphDiffError(
+                OutError,
+                GraphPath + TEXT(".id"),
+                TEXT("graphs must be sorted by strictly ascending stable ID."));
+        }
+        LastGraphId = GraphId;
+
+        const TArray<TSharedPtr<FJsonValue>>* NodeValues = nullptr;
+        const TArray<TSharedPtr<FJsonValue>>* ConnectionValues = nullptr;
+        if (!Graph->TryGetArrayField(TEXT("nodes"), NodeValues) || !NodeValues)
+        {
+            return SetGraphDiffError(
+                OutError,
+                GraphPath + TEXT(".nodes"),
+                TEXT("nodes must be an array."));
+        }
+        if (!Graph->TryGetArrayField(
+                TEXT("connections"), ConnectionValues) || !ConnectionValues)
+        {
+            return SetGraphDiffError(
+                OutError,
+                GraphPath + TEXT(".connections"),
+                TEXT("connections must be an array."));
+        }
+
+        TSet<FString> GraphPinIds;
+        TMap<FString, FString> GraphPinDirections;
+        FString LastNodeId;
+        for (int32 NodeIndex = 0; NodeIndex < NodeValues->Num(); ++NodeIndex)
+        {
+            const FString NodePath = FString::Printf(
+                TEXT("%s.nodes[%d]"), *GraphPath, NodeIndex);
+            const TSharedPtr<FJsonValue>& NodeValue = (*NodeValues)[NodeIndex];
+            if (!NodeValue.IsValid() || NodeValue->Type != EJson::Object)
+            {
+                return SetGraphDiffError(
+                    OutError, NodePath, TEXT("Each node must be an object."));
+            }
+            const TSharedPtr<FJsonObject> Node = NodeValue->AsObject();
+            if (!ValidateJsonFields(
+                    Node.ToSharedRef(), NodeFields, NodePath, OutError))
+            {
+                return false;
+            }
+            FString NodeId;
+            FString NodeClassPath;
+            FString Comment;
+            if (!ReadRequiredString(
+                    Node.ToSharedRef(), TEXT("id"), NodePath + TEXT(".id"),
+                    NodeId, OutError) ||
+                !ReadRequiredString(
+                    Node.ToSharedRef(), TEXT("class_path"),
+                    NodePath + TEXT(".class_path"), NodeClassPath, OutError) ||
+                !ReadRequiredString(
+                    Node.ToSharedRef(), TEXT("comment"),
+                    NodePath + TEXT(".comment"), Comment, OutError, true))
+            {
+                return false;
+            }
+            if (!ValidateSnapshotTargetId(
+                    NodeId, ETargetKind::Node,
+                    NodePath + TEXT(".id"), OutError))
+            {
+                return false;
+            }
+            if (!IsSnapshotFullUnrealPath(NodeClassPath))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    NodePath + TEXT(".class_path"),
+                    TEXT("class_path must be a /Script/ path."));
+            }
+            if (OutIndex.Nodes.Contains(NodeId))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    NodePath + TEXT(".id"),
+                    TEXT("Node IDs must be unique within a snapshot."));
+            }
+            if (!LastNodeId.IsEmpty() && !(LastNodeId < NodeId))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    NodePath + TEXT(".id"),
+                    TEXT("nodes must be sorted by strictly ascending stable ID."));
+            }
+            LastNodeId = NodeId;
+
+            const TSharedPtr<FJsonObject>* Position = nullptr;
+            const TSharedPtr<FJsonObject>* Properties = nullptr;
+            if (!Node->TryGetObjectField(TEXT("position"), Position) ||
+                !Position || !Position->IsValid())
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    NodePath + TEXT(".position"),
+                    TEXT("position must be an object."));
+            }
+            if (!ValidateJsonFields(
+                    Position->ToSharedRef(), PositionFields,
+                    NodePath + TEXT(".position"), OutError))
+            {
+                return false;
+            }
+            for (const FString& Axis : {TEXT("x"), TEXT("y")})
+            {
+                double Coordinate = 0.0;
+                if (!(*Position)->TryGetNumberField(Axis, Coordinate) ||
+                    !FMath::IsFinite(Coordinate) ||
+                    Coordinate != FMath::FloorToDouble(Coordinate) ||
+                    Coordinate < static_cast<double>(MIN_int32) ||
+                    Coordinate > static_cast<double>(MAX_int32))
+                {
+                    return SetGraphDiffError(
+                        OutError,
+                        NodePath + TEXT(".position.") + Axis,
+                        TEXT("Position coordinates must be finite 32-bit integers."));
+                }
+            }
+            if (!Node->TryGetObjectField(TEXT("properties"), Properties) ||
+                !Properties || !Properties->IsValid())
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    NodePath + TEXT(".properties"),
+                    TEXT("properties must be an object."));
+            }
+
+            const TArray<TSharedPtr<FJsonValue>>* PinValues = nullptr;
+            if (!Node->TryGetArrayField(TEXT("pins"), PinValues) || !PinValues)
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    NodePath + TEXT(".pins"),
+                    TEXT("pins must be an array."));
+            }
+            FString LastPinId;
+            for (int32 PinIndex = 0; PinIndex < PinValues->Num(); ++PinIndex)
+            {
+                const FString PinPath = FString::Printf(
+                    TEXT("%s.pins[%d]"), *NodePath, PinIndex);
+                const TSharedPtr<FJsonValue>& PinValue = (*PinValues)[PinIndex];
+                if (!PinValue.IsValid() || PinValue->Type != EJson::Object)
+                {
+                    return SetGraphDiffError(
+                        OutError, PinPath, TEXT("Each pin must be an object."));
+                }
+                const TSharedPtr<FJsonObject> Pin = PinValue->AsObject();
+                if (!ValidateJsonFields(
+                        Pin.ToSharedRef(), PinFields, PinPath, OutError))
+                {
+                    return false;
+                }
+                FString PinId;
+                FString Direction;
+                if (!ReadRequiredString(
+                        Pin.ToSharedRef(), TEXT("id"), PinPath + TEXT(".id"),
+                        PinId, OutError) ||
+                    !ReadRequiredString(
+                        Pin.ToSharedRef(), TEXT("name"), PinPath + TEXT(".name"),
+                        Ignored, OutError, true) ||
+                    !ReadRequiredString(
+                        Pin.ToSharedRef(), TEXT("direction"),
+                        PinPath + TEXT(".direction"), Direction, OutError))
+                {
+                    return false;
+                }
+                if (!ValidateSnapshotTargetId(
+                        PinId, ETargetKind::Pin,
+                        PinPath + TEXT(".id"), OutError))
+                {
+                    return false;
+                }
+                if (Direction != TEXT("input") && Direction != TEXT("output"))
+                {
+                    return SetGraphDiffError(
+                        OutError,
+                        PinPath + TEXT(".direction"),
+                        TEXT("direction must be either 'input' or 'output'."));
+                }
+                const TSharedPtr<FJsonObject>* Type = nullptr;
+                if (!Pin->TryGetObjectField(TEXT("type"), Type) ||
+                    !Type || !Type->IsValid())
+                {
+                    return SetGraphDiffError(
+                        OutError,
+                        PinPath + TEXT(".type"),
+                        TEXT("type must be a canonical pin-type object."));
+                }
+                if (!ValidateSnapshotPinType(
+                        *Type, PinPath + TEXT(".type"), true, OutError))
+                {
+                    return false;
+                }
+                const TSharedPtr<FJsonValue>* Default =
+                    Pin->Values.Find(TEXT("default"));
+                if (!Default || !Default->IsValid())
+                {
+                    return SetGraphDiffError(
+                        OutError,
+                        PinPath + TEXT(".default"),
+                        TEXT("default must be present; use null when unsupported."));
+                }
+                if (OutIndex.Pins.Contains(PinId))
+                {
+                    return SetGraphDiffError(
+                        OutError,
+                        PinPath + TEXT(".id"),
+                        TEXT("Pin IDs must be unique within a snapshot."));
+                }
+                if (!LastPinId.IsEmpty() && !(LastPinId < PinId))
+                {
+                    return SetGraphDiffError(
+                        OutError,
+                        PinPath + TEXT(".id"),
+                        TEXT("pins must be sorted by strictly ascending stable ID."));
+                }
+                LastPinId = PinId;
+                OutIndex.Pins.Add(PinId, Pin);
+                GraphPinIds.Add(PinId);
+                GraphPinDirections.Add(PinId, Direction);
+            }
+            OutIndex.Nodes.Add(NodeId, Node);
+        }
+
+        FString LastConnectionSource;
+        FString LastConnectionTarget;
+        for (int32 ConnectionIndex = 0;
+             ConnectionIndex < ConnectionValues->Num();
+             ++ConnectionIndex)
+        {
+            const FString ConnectionPath = FString::Printf(
+                TEXT("%s.connections[%d]"), *GraphPath, ConnectionIndex);
+            const TSharedPtr<FJsonValue>& ConnectionValue =
+                (*ConnectionValues)[ConnectionIndex];
+            if (!ConnectionValue.IsValid() ||
+                ConnectionValue->Type != EJson::Object)
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    ConnectionPath,
+                    TEXT("Each connection must be an object."));
+            }
+            const TSharedPtr<FJsonObject> Connection =
+                ConnectionValue->AsObject();
+            if (!ValidateJsonFields(
+                    Connection.ToSharedRef(), ConnectionFields,
+                    ConnectionPath, OutError))
+            {
+                return false;
+            }
+            FString SourcePinId;
+            FString TargetPinId;
+            if (!ReadRequiredString(
+                    Connection.ToSharedRef(), TEXT("source_pin_id"),
+                    ConnectionPath + TEXT(".source_pin_id"),
+                    SourcePinId, OutError) ||
+                !ReadRequiredString(
+                    Connection.ToSharedRef(), TEXT("target_pin_id"),
+                    ConnectionPath + TEXT(".target_pin_id"),
+                    TargetPinId, OutError))
+            {
+                return false;
+            }
+            if (!GraphPinIds.Contains(SourcePinId) ||
+                !GraphPinIds.Contains(TargetPinId))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    ConnectionPath,
+                    TEXT("Connection endpoints must reference pins in the same graph."));
+            }
+            if (GraphPinDirections[SourcePinId] != TEXT("output") ||
+                GraphPinDirections[TargetPinId] != TEXT("input"))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    ConnectionPath,
+                    TEXT("Connections must be oriented from an output pin to an input pin."));
+            }
+            const FString ConnectionId = GraphConnectionId(
+                SourcePinId, TargetPinId);
+            if (OutIndex.Connections.Contains(ConnectionId))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    ConnectionPath,
+                    TEXT("Connections must be unique within a snapshot."));
+            }
+            if (!LastConnectionSource.IsEmpty() &&
+                (SourcePinId < LastConnectionSource ||
+                 (SourcePinId == LastConnectionSource &&
+                  !(LastConnectionTarget < TargetPinId))))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    ConnectionPath,
+                    TEXT("connections must be sorted by strictly ascending source and target pin IDs."));
+            }
+            LastConnectionSource = SourcePinId;
+            LastConnectionTarget = TargetPinId;
+            OutIndex.Connections.Add(ConnectionId, Connection);
+        }
+    }
+
+    const TSharedRef<FJsonObject> UnsignedSnapshot = MakeShared<FJsonObject>();
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Snapshot->Values)
+    {
+        if (Field.Key != TEXT("digest"))
+        {
+            UnsignedSnapshot->SetField(Field.Key, Field.Value);
+        }
+    }
+    const FString ComputedDigest = TEXT("sha1:") + Sha1Hex(
+        CanonicalJsonString(MakeShared<FJsonValueObject>(UnsignedSnapshot)));
+    if (ComputedDigest != OutIndex.Digest)
+    {
+        return SetGraphDiffError(
+            OutError,
+            Path + TEXT(".digest"),
+            TEXT("Snapshot digest does not match its canonical contents."),
+            TEXT("Create a fresh snapshot with snapshot_blueprint_graph and retry."));
+    }
+    return true;
+}
+
+bool JsonFieldsEqual(
+    const TSharedRef<FJsonObject>& Left,
+    const TSharedRef<FJsonObject>& Right,
+    const FString& Field)
+{
+    const TSharedPtr<FJsonValue>* LeftValue = Left->Values.Find(Field);
+    const TSharedPtr<FJsonValue>* RightValue = Right->Values.Find(Field);
+    return LeftValue && RightValue &&
+        LeftValue->IsValid() && RightValue->IsValid() &&
+        FJsonValue::CompareEqual(**LeftValue, **RightValue);
+}
+
+TSharedPtr<FJsonValue> JsonObjectValue(
+    const TSharedPtr<FJsonObject>& Object)
+{
+    return Object.IsValid()
+        ? MakeShared<FJsonValueObject>(Object)
+        : TSharedPtr<FJsonValue>();
+}
+
+TSharedPtr<FJsonValue> ProjectNodeProperties(
+    const TSharedPtr<FJsonObject>& Node)
+{
+    if (!Node.IsValid())
+    {
+        return nullptr;
+    }
+    const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+    for (const FString& Field : {
+             TEXT("class_path"), TEXT("comment"), TEXT("properties")})
+    {
+        Result->SetField(Field, Node->Values.FindChecked(Field));
+    }
+    return MakeShared<FJsonValueObject>(Result);
+}
+
+TSharedPtr<FJsonValue> NodePositionValue(
+    const TSharedPtr<FJsonObject>& Node)
+{
+    return Node.IsValid() ? Node->Values.FindChecked(TEXT("position")) : nullptr;
+}
+
+TArray<FString> SortedObjectKeys(
+    const TMap<FString, TSharedPtr<FJsonObject>>& Before,
+    const TMap<FString, TSharedPtr<FJsonObject>>& After)
+{
+    TSet<FString> KeySet;
+    for (const TPair<FString, TSharedPtr<FJsonObject>>& Pair : Before)
+    {
+        KeySet.Add(Pair.Key);
+    }
+    for (const TPair<FString, TSharedPtr<FJsonObject>>& Pair : After)
+    {
+        KeySet.Add(Pair.Key);
+    }
+    TArray<FString> Keys = KeySet.Array();
+    Keys.Sort();
+    return Keys;
+}
+
+TArray<FGraphDiffRecord> BuildPresenceDiffRecords(
+    const TMap<FString, TSharedPtr<FJsonObject>>& Before,
+    const TMap<FString, TSharedPtr<FJsonObject>>& After)
+{
+    TArray<FGraphDiffRecord> Records;
+    for (const FString& Id : SortedObjectKeys(Before, After))
+    {
+        const TSharedPtr<FJsonObject>* BeforeObject = Before.Find(Id);
+        const TSharedPtr<FJsonObject>* AfterObject = After.Find(Id);
+        if (!BeforeObject)
+        {
+            Records.Add({
+                Id, TEXT("added"), {}, nullptr,
+                JsonObjectValue(*AfterObject)});
+        }
+        else if (!AfterObject)
+        {
+            Records.Add({
+                Id, TEXT("removed"), {},
+                JsonObjectValue(*BeforeObject), nullptr});
+        }
+    }
+    return Records;
+}
+
+TArray<FGraphDiffRecord> BuildPinDiffRecords(
+    const FGraphSnapshotIndex& Before,
+    const FGraphSnapshotIndex& After)
+{
+    TArray<FGraphDiffRecord> Records = BuildPresenceDiffRecords(
+        Before.Pins, After.Pins);
+    for (const FString& Id : SortedObjectKeys(Before.Pins, After.Pins))
+    {
+        const TSharedPtr<FJsonObject>* BeforePin = Before.Pins.Find(Id);
+        const TSharedPtr<FJsonObject>* AfterPin = After.Pins.Find(Id);
+        if (!BeforePin || !AfterPin)
+        {
+            continue;
+        }
+        TArray<FString> ChangedFields;
+        for (const FString& Field : {
+                 TEXT("name"), TEXT("direction"), TEXT("type"), TEXT("default")})
+        {
+            if (!JsonFieldsEqual(
+                    BeforePin->ToSharedRef(), AfterPin->ToSharedRef(), Field))
+            {
+                ChangedFields.Add(Field);
+            }
+        }
+        if (!ChangedFields.IsEmpty())
+        {
+            Records.Add({
+                Id, TEXT("changed"), ChangedFields,
+                JsonObjectValue(*BeforePin), JsonObjectValue(*AfterPin)});
+        }
+    }
+    Records.Sort([](
+        const FGraphDiffRecord& Left,
+        const FGraphDiffRecord& Right)
+    {
+        return Left.Id < Right.Id;
+    });
+    return Records;
+}
+
+TArray<FGraphDiffRecord> BuildPropertyDiffRecords(
+    const FGraphSnapshotIndex& Before,
+    const FGraphSnapshotIndex& After)
+{
+    TArray<FGraphDiffRecord> Records;
+    for (const FString& Id : SortedObjectKeys(Before.Nodes, After.Nodes))
+    {
+        const TSharedPtr<FJsonObject>* BeforeNode = Before.Nodes.Find(Id);
+        const TSharedPtr<FJsonObject>* AfterNode = After.Nodes.Find(Id);
+        if (!BeforeNode || !AfterNode)
+        {
+            continue;
+        }
+        TArray<FString> ChangedFields;
+        for (const FString& Field : {TEXT("class_path"), TEXT("comment")})
+        {
+            if (!JsonFieldsEqual(
+                    BeforeNode->ToSharedRef(), AfterNode->ToSharedRef(), Field))
+            {
+                ChangedFields.Add(Field);
+            }
+        }
+        const TSharedPtr<FJsonObject> BeforeProperties =
+            BeforeNode->ToSharedRef()->GetObjectField(TEXT("properties"));
+        const TSharedPtr<FJsonObject> AfterProperties =
+            AfterNode->ToSharedRef()->GetObjectField(TEXT("properties"));
+        TSet<FString> PropertyKeySet;
+        for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair :
+             BeforeProperties->Values)
+        {
+            PropertyKeySet.Add(Pair.Key);
+        }
+        for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair :
+             AfterProperties->Values)
+        {
+            PropertyKeySet.Add(Pair.Key);
+        }
+        TArray<FString> PropertyKeys = PropertyKeySet.Array();
+        PropertyKeys.Sort();
+        for (const FString& Field : PropertyKeys)
+        {
+            if (!JsonFieldsEqual(
+                    BeforeProperties.ToSharedRef(),
+                    AfterProperties.ToSharedRef(),
+                    Field))
+            {
+                ChangedFields.Add(Field);
+            }
+        }
+        if (!ChangedFields.IsEmpty())
+        {
+            Records.Add({
+                Id, TEXT("changed"), ChangedFields,
+                ProjectNodeProperties(*BeforeNode),
+                ProjectNodeProperties(*AfterNode)});
+        }
+    }
+    return Records;
+}
+
+TArray<FGraphDiffRecord> BuildPositionDiffRecords(
+    const FGraphSnapshotIndex& Before,
+    const FGraphSnapshotIndex& After)
+{
+    TArray<FGraphDiffRecord> Records;
+    for (const FString& Id : SortedObjectKeys(Before.Nodes, After.Nodes))
+    {
+        const TSharedPtr<FJsonObject>* BeforeNode = Before.Nodes.Find(Id);
+        const TSharedPtr<FJsonObject>* AfterNode = After.Nodes.Find(Id);
+        if (!BeforeNode || !AfterNode)
+        {
+            continue;
+        }
+        const TSharedPtr<FJsonValue> BeforePosition =
+            NodePositionValue(*BeforeNode);
+        const TSharedPtr<FJsonValue> AfterPosition =
+            NodePositionValue(*AfterNode);
+        if (!FJsonValue::CompareEqual(*BeforePosition, *AfterPosition))
+        {
+            Records.Add({
+                Id, TEXT("changed"), {TEXT("position")},
+                BeforePosition, AfterPosition});
+        }
+    }
+    return Records;
+}
+
+TArray<FGraphDiffRecord> BuildGraphDiffRecords(
+    const FString& Section,
+    const FGraphSnapshotIndex& Before,
+    const FGraphSnapshotIndex& After)
+{
+    if (Section == TEXT("nodes"))
+    {
+        return BuildPresenceDiffRecords(Before.Nodes, After.Nodes);
+    }
+    if (Section == TEXT("pins"))
+    {
+        return BuildPinDiffRecords(Before, After);
+    }
+    if (Section == TEXT("connections"))
+    {
+        return BuildPresenceDiffRecords(
+            Before.Connections, After.Connections);
+    }
+    if (Section == TEXT("properties"))
+    {
+        return BuildPropertyDiffRecords(Before, After);
+    }
+    return BuildPositionDiffRecords(Before, After);
+}
+
+TArray<TSharedPtr<FJsonValue>> JsonStringArray(
+    const TArray<FString>& Values)
+{
+    TArray<TSharedPtr<FJsonValue>> Result;
+    Result.Reserve(Values.Num());
+    for (const FString& Value : Values)
+    {
+        Result.Add(MakeShared<FJsonValueString>(Value));
+    }
+    return Result;
+}
+
+TSharedRef<FJsonObject> MaterializeGraphDiffRecord(
+    const FGraphDiffRecord& Record,
+    const bool bDetailed)
+{
+    const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("id"), Record.Id);
+    Result->SetStringField(TEXT("change"), Record.Change);
+    Result->SetArrayField(
+        TEXT("changed_fields"), JsonStringArray(Record.ChangedFields));
+    if (bDetailed)
+    {
+        Result->SetField(
+            TEXT("before"),
+            Record.Before.IsValid()
+                ? Record.Before
+                : MakeShared<FJsonValueNull>());
+        Result->SetField(
+            TEXT("after"),
+            Record.After.IsValid()
+                ? Record.After
+                : MakeShared<FJsonValueNull>());
+    }
+    return Result;
+}
+
+bool ParseGraphDiffQueries(
+    const TSharedRef<FJsonObject>& Request,
+    const FString& BeforeDigest,
+    const FString& AfterDigest,
+    TArray<FGraphDiffQuery>& OutQueries,
+    FGraphDiffError& OutError)
+{
+    using namespace UE::MCPython::Blueprint2;
+    const TArray<TSharedPtr<FJsonValue>>* QueryValues = nullptr;
+    TArray<TSharedPtr<FJsonValue>> DefaultQueryValues;
+    if (Request->HasField(TEXT("queries")) &&
+        (!Request->TryGetArrayField(TEXT("queries"), QueryValues) ||
+         !QueryValues))
+    {
+        return SetGraphDiffError(
+            OutError,
+            TEXT("params.queries"),
+            TEXT("queries must be an array."));
+    }
+    if (!QueryValues || QueryValues->IsEmpty())
+    {
+        for (const FString& Section : {
+                 TEXT("nodes"), TEXT("pins"), TEXT("connections"),
+                 TEXT("properties"), TEXT("positions")})
+        {
+            const TSharedRef<FJsonObject> Query = MakeShared<FJsonObject>();
+            Query->SetStringField(TEXT("section"), Section);
+            DefaultQueryValues.Add(MakeShared<FJsonValueObject>(Query));
+        }
+        QueryValues = &DefaultQueryValues;
+    }
+    if (QueryValues->Num() > 5)
+    {
+        return SetGraphDiffError(
+            OutError,
+            TEXT("params.queries"),
+            TEXT("queries must contain at most five section queries."));
+    }
+
+    static const TSet<FString> QueryFields = {
+        TEXT("section"), TEXT("detail"), TEXT("limit"), TEXT("cursor")};
+    static const TSet<FString> Sections = {
+        TEXT("nodes"), TEXT("pins"), TEXT("connections"),
+        TEXT("properties"), TEXT("positions")};
+    TSet<FString> SeenSections;
+    for (int32 Index = 0; Index < QueryValues->Num(); ++Index)
+    {
+        const FString QueryPath = FString::Printf(
+            TEXT("params.queries[%d]"), Index);
+        const TSharedPtr<FJsonValue>& QueryValue = (*QueryValues)[Index];
+        if (!QueryValue.IsValid() || QueryValue->Type != EJson::Object)
+        {
+            return SetGraphDiffError(
+                OutError, QueryPath, TEXT("Each query must be an object."));
+        }
+        const TSharedPtr<FJsonObject> QueryObject = QueryValue->AsObject();
+        if (!ValidateJsonFields(
+                QueryObject.ToSharedRef(), QueryFields, QueryPath, OutError))
+        {
+            return false;
+        }
+        FGraphDiffQuery Query;
+        if (!ReadRequiredString(
+                QueryObject.ToSharedRef(), TEXT("section"),
+                QueryPath + TEXT(".section"), Query.Section, OutError))
+        {
+            return false;
+        }
+        if (!Sections.Contains(Query.Section))
+        {
+            return SetGraphDiffError(
+                OutError,
+                QueryPath + TEXT(".section"),
+                TEXT("section must be nodes, pins, connections, properties, or positions."));
+        }
+        if (SeenSections.Contains(Query.Section))
+        {
+            return SetGraphDiffError(
+                OutError,
+                QueryPath + TEXT(".section"),
+                TEXT("Each diff section may be queried at most once."));
+        }
+        SeenSections.Add(Query.Section);
+
+        if (QueryObject->HasField(TEXT("detail")) &&
+            (!QueryObject->TryGetStringField(TEXT("detail"), Query.Detail) ||
+             (Query.Detail != TEXT("compact") &&
+              Query.Detail != TEXT("detailed"))))
+        {
+            return SetGraphDiffError(
+                OutError,
+                QueryPath + TEXT(".detail"),
+                TEXT("detail must be either 'compact' or 'detailed'."));
+        }
+        if (QueryObject->HasField(TEXT("limit")))
+        {
+            double Limit = 0.0;
+            if (!QueryObject->TryGetNumberField(TEXT("limit"), Limit) ||
+                !FMath::IsFinite(Limit) ||
+                Limit != FMath::FloorToDouble(Limit) ||
+                Limit < 1.0 || Limit > 500.0)
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    QueryPath + TEXT(".limit"),
+                    TEXT("limit must be an integer between 1 and 500."));
+            }
+            Query.Limit = static_cast<int32>(Limit);
+        }
+        if (QueryObject->HasField(TEXT("cursor")) &&
+            !QueryObject->TryGetStringField(TEXT("cursor"), Query.Cursor))
+        {
+            return SetGraphDiffError(
+                OutError,
+                QueryPath + TEXT(".cursor"),
+                TEXT("cursor must be a string."));
+        }
+
+        const TSharedRef<FJsonObject> Binding = MakeShared<FJsonObject>();
+        Binding->SetStringField(TEXT("before_digest"), BeforeDigest);
+        Binding->SetStringField(TEXT("after_digest"), AfterDigest);
+        Binding->SetStringField(TEXT("section"), Query.Section);
+        Binding->SetStringField(TEXT("detail"), Query.Detail);
+        Query.Digest = CanonicalQueryDigest(Binding);
+        Query.AssetKey = FString::Printf(
+            TEXT("blueprint-graph-diff|%s|%s|%s|%s"),
+            *BeforeDigest, *AfterDigest, *Query.Section, *Query.Detail);
+        if (!Query.Cursor.IsEmpty())
+        {
+            FPageRequest Page;
+            FString CursorError;
+            if (!DecodeCursor(
+                    Query.Cursor,
+                    Query.AssetKey,
+                    Query.Digest,
+                    Page,
+                    CursorError))
+            {
+                return SetGraphDiffError(
+                    OutError,
+                    QueryPath + TEXT(".cursor"),
+                    CursorError,
+                    TEXT("Use the cursor returned by this exact diff section in the current editor session."));
+            }
+            Query.LastId = Page.LastId;
+        }
+        OutQueries.Add(MoveTemp(Query));
+    }
+    return true;
+}
+
+FString SerializeGraphDiffError(const FGraphDiffError& Error)
+{
+    using namespace UE::MCPython::Blueprint2;
+    return SerializeResult(MakeFailure(
+        TEXT("INVALID_INPUT"),
+        Error.Path,
+        Error.Message,
+        false,
+        Error.Hint));
 }
 
 TSharedRef<FJsonObject> MakeHealthIssueFromDiagnostic(
@@ -1235,4 +2690,516 @@ FString UMCPythonHelper::GetBlueprintHealth(UBlueprint* Blueprint)
         Result->SetArrayField(TEXT("next_actions"), *NextActions);
     }
     return SerializeResult(Result);
+}
+
+FString UMCPythonHelper::SnapshotBlueprintGraph(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    using namespace UE::MCPython::Blueprint2;
+    if (!Blueprint)
+    {
+        return SerializeResult(MakeFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.asset_path"),
+            TEXT("Invalid Blueprint."),
+            false,
+            TEXT("Load a valid Blueprint asset and retry the snapshot.")));
+    }
+
+    const TSharedPtr<FJsonObject> Request = ParseJsonObject(RequestJson);
+    if (!Request)
+    {
+        return SerializeResult(MakeFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params"),
+            TEXT("Snapshot request must be one JSON object."),
+            false,
+            TEXT("Provide graph_ids as an optional array of stable graph IDs.")));
+    }
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Request->Values)
+    {
+        if (Field.Key != TEXT("graph_ids"))
+        {
+            return SerializeResult(MakeFailure(
+                TEXT("INVALID_INPUT"),
+                TEXT("params.") + Field.Key,
+                TEXT("Snapshot request contains an unknown field."),
+                false,
+                TEXT("Only graph_ids is accepted.")));
+        }
+    }
+
+    TArray<FString> RequestedGraphIds;
+    const TArray<TSharedPtr<FJsonValue>>* RequestedValues = nullptr;
+    if (Request->TryGetArrayField(TEXT("graph_ids"), RequestedValues))
+    {
+        if (!RequestedValues || RequestedValues->Num() > 64)
+        {
+            return SerializeResult(MakeFailure(
+                TEXT("INVALID_INPUT"),
+                TEXT("params.graph_ids"),
+                TEXT("graph_ids must contain at most 64 stable graph IDs."),
+                false,
+                TEXT("Pass an empty array to snapshot every supported graph.")));
+        }
+        TSet<FString> SeenIds;
+        for (int32 Index = 0; Index < RequestedValues->Num(); ++Index)
+        {
+            FString GraphId;
+            FGuid ParsedGuid;
+            if (!(*RequestedValues)[Index].IsValid() ||
+                !(*RequestedValues)[Index]->TryGetString(GraphId) ||
+                !ParseTargetId(GraphId, ETargetKind::Graph, ParsedGuid) ||
+                SeenIds.Contains(GraphId))
+            {
+                return SerializeResult(MakeFailure(
+                    TEXT("INVALID_INPUT"),
+                    FString::Printf(TEXT("params.graph_ids[%d]"), Index),
+                    TEXT("Each graph ID must be one unique persisted graph:<guid> ID."),
+                    false,
+                    TEXT("Inspect the Blueprint and pass stable graph IDs exactly as returned.")));
+            }
+            SeenIds.Add(GraphId);
+            RequestedGraphIds.Add(GraphId);
+        }
+    }
+    else if (Request->HasField(TEXT("graph_ids")))
+    {
+        return SerializeResult(MakeFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.graph_ids"),
+            TEXT("graph_ids must be an array."),
+            false,
+            TEXT("Pass an array of stable graph IDs or an empty array.")));
+    }
+
+    TArray<UEdGraph*> AllGraphs;
+    Blueprint->GetAllGraphs(AllGraphs);
+    TArray<UEdGraph*> Graphs;
+    TSet<FString> MatchedGraphIds;
+    TSet<FGuid> SeenGraphGuids;
+    for (UEdGraph* Graph : AllGraphs)
+    {
+        if (!Graph || !Graph->GetSchema() ||
+            !Graph->GetSchema()->IsA<UEdGraphSchema_K2>())
+        {
+            continue;
+        }
+        const FString GraphPath = FString::Printf(
+            TEXT("asset.graphs[%s].id"),
+            *Graph->GetName());
+        if (!Graph->GraphGuid.IsValid())
+        {
+            if (!RequestedGraphIds.IsEmpty())
+            {
+                continue;
+            }
+            return SerializeResult(MakeFailure(
+                TEXT("PRECONDITION_FAILED"),
+                GraphPath,
+                TEXT("Blueprint graph has no persisted GUID and cannot be snapshotted deterministically."),
+                false,
+                TEXT("Open and resave or repair the Blueprint so every graph has a valid GUID.")));
+        }
+        const FString GraphId = MakeTargetId(
+            ETargetKind::Graph,
+            Graph->GraphGuid);
+        if (!RequestedGraphIds.IsEmpty() &&
+            !RequestedGraphIds.Contains(GraphId))
+        {
+            continue;
+        }
+        if (SeenGraphGuids.Contains(Graph->GraphGuid))
+        {
+            return SerializeResult(MakeFailure(
+                TEXT("PRECONDITION_FAILED"),
+                GraphPath,
+                TEXT("Blueprint contains duplicate persisted graph GUIDs."),
+                false,
+                TEXT("Repair the duplicate graph GUIDs before requesting a snapshot.")));
+        }
+        SeenGraphGuids.Add(Graph->GraphGuid);
+        Graphs.Add(Graph);
+        MatchedGraphIds.Add(GraphId);
+    }
+    for (int32 Index = 0; Index < RequestedGraphIds.Num(); ++Index)
+    {
+        if (!MatchedGraphIds.Contains(RequestedGraphIds[Index]))
+        {
+            return SerializeResult(MakeFailure(
+                TEXT("INVALID_INPUT"),
+                FString::Printf(TEXT("params.graph_ids[%d]"), Index),
+                TEXT("Requested graph ID was not found in this Blueprint."),
+                false,
+                TEXT("Re-inspect the Blueprint and use a current supported K2 graph ID.")));
+        }
+    }
+    Graphs.Sort([Blueprint](const UEdGraph& Left, const UEdGraph& Right)
+    {
+        return DescribeGraphTarget(Blueprint, &Left).Id <
+            DescribeGraphTarget(Blueprint, &Right).Id;
+    });
+
+    TMap<FGuid, int32> AssetNodeGuidCounts;
+    TMap<FGuid, int32> AssetPinGuidCounts;
+    TSet<const UEdGraph*> CountedGraphs;
+    for (const UEdGraph* Graph : AllGraphs)
+    {
+        if (!Graph || CountedGraphs.Contains(Graph) ||
+            !Graph->GetSchema() ||
+            !Graph->GetSchema()->IsA<UEdGraphSchema_K2>())
+        {
+            continue;
+        }
+        CountedGraphs.Add(Graph);
+        for (const UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node)
+            {
+                continue;
+            }
+            if (Node->NodeGuid.IsValid())
+            {
+                ++AssetNodeGuidCounts.FindOrAdd(Node->NodeGuid);
+            }
+            for (const UEdGraphPin* Pin : Node->Pins)
+            {
+                if (Pin && Pin->PinId.IsValid())
+                {
+                    ++AssetPinGuidCounts.FindOrAdd(Pin->PinId);
+                }
+            }
+        }
+    }
+
+    TSet<FGuid> SeenNodeGuids;
+    TSet<FGuid> SeenPinGuids;
+    for (const UEdGraph* Graph : Graphs)
+    {
+        for (const UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node)
+            {
+                continue;
+            }
+            const FString NodePath = FString::Printf(
+                TEXT("asset.graphs[%s].nodes[%s].id"),
+                *Graph->GetName(),
+                *Node->GetName());
+            if (!Node->NodeGuid.IsValid())
+            {
+                return SerializeResult(MakeFailure(
+                    TEXT("PRECONDITION_FAILED"),
+                    NodePath,
+                    TEXT("Blueprint node has no persisted GUID and cannot be snapshotted deterministically."),
+                    false,
+                    TEXT("Open and resave or repair the Blueprint so every node has a valid GUID.")));
+            }
+            if (SeenNodeGuids.Contains(Node->NodeGuid) ||
+                AssetNodeGuidCounts.FindRef(Node->NodeGuid) > 1)
+            {
+                return SerializeResult(MakeFailure(
+                    TEXT("PRECONDITION_FAILED"),
+                    NodePath,
+                    TEXT("Blueprint contains duplicate persisted node GUIDs for a selected node."),
+                    false,
+                    TEXT("Repair the duplicate node GUIDs before requesting a snapshot.")));
+            }
+            SeenNodeGuids.Add(Node->NodeGuid);
+
+            for (const UEdGraphPin* Pin : Node->Pins)
+            {
+                if (!Pin)
+                {
+                    continue;
+                }
+                const FString PinPath = FString::Printf(
+                    TEXT("asset.graphs[%s].nodes[%s].pins[%s].id"),
+                    *Graph->GetName(),
+                    *Node->GetName(),
+                    *Pin->PinName.ToString());
+                if (!Pin->PinId.IsValid())
+                {
+                    return SerializeResult(MakeFailure(
+                        TEXT("PRECONDITION_FAILED"),
+                        PinPath,
+                        TEXT("Blueprint pin has no persisted GUID and cannot be snapshotted deterministically."),
+                        false,
+                        TEXT("Open and resave or repair the Blueprint so every pin has a valid GUID.")));
+                }
+                if (SeenPinGuids.Contains(Pin->PinId) ||
+                    AssetPinGuidCounts.FindRef(Pin->PinId) > 1)
+                {
+                    return SerializeResult(MakeFailure(
+                        TEXT("PRECONDITION_FAILED"),
+                        PinPath,
+                        TEXT("Blueprint contains duplicate persisted pin GUIDs for a selected pin."),
+                        false,
+                        TEXT("Repair the duplicate pin GUIDs before requesting a snapshot.")));
+                }
+                SeenPinGuids.Add(Pin->PinId);
+            }
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> GraphValues;
+    for (UEdGraph* Graph : Graphs)
+    {
+        const TSharedRef<FJsonObject> GraphJson = MakeShared<FJsonObject>();
+        GraphJson->SetStringField(
+            TEXT("id"), DescribeGraphTarget(Blueprint, Graph).Id);
+        GraphJson->SetStringField(TEXT("name"), Graph->GetName());
+        GraphJson->SetStringField(
+            TEXT("schema_path"), Graph->GetSchema()->GetClass()->GetPathName());
+
+        TArray<UEdGraphNode*> Nodes;
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (Node)
+            {
+                Nodes.Add(Node);
+            }
+        }
+        Nodes.Sort([Blueprint](const UEdGraphNode& Left, const UEdGraphNode& Right)
+        {
+            return DescribeNodeTarget(Blueprint, &Left).Id <
+                DescribeNodeTarget(Blueprint, &Right).Id;
+        });
+
+        TArray<TSharedPtr<FJsonValue>> NodeValues;
+        TArray<TSharedPtr<FJsonValue>> ConnectionValues;
+        TSet<TPair<FString, FString>> UniqueConnections;
+        for (UEdGraphNode* Node : Nodes)
+        {
+            const TSharedRef<FJsonObject> NodeJson = MakeShared<FJsonObject>();
+            NodeJson->SetStringField(
+                TEXT("id"), DescribeNodeTarget(Blueprint, Node).Id);
+            NodeJson->SetStringField(
+                TEXT("class_path"), Node->GetClass()->GetPathName());
+            const TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
+            Position->SetNumberField(TEXT("x"), Node->NodePosX);
+            Position->SetNumberField(TEXT("y"), Node->NodePosY);
+            NodeJson->SetObjectField(TEXT("position"), Position);
+            NodeJson->SetStringField(TEXT("comment"), Node->NodeComment);
+            NodeJson->SetObjectField(
+                TEXT("properties"), SnapshotNodeProperties(Node));
+
+            TArray<UEdGraphPin*> Pins;
+            for (UEdGraphPin* Pin : Node->Pins)
+            {
+                if (Pin)
+                {
+                    Pins.Add(Pin);
+                }
+            }
+            Pins.Sort([Blueprint](const UEdGraphPin& Left, const UEdGraphPin& Right)
+            {
+                return DescribePinTarget(Blueprint, &Left).Id <
+                    DescribePinTarget(Blueprint, &Right).Id;
+            });
+            TArray<TSharedPtr<FJsonValue>> PinValues;
+            for (UEdGraphPin* Pin : Pins)
+            {
+                const TSharedRef<FJsonObject> PinJson = MakeShared<FJsonObject>();
+                const FString PinId = DescribePinTarget(Blueprint, Pin).Id;
+                PinJson->SetStringField(TEXT("id"), PinId);
+                PinJson->SetStringField(TEXT("name"), Pin->PinName.ToString());
+                PinJson->SetStringField(
+                    TEXT("direction"),
+                    Pin->Direction == EGPD_Output ? TEXT("output") : TEXT("input"));
+                if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+                {
+                    const TSharedRef<FJsonObject> ExecType =
+                        MakeShared<FJsonObject>();
+                    ExecType->SetStringField(TEXT("kind"), TEXT("exec"));
+                    PinJson->SetObjectField(TEXT("type"), ExecType);
+                }
+                else
+                {
+                    PinJson->SetObjectField(
+                        TEXT("type"), SerializeTypeSpec(Pin->PinType));
+                }
+                PinJson->SetField(TEXT("default"), SnapshotPinDefault(Pin));
+                PinValues.Add(MakeShared<FJsonValueObject>(PinJson));
+
+                if (Pin->Direction == EGPD_Output)
+                {
+                    for (const UEdGraphPin* Linked : Pin->LinkedTo)
+                    {
+                        if (Linked && Linked->Direction == EGPD_Input &&
+                            Linked->GetOwningNode() &&
+                            Linked->GetOwningNode()->GetGraph() == Graph)
+                        {
+                            UniqueConnections.Add(TPair<FString, FString>(
+                                PinId,
+                                DescribePinTarget(Blueprint, Linked).Id));
+                        }
+                    }
+                }
+            }
+            NodeJson->SetArrayField(TEXT("pins"), PinValues);
+            NodeValues.Add(MakeShared<FJsonValueObject>(NodeJson));
+        }
+        TArray<TPair<FString, FString>> Connections = UniqueConnections.Array();
+        Connections.Sort([](
+            const TPair<FString, FString>& Left,
+            const TPair<FString, FString>& Right)
+        {
+            return Left.Key == Right.Key
+                ? Left.Value < Right.Value
+                : Left.Key < Right.Key;
+        });
+        for (const TPair<FString, FString>& Connection : Connections)
+        {
+            const TSharedRef<FJsonObject> ConnectionJson = MakeShared<FJsonObject>();
+            ConnectionJson->SetStringField(
+                TEXT("source_pin_id"), Connection.Key);
+            ConnectionJson->SetStringField(
+                TEXT("target_pin_id"), Connection.Value);
+            ConnectionValues.Add(MakeShared<FJsonValueObject>(ConnectionJson));
+        }
+        GraphJson->SetArrayField(TEXT("nodes"), NodeValues);
+        GraphJson->SetArrayField(TEXT("connections"), ConnectionValues);
+        GraphValues.Add(MakeShared<FJsonValueObject>(GraphJson));
+    }
+
+    const TSharedRef<FJsonObject> Snapshot = MakeShared<FJsonObject>();
+    Snapshot->SetNumberField(TEXT("snapshot_version"), 1);
+    Snapshot->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Snapshot->SetStringField(
+        TEXT("blueprint_class"), Blueprint->GetClass()->GetPathName());
+    Snapshot->SetArrayField(TEXT("graphs"), GraphValues);
+    const FString Digest = Sha1Hex(CanonicalJsonString(
+        MakeShared<FJsonValueObject>(Snapshot)));
+    Snapshot->SetStringField(TEXT("digest"), TEXT("sha1:") + Digest);
+
+    return SerializeResult(MakeSuccess(
+        FString::Printf(
+            TEXT("Snapshotted %d Blueprint graph(s)."), GraphValues.Num()),
+        Snapshot));
+}
+
+FString UMCPythonHelper::DiffBlueprintGraphs(const FString& RequestJson)
+{
+    using namespace UE::MCPython::Blueprint2;
+    const TSharedPtr<FJsonObject> Request = ParseJsonObject(RequestJson);
+    if (!Request.IsValid())
+    {
+        return SerializeGraphDiffError({
+            TEXT("params"),
+            TEXT("Diff request must be one JSON object."),
+            TEXT("Provide before_snapshot, after_snapshot, and optional queries.")});
+    }
+    static const TSet<FString> RequestFields = {
+        TEXT("before_snapshot"), TEXT("after_snapshot"), TEXT("queries")};
+    FGraphDiffError Error;
+    if (!ValidateJsonFields(
+            Request.ToSharedRef(), RequestFields, TEXT("params"), Error))
+    {
+        return SerializeGraphDiffError(Error);
+    }
+
+    const TSharedPtr<FJsonObject>* BeforeObject = nullptr;
+    const TSharedPtr<FJsonObject>* AfterObject = nullptr;
+    if (!Request->TryGetObjectField(TEXT("before_snapshot"), BeforeObject) ||
+        !BeforeObject || !BeforeObject->IsValid())
+    {
+        return SerializeGraphDiffError({
+            TEXT("params.before_snapshot"),
+            TEXT("before_snapshot must be a complete snapshot object."),
+            TEXT("Pass data returned by snapshot_blueprint_graph.")});
+    }
+    if (!Request->TryGetObjectField(TEXT("after_snapshot"), AfterObject) ||
+        !AfterObject || !AfterObject->IsValid())
+    {
+        return SerializeGraphDiffError({
+            TEXT("params.after_snapshot"),
+            TEXT("after_snapshot must be a complete snapshot object."),
+            TEXT("Pass data returned by snapshot_blueprint_graph.")});
+    }
+
+    FGraphSnapshotIndex Before;
+    FGraphSnapshotIndex After;
+    if (!ValidateGraphSnapshot(
+            *BeforeObject, TEXT("params.before_snapshot"), Before, Error) ||
+        !ValidateGraphSnapshot(
+            *AfterObject, TEXT("params.after_snapshot"), After, Error))
+    {
+        return SerializeGraphDiffError(Error);
+    }
+
+    TArray<FGraphDiffQuery> Queries;
+    if (!ParseGraphDiffQueries(
+            Request.ToSharedRef(),
+            Before.Digest,
+            After.Digest,
+            Queries,
+            Error))
+    {
+        return SerializeGraphDiffError(Error);
+    }
+
+    TArray<TSharedPtr<FJsonValue>> SectionValues;
+    for (int32 QueryIndex = 0; QueryIndex < Queries.Num(); ++QueryIndex)
+    {
+        const FGraphDiffQuery& Query = Queries[QueryIndex];
+        const TArray<FGraphDiffRecord> Records = BuildGraphDiffRecords(
+            Query.Section, Before, After);
+        int32 Start = 0;
+        if (!Query.LastId.IsEmpty())
+        {
+            const int32 LastIndex = Records.IndexOfByPredicate(
+                [&Query](const FGraphDiffRecord& Record)
+                {
+                    return Record.Id.Equals(
+                        Query.LastId, ESearchCase::CaseSensitive);
+                });
+            if (LastIndex == INDEX_NONE)
+            {
+                return SerializeGraphDiffError({
+                    FString::Printf(
+                        TEXT("params.queries[%d].cursor"), QueryIndex),
+                    TEXT("Cursor is stale because its last diff ID no longer exists."),
+                    TEXT("Restart pagination from the first page of this diff section.")});
+            }
+            Start = LastIndex + 1;
+        }
+        const int32 End = FMath::Min(Start + Query.Limit, Records.Num());
+        TArray<TSharedPtr<FJsonValue>> Items;
+        for (int32 RecordIndex = Start; RecordIndex < End; ++RecordIndex)
+        {
+            Items.Add(MakeShared<FJsonValueObject>(
+                MaterializeGraphDiffRecord(
+                    Records[RecordIndex], Query.Detail == TEXT("detailed"))));
+        }
+
+        FString NextCursor;
+        if (End > Start && End < Records.Num())
+        {
+            FPageRequest Page;
+            Page.Limit = Query.Limit;
+            Page.LastId = Records[End - 1].Id;
+            Page.QueryDigest = Query.Digest;
+            NextCursor = EncodeCursor(Query.AssetKey, Page);
+        }
+        const TSharedRef<FJsonObject> Section = MakeShared<FJsonObject>();
+        Section->SetStringField(TEXT("section"), Query.Section);
+        Section->SetStringField(TEXT("detail"), Query.Detail);
+        Section->SetNumberField(TEXT("total_count"), Records.Num());
+        Section->SetNumberField(TEXT("returned_count"), Items.Num());
+        Section->SetArrayField(TEXT("items"), Items);
+        Section->SetStringField(TEXT("next_cursor"), NextCursor);
+        SectionValues.Add(MakeShared<FJsonValueObject>(Section));
+    }
+
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("before_digest"), Before.Digest);
+    Data->SetStringField(TEXT("after_digest"), After.Digest);
+    Data->SetArrayField(TEXT("sections"), SectionValues);
+    return SerializeResult(MakeSuccess(
+        FString::Printf(
+            TEXT("Blueprint graph diff returned %d section%s."),
+            SectionValues.Num(), SectionValues.Num() == 1 ? TEXT("") : TEXT("s")),
+        Data));
 }

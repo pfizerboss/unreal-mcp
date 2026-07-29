@@ -444,7 +444,7 @@ CATALOG = {
             'doc': 'Deletes a custom event targeted by stable ID.',
         },
         'diff_blueprint_graphs': {
-            'params': 'before_snapshot, after_snapshot, queries',
+            'params': 'before_snapshot, after_snapshot, queries=()',
             'doc': 'Diffs two graph snapshots with independently paginated sections.',
         },
         'disconnect_blueprint_pins': {
@@ -564,7 +564,7 @@ CATALOG = {
             'doc': "Sets a Blueprint variable's 'Instance Editable' and/or 'Expose On Spawn' flags.",
         },
         'snapshot_blueprint_graph': {
-            'params': 'asset_path, graph_id, detailed=False',
+            'params': 'asset_path, graph_ids=()',
             'doc': 'Returns a deterministic compact graph snapshot ordered by stable ID.',
         },
     },

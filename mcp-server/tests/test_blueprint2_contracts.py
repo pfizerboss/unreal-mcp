@@ -1,10 +1,12 @@
 """Strict contracts for the additive Blueprint 2 registry surface."""
 
 import ast
+import hashlib
 import importlib.util
 import json
 import sys
 import types
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -375,6 +377,20 @@ def test_stable_id_schema_accepts_qualified_fallback_ids():
             validator.validate(invalid_id)
 
 
+@pytest.mark.parametrize(
+    ("schema_name", "kind"),
+    (("GRAPH_ID", "graph"), ("NODE_ID", "node"), ("PIN_ID", "pin")),
+)
+def test_persisted_snapshot_id_schemas_reject_zero_guid(schema_name, kind):
+    from unreal_mcp import blueprint2_action_specs
+
+    schema = getattr(blueprint2_action_specs, schema_name)
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema).validate(
+            f"{kind}:00000000-0000-0000-0000-000000000000"
+        )
+
+
 def test_fallback_capable_mutations_require_explicit_qualification():
     specs = _new_specs()
     fallback_ids = {
@@ -617,7 +633,16 @@ def test_reparent_component_uses_null_for_the_scs_root():
 
 
 def test_diff_queries_use_fixed_sections_and_independent_pagination():
-    schema = _new_specs()["diff_blueprint_graphs"]["input_schema"]
+    specs = _new_specs()
+    snapshot_schema = specs["snapshot_blueprint_graph"]["input_schema"]
+    assert snapshot_schema["required"] == ["asset_path"]
+    assert "graph_ids" in snapshot_schema["properties"]
+    assert "graph_id" not in snapshot_schema["properties"]
+    assert "detailed" not in snapshot_schema["properties"]
+    assert snapshot_schema["properties"]["graph_ids"]["maxItems"] == 64
+
+    schema = specs["diff_blueprint_graphs"]["input_schema"]
+    assert schema["required"] == ["before_snapshot", "after_snapshot"]
     query = schema["properties"]["queries"]["items"]
     assert query["properties"]["section"]["enum"] == [
         "nodes",
@@ -629,8 +654,178 @@ def test_diff_queries_use_fixed_sections_and_independent_pagination():
     assert query["properties"]["limit"]["minimum"] == 1
     assert query["properties"]["limit"]["maximum"] == 500
     assert query["properties"]["cursor"]["type"] == "string"
-    assert query["properties"]["detailed"]["type"] == "boolean"
+    assert query["properties"]["detail"]["enum"] == [
+        "compact",
+        "detailed",
+    ]
+    assert "detailed" not in query["properties"]
     assert query["additionalProperties"] is False
+
+    validator = Draft202012Validator(schema)
+    example_params = specs["diff_blueprint_graphs"]["examples"][0]["params"]
+    validator.validate(
+        {
+            "before_snapshot": example_params["before_snapshot"],
+            "after_snapshot": example_params["after_snapshot"],
+        }
+    )
+    validator.validate(
+        {
+            "before_snapshot": example_params["before_snapshot"],
+            "after_snapshot": example_params["after_snapshot"],
+            "queries": [],
+        }
+    )
+
+
+def test_diff_snapshots_have_strict_v1_schema_and_working_example():
+    spec = _new_specs()["diff_blueprint_graphs"]
+    schema = spec["input_schema"]
+    snapshot = schema["properties"]["before_snapshot"]
+
+    assert snapshot["required"] == [
+        "snapshot_version",
+        "asset_path",
+        "blueprint_class",
+        "graphs",
+        "digest",
+    ]
+    assert snapshot["additionalProperties"] is False
+    graph = snapshot["properties"]["graphs"]["items"]
+    assert graph["required"] == [
+        "id",
+        "name",
+        "schema_path",
+        "nodes",
+        "connections",
+    ]
+    assert graph["properties"]["id"]["pattern"].startswith("^graph:")
+    assert "fallback" not in graph["properties"]["id"]["pattern"]
+    node = graph["properties"]["nodes"]["items"]
+    assert node["properties"]["id"]["pattern"].startswith("^node:")
+    pin = node["properties"]["pins"]["items"]
+    assert pin["properties"]["id"]["pattern"].startswith("^pin:")
+    assert pin["properties"]["type"]["oneOf"]
+    assert any(
+        choice.get("properties", {}).get("kind", {}).get("const") == "exec"
+        for choice in pin["properties"]["type"]["oneOf"]
+    )
+    assert pin["properties"]["default"] == {}
+
+    nested_snapshot = {
+        "snapshot_version": 1,
+        "asset_path": "/Game/BP_Player.BP_Player",
+        "blueprint_class": "/Script/Engine.Blueprint",
+        "graphs": [
+            {
+                "id": "graph:11111111-1111-4111-8111-111111111111",
+                "name": "EventGraph",
+                "schema_path": "/Script/BlueprintGraph.EdGraphSchema_K2",
+                "nodes": [
+                    {
+                        "id": "node:22222222-2222-4222-8222-222222222222",
+                        "class_path": (
+                            "/Script/BlueprintGraph.K2Node_CustomEvent"
+                        ),
+                        "position": {"x": 0, "y": 0},
+                        "comment": "",
+                        "properties": {},
+                        "pins": [
+                            {
+                                "id": (
+                                    "pin:33333333-3333-4333-8333-333333333333"
+                                ),
+                                "name": "execute",
+                                "direction": "input",
+                                "type": {"kind": "exec"},
+                                "default": None,
+                            },
+                            {
+                                "id": (
+                                    "pin:44444444-4444-4444-8444-444444444444"
+                                ),
+                                "name": "values",
+                                "direction": "input",
+                                "type": {
+                                    "kind": "array",
+                                    "item": {"kind": "bool"},
+                                },
+                                "default": [],
+                            },
+                            {
+                                "id": (
+                                    "pin:55555555-5555-4555-8555-555555555555"
+                                ),
+                                "name": "item",
+                                "direction": "input",
+                                "type": {
+                                    "kind": "object",
+                                    "class_path": "/Game/BP_Item.BP_Item_C",
+                                },
+                                "default": None,
+                            },
+                            {
+                                "id": (
+                                    "pin:66666666-6666-4666-8666-666666666666"
+                                ),
+                                "name": "item_type",
+                                "direction": "input",
+                                "type": {
+                                    "kind": "enum",
+                                    "type_path": "/Game/E_Item.E_Item",
+                                },
+                                "default": "None",
+                            },
+                        ],
+                    }
+                ],
+                "connections": [],
+            }
+        ],
+        "digest": "sha1:" + "0" * 40,
+    }
+    validator = Draft202012Validator(schema)
+    validator.validate(
+        {
+            "before_snapshot": nested_snapshot,
+            "after_snapshot": nested_snapshot,
+            "queries": [],
+        }
+    )
+    example_params = spec["examples"][0]["params"]
+    validator.validate(example_params)
+    unsigned_example = {
+        key: value
+        for key, value in example_params["before_snapshot"].items()
+        if key != "digest"
+    }
+    expected_digest = "sha1:" + hashlib.sha1(
+        json.dumps(
+            unsigned_example,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert example_params["before_snapshot"]["digest"] == expected_digest
+    assert example_params["after_snapshot"]["digest"] == expected_digest
+
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                "before_snapshot": {"snapshot_id": "before"},
+                "after_snapshot": nested_snapshot,
+            }
+        )
+    fallback_snapshot = deepcopy(nested_snapshot)
+    fallback_snapshot["graphs"][0]["id"] = "fallback:graph:" + "0" * 40
+    with pytest.raises(ValidationError):
+        validator.validate(
+            {
+                "before_snapshot": fallback_snapshot,
+                "after_snapshot": nested_snapshot,
+            }
+        )
 
 
 def test_blueprint2_output_envelopes_are_strictly_structured():
@@ -935,6 +1130,8 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
             "reorder_blueprint_component",
             "set_blueprint_component_transform",
             "get_blueprint_health",
+            "snapshot_blueprint_graph",
+            "diff_blueprint_graphs",
         }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()

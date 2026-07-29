@@ -1,5 +1,6 @@
-"""In-editor coverage for structured Blueprint compiler diagnostics."""
+"""In-editor coverage for Blueprint diagnostics, snapshots, and diff."""
 
+from copy import deepcopy
 import uuid
 
 import unreal
@@ -182,6 +183,23 @@ class TestBlueprint2Diagnostics(MCPTestCase):
             "ue_get_blueprint_health",
             asset_path=self.asset_path,
             include_warnings=include_warnings,
+        )
+
+    def _snapshot(self, graph_ids=()):
+        return call_action(
+            "blueprint_actions",
+            "ue_snapshot_blueprint_graph",
+            asset_path=self.asset_path,
+            graph_ids=list(graph_ids),
+        )
+
+    def _diff(self, before_snapshot, after_snapshot, queries=()):
+        return call_action(
+            "blueprint_actions",
+            "ue_diff_blueprint_graphs",
+            before_snapshot=deepcopy(before_snapshot),
+            after_snapshot=deepcopy(after_snapshot),
+            queries=deepcopy(list(queries)),
         )
 
     def _assert_health_envelope(self, result):
@@ -368,6 +386,398 @@ class TestBlueprint2Diagnostics(MCPTestCase):
         self.assertTrue(result["data"]["healthy"], result)
         self.assertEqual(result["data"]["issues"], [])
         self.assertEqual(result["data"]["compile_status"], "UpToDate")
+
+    def test_snapshot_blueprint_graph_is_canonical_and_read_only(self):
+        branch_id = self._add_common(
+            type="Branch",
+            pos_x=320,
+            pos_y=160,
+        )
+        input_key_id = self._add_common(
+            type="InputKey",
+            key_name="SpaceBar",
+            pos_x=320,
+            pos_y=480,
+        )
+        begin_play = self._begin_play()
+        self._connect(
+            begin_play["node_id"],
+            self._pin(begin_play["node_id"], "then")["pin_id"],
+            branch_id,
+            self._pin(branch_id, "execute")["pin_id"],
+        )
+        was_dirty = self._is_dirty()
+
+        first = self._snapshot([self.graph_id])
+        second = self._snapshot([self.graph_id])
+
+        self.assertSuccess(first)
+        self.assertSuccess(second)
+        self.assertEqual(first["data"], second["data"])
+        snapshot = first["data"]
+        self.assertEqual(snapshot["snapshot_version"], 1)
+        self.assertEqual(snapshot["asset_path"], self.asset_path)
+        self.assertEqual(snapshot["blueprint_class"], "/Script/Engine.Blueprint")
+        self.assertTrue(snapshot["digest"].startswith("sha1:"), snapshot)
+        self.assertEqual(len(snapshot["digest"]), 45)
+        self.assertEqual(len(snapshot["graphs"]), 1)
+        graph = snapshot["graphs"][0]
+        self.assertEqual(graph["id"], self.graph_id)
+        self.assertEqual(graph["name"], "EventGraph")
+        self.assertEqual(
+            graph["schema_path"],
+            "/Script/BlueprintGraph.EdGraphSchema_K2",
+        )
+        self.assertEqual(
+            [node["id"] for node in graph["nodes"]],
+            sorted(node["id"] for node in graph["nodes"]),
+        )
+        for node in graph["nodes"]:
+            self.assertEqual(
+                set(node),
+                {
+                    "id",
+                    "class_path",
+                    "position",
+                    "comment",
+                    "properties",
+                    "pins",
+                },
+            )
+            self.assertEqual(
+                [pin["id"] for pin in node["pins"]],
+                sorted(pin["id"] for pin in node["pins"]),
+            )
+        input_key = next(
+            node for node in graph["nodes"] if node["id"] == input_key_id
+        )
+        self.assertEqual(
+            input_key["properties"]["input_key"]["key"],
+            "SpaceBar",
+        )
+        self.assertEqual(
+            input_key["properties"]["enabled_state"],
+            "enabled",
+        )
+        connection_keys = [
+            (item["source_pin_id"], item["target_pin_id"])
+            for item in graph["connections"]
+        ]
+        self.assertEqual(connection_keys, sorted(connection_keys))
+        pins = {
+            pin["id"]: pin
+            for node in graph["nodes"]
+            for pin in node["pins"]
+        }
+        self.assertTrue(connection_keys)
+        for source_pin_id, target_pin_id in connection_keys:
+            self.assertEqual(pins[source_pin_id]["direction"], "output")
+            self.assertEqual(pins[target_pin_id]["direction"], "input")
+            self.assertEqual(pins[source_pin_id]["type"], {"kind": "exec"})
+            self.assertEqual(pins[target_pin_id]["type"], {"kind": "exec"})
+        self.assertEqual(self._is_dirty(), was_dirty)
+
+    def test_snapshot_blueprint_graph_serializes_invariant_text_defaults(self):
+        print_text_id = self._add_reflected(
+            "/Script/Engine.KismetSystemLibrary:PrintText"
+        )
+        text_pin_id = self._pin(print_text_id, "InText")["pin_id"]
+        changed = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_node_properties",
+            asset_path=self.asset_path,
+            node_id=print_text_id,
+            properties={
+                "pin_defaults": {text_pin_id: "Localized snapshot text"},
+            },
+        )
+        self.assertSuccess(changed)
+
+        snapshot = self._snapshot([self.graph_id])
+
+        self.assertSuccess(snapshot)
+        text_pin = next(
+            pin
+            for graph in snapshot["data"]["graphs"]
+            for node in graph["nodes"]
+            for pin in node["pins"]
+            if pin["id"] == text_pin_id
+        )
+        self.assertEqual(
+            set(text_pin["default"]),
+            {"source", "namespace", "key", "culture_invariant"},
+        )
+        self.assertEqual(
+            text_pin["default"]["source"],
+            "Localized snapshot text",
+        )
+        self.assertNotIn("display", text_pin["default"])
+
+    def test_diff_blueprint_graphs_reports_sections_reverse_and_cursors(self):
+        branch_id = self._add_common(
+            type="Branch",
+            pos_x=320,
+            pos_y=160,
+        )
+        condition_id = self._pin(branch_id, "Condition")["pin_id"]
+        before = self._snapshot([self.graph_id])["data"]
+
+        changed = call_action(
+            "blueprint_actions",
+            "ue_set_blueprint_node_properties",
+            asset_path=self.asset_path,
+            node_id=branch_id,
+            properties={
+                "comment": "Changed by snapshot diff",
+                "enabled_state": "disabled",
+                "position": {"x": 640, "y": 320},
+                "pin_defaults": {condition_id: False},
+            },
+        )
+        self.assertSuccess(changed)
+        sequence_id = self._add_common(
+            type="Sequence",
+            pos_x=900,
+            pos_y=320,
+        )
+        extra_branch_id = self._add_common(
+            type="Branch",
+            pos_x=1160,
+            pos_y=320,
+        )
+        begin_play = self._begin_play()
+        self._connect(
+            begin_play["node_id"],
+            self._pin(begin_play["node_id"], "then")["pin_id"],
+            branch_id,
+            self._pin(branch_id, "execute")["pin_id"],
+        )
+        self._connect(
+            branch_id,
+            self._pin(branch_id, "then")["pin_id"],
+            sequence_id,
+            self._pin(sequence_id, "execute")["pin_id"],
+        )
+        after = self._snapshot([self.graph_id])["data"]
+
+        queries = [
+            {"section": section, "detail": "detailed", "limit": 500}
+            for section in (
+                "nodes",
+                "pins",
+                "connections",
+                "properties",
+                "positions",
+            )
+        ]
+        result = self._diff(before, after, queries)
+
+        self.assertSuccess(result)
+        self.assertEqual(result["data"]["before_digest"], before["digest"])
+        self.assertEqual(result["data"]["after_digest"], after["digest"])
+        sections = {
+            section["section"]: section
+            for section in result["data"]["sections"]
+        }
+        self.assertEqual(set(sections), {
+            "nodes",
+            "pins",
+            "connections",
+            "properties",
+            "positions",
+        })
+        for section in sections.values():
+            self.assertEqual(section["detail"], "detailed")
+            self.assertEqual(section["returned_count"], len(section["items"]))
+            self.assertGreaterEqual(section["total_count"], len(section["items"]))
+            self.assertEqual(
+                [item["id"] for item in section["items"]],
+                sorted(item["id"] for item in section["items"]),
+            )
+            for item in section["items"]:
+                self.assertEqual(
+                    set(item),
+                    {"id", "change", "changed_fields", "before", "after"},
+                )
+        added_nodes = {
+            item["id"]
+            for item in sections["nodes"]["items"]
+            if item["change"] == "added"
+        }
+        self.assertEqual(added_nodes, {sequence_id, extra_branch_id})
+        self.assertTrue(
+            any(
+                item["change"] == "added"
+                for item in sections["pins"]["items"]
+            )
+        )
+        self.assertGreaterEqual(sections["connections"]["total_count"], 2)
+        property_change = next(
+            item
+            for item in sections["properties"]["items"]
+            if item["id"] == branch_id
+        )
+        self.assertIn("comment", property_change["changed_fields"])
+        self.assertIn("enabled_state", property_change["changed_fields"])
+        self.assertEqual(
+            property_change["before"]["properties"]["enabled_state"],
+            "enabled",
+        )
+        self.assertEqual(
+            property_change["after"]["properties"]["enabled_state"],
+            "disabled",
+        )
+        position_change = next(
+            item
+            for item in sections["positions"]["items"]
+            if item["id"] == branch_id
+        )
+        self.assertEqual(position_change["before"], {"x": 320, "y": 160})
+        self.assertEqual(position_change["after"], {"x": 640, "y": 320})
+        pin_change = next(
+            item
+            for item in sections["pins"]["items"]
+            if item["id"] == condition_id
+        )
+        self.assertIn("default", pin_change["changed_fields"])
+
+        reverse = self._diff(after, before)
+        self.assertSuccess(reverse)
+        reverse_sections = {
+            section["section"]: section
+            for section in reverse["data"]["sections"]
+        }
+        self.assertEqual(
+            {
+                item["id"]
+                for item in reverse_sections["nodes"]["items"]
+                if item["change"] == "removed"
+            },
+            {sequence_id, extra_branch_id},
+        )
+
+        first_page = self._diff(
+            before,
+            after,
+            [{"section": "nodes", "detail": "compact", "limit": 1}],
+        )
+        self.assertSuccess(first_page)
+        page = first_page["data"]["sections"][0]
+        self.assertEqual(page["total_count"], 2)
+        self.assertEqual(page["returned_count"], 1)
+        self.assertTrue(page["next_cursor"])
+        second_page = self._diff(
+            before,
+            after,
+            [
+                {
+                    "section": "nodes",
+                    "detail": "compact",
+                    "limit": 1,
+                    "cursor": page["next_cursor"],
+                }
+            ],
+        )
+        self.assertSuccess(second_page)
+        self.assertNotEqual(
+            page["items"][0]["id"],
+            second_page["data"]["sections"][0]["items"][0]["id"],
+        )
+        mismatched_cursor = self._diff(
+            before,
+            after,
+            [
+                {
+                    "section": "pins",
+                    "detail": "compact",
+                    "limit": 1,
+                    "cursor": page["next_cursor"],
+                }
+            ],
+        )
+        self.assertFalse(mismatched_cursor["success"])
+        self.assertEqual(
+            mismatched_cursor["errors"][0]["code"], "INVALID_INPUT"
+        )
+
+        tampered = deepcopy(before)
+        tampered["graphs"][0]["nodes"][0]["comment"] = "tampered"
+        rejected = self._diff(tampered, after)
+        self.assertFalse(rejected["success"])
+        self.assertEqual(rejected["errors"][0]["code"], "INVALID_INPUT")
+        self.assertEqual(
+            rejected["errors"][0]["path"],
+            "params.before_snapshot.digest",
+        )
+
+    def test_diff_blueprint_graphs_paginates_default_limit_and_rejects_bad_cursor(
+        self,
+    ):
+        before = self._snapshot([self.graph_id])["data"]
+        for index in range(101):
+            self._add_common(
+                type="Sequence",
+                pos_x=200 + (index % 10) * 240,
+                pos_y=160 + (index // 10) * 160,
+            )
+        after = self._snapshot([self.graph_id])["data"]
+
+        first = self._diff(before, after)
+
+        self.assertSuccess(first)
+        self.assertEqual(
+            [section["section"] for section in first["data"]["sections"]],
+            ["nodes", "pins", "connections", "properties", "positions"],
+        )
+        self.assertTrue(
+            all(
+                section["detail"] == "compact"
+                for section in first["data"]["sections"]
+            )
+        )
+        node_page = first["data"]["sections"][0]
+        self.assertEqual(node_page["total_count"], 101)
+        self.assertEqual(node_page["returned_count"], 100)
+        self.assertTrue(node_page["next_cursor"])
+
+        second = self._diff(
+            before,
+            after,
+            [
+                {
+                    "section": "nodes",
+                    "detail": "compact",
+                    "cursor": node_page["next_cursor"],
+                }
+            ],
+        )
+        self.assertSuccess(second)
+        second_page = second["data"]["sections"][0]
+        self.assertEqual(second_page["total_count"], 101)
+        self.assertEqual(second_page["returned_count"], 1)
+        self.assertEqual(second_page["next_cursor"], "")
+        first_ids = {item["id"] for item in node_page["items"]}
+        second_ids = {item["id"] for item in second_page["items"]}
+        self.assertFalse(first_ids & second_ids)
+        self.assertEqual(len(first_ids | second_ids), 101)
+
+        malformed = self._diff(
+            before,
+            after,
+            [
+                {
+                    "section": "nodes",
+                    "detail": "compact",
+                    "cursor": "not-a-valid-base64url-cursor!",
+                }
+            ],
+        )
+        self.assertFalse(malformed["success"])
+        self.assertEqual(malformed["errors"][0]["code"], "INVALID_INPUT")
+        self.assertEqual(
+            malformed["errors"][0]["path"],
+            "params.queries[0].cursor",
+        )
 
     def test_warning_compile_returns_stable_node_diagnostic(self):
         analog_input = self._add_common(

@@ -110,6 +110,8 @@ FResolvedTarget ResolveTarget(
     FString& OutError);
 
 FString CanonicalQueryDigest(const TSharedRef<FJsonObject>& Query);
+FString CanonicalJsonString(const TSharedPtr<FJsonValue>& Value);
+FString Sha1Hex(const FString& Value);
 FString EncodeCursor(
     const FString& AssetPath,
     const FPageRequest& Page);

@@ -110,6 +110,205 @@ FString SerializeJsonObject(const TSharedRef<FJsonObject>& Object)
     return Result;
 }
 
+TSharedRef<FJsonObject> MakeSnapshotType(const FString& Kind)
+{
+    const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("kind"), Kind);
+    return Result;
+}
+
+TSharedRef<FJsonObject> MakeSnapshotPin(
+    const FString& Id,
+    const FString& Name,
+    const FString& Direction,
+    const TSharedRef<FJsonObject>& Type,
+    const TSharedPtr<FJsonValue>& Default)
+{
+    const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("id"), Id);
+    Result->SetStringField(TEXT("name"), Name);
+    Result->SetStringField(TEXT("direction"), Direction);
+    Result->SetObjectField(TEXT("type"), Type);
+    Result->SetField(TEXT("default"), Default);
+    return Result;
+}
+
+void ResignGraphSnapshot(const TSharedRef<FJsonObject>& Snapshot)
+{
+    using namespace UE::MCPython::Blueprint2;
+
+    Snapshot->RemoveField(TEXT("digest"));
+    Snapshot->SetStringField(
+        TEXT("digest"),
+        TEXT("sha1:") + Sha1Hex(CanonicalJsonString(
+            MakeShared<FJsonValueObject>(Snapshot))));
+}
+
+TSharedRef<FJsonObject> MakeCanonicalGraphSnapshotFixture()
+{
+    const FString GraphAId =
+        TEXT("graph:11111111-1111-4111-8111-11111111111a");
+    const FString GraphBId =
+        TEXT("graph:99999999-9999-4999-8999-99999999999b");
+    const FString NodeAId =
+        TEXT("node:11111111-1111-4111-8111-11111111111a");
+    const FString NodeBId =
+        TEXT("node:99999999-9999-4999-8999-99999999999b");
+    const FString PinAId =
+        TEXT("pin:11111111-1111-4111-8111-11111111111a");
+    const FString PinBId =
+        TEXT("pin:22222222-2222-4222-8222-22222222222b");
+    const FString PinCId =
+        TEXT("pin:33333333-3333-4333-8333-33333333333c");
+    const FString PinDId =
+        TEXT("pin:44444444-4444-4444-8444-44444444444d");
+
+    const TSharedRef<FJsonObject> BoolType = MakeSnapshotType(TEXT("bool"));
+    const TSharedRef<FJsonObject> ArrayType = MakeSnapshotType(TEXT("array"));
+    ArrayType->SetObjectField(TEXT("item"), MakeSnapshotType(TEXT("bool")));
+    const TSharedRef<FJsonObject> ObjectType = MakeSnapshotType(TEXT("object"));
+    ObjectType->SetStringField(
+        TEXT("class_path"), TEXT("/Game/BP_Item.BP_Item_C"));
+
+    const TSharedRef<FJsonObject> NodeA = MakeShared<FJsonObject>();
+    NodeA->SetStringField(TEXT("id"), NodeAId);
+    NodeA->SetStringField(
+        TEXT("class_path"),
+        TEXT("/Script/BlueprintGraph.K2Node_CustomEvent"));
+    const TSharedRef<FJsonObject> NodeAPosition = MakeShared<FJsonObject>();
+    NodeAPosition->SetNumberField(TEXT("x"), 0);
+    NodeAPosition->SetNumberField(TEXT("y"), 0);
+    NodeA->SetObjectField(TEXT("position"), NodeAPosition);
+    NodeA->SetStringField(TEXT("comment"), TEXT(""));
+    NodeA->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+    NodeA->SetArrayField(
+        TEXT("pins"),
+        {
+            MakeShared<FJsonValueObject>(MakeSnapshotPin(
+                PinAId,
+                TEXT("first_output"),
+                TEXT("output"),
+                BoolType,
+                MakeShared<FJsonValueBoolean>(false))),
+            MakeShared<FJsonValueObject>(MakeSnapshotPin(
+                PinBId,
+                TEXT("second_output"),
+                TEXT("output"),
+                ArrayType,
+                MakeShared<FJsonValueArray>(TArray<TSharedPtr<FJsonValue>>())))
+        });
+
+    const TSharedRef<FJsonObject> NodeB = MakeShared<FJsonObject>();
+    NodeB->SetStringField(TEXT("id"), NodeBId);
+    NodeB->SetStringField(
+        TEXT("class_path"),
+        TEXT("/Script/BlueprintGraph.K2Node_CustomEvent"));
+    const TSharedRef<FJsonObject> NodeBPosition = MakeShared<FJsonObject>();
+    NodeBPosition->SetNumberField(TEXT("x"), 320);
+    NodeBPosition->SetNumberField(TEXT("y"), 0);
+    NodeB->SetObjectField(TEXT("position"), NodeBPosition);
+    NodeB->SetStringField(TEXT("comment"), TEXT(""));
+    NodeB->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+    NodeB->SetArrayField(
+        TEXT("pins"),
+        {
+            MakeShared<FJsonValueObject>(MakeSnapshotPin(
+                PinCId,
+                TEXT("first_input"),
+                TEXT("input"),
+                ObjectType,
+                MakeShared<FJsonValueNull>())),
+            MakeShared<FJsonValueObject>(MakeSnapshotPin(
+                PinDId,
+                TEXT("second_input"),
+                TEXT("input"),
+                MakeSnapshotType(TEXT("exec")),
+                MakeShared<FJsonValueNull>()))
+        });
+
+    const TSharedRef<FJsonObject> FirstConnection = MakeShared<FJsonObject>();
+    FirstConnection->SetStringField(TEXT("source_pin_id"), PinAId);
+    FirstConnection->SetStringField(TEXT("target_pin_id"), PinCId);
+    const TSharedRef<FJsonObject> SecondConnection = MakeShared<FJsonObject>();
+    SecondConnection->SetStringField(TEXT("source_pin_id"), PinBId);
+    SecondConnection->SetStringField(TEXT("target_pin_id"), PinDId);
+
+    const TSharedRef<FJsonObject> GraphA = MakeShared<FJsonObject>();
+    GraphA->SetStringField(TEXT("id"), GraphAId);
+    GraphA->SetStringField(TEXT("name"), TEXT("EventGraph"));
+    GraphA->SetStringField(
+        TEXT("schema_path"),
+        TEXT("/Script/BlueprintGraph.EdGraphSchema_K2"));
+    GraphA->SetArrayField(
+        TEXT("nodes"),
+        {
+            MakeShared<FJsonValueObject>(NodeA),
+            MakeShared<FJsonValueObject>(NodeB)
+        });
+    GraphA->SetArrayField(
+        TEXT("connections"),
+        {
+            MakeShared<FJsonValueObject>(FirstConnection),
+            MakeShared<FJsonValueObject>(SecondConnection)
+        });
+
+    const TSharedRef<FJsonObject> GraphB = MakeShared<FJsonObject>();
+    GraphB->SetStringField(TEXT("id"), GraphBId);
+    GraphB->SetStringField(TEXT("name"), TEXT("SecondaryGraph"));
+    GraphB->SetStringField(
+        TEXT("schema_path"),
+        TEXT("/Script/BlueprintGraph.EdGraphSchema_K2"));
+    GraphB->SetArrayField(TEXT("nodes"), {});
+    GraphB->SetArrayField(TEXT("connections"), {});
+
+    const TSharedRef<FJsonObject> Snapshot = MakeShared<FJsonObject>();
+    Snapshot->SetNumberField(TEXT("snapshot_version"), 1);
+    Snapshot->SetStringField(
+        TEXT("asset_path"), TEXT("/Game/BP_Snapshot.BP_Snapshot"));
+    Snapshot->SetStringField(
+        TEXT("blueprint_class"), TEXT("/Script/Engine.Blueprint"));
+    Snapshot->SetArrayField(
+        TEXT("graphs"),
+        {
+            MakeShared<FJsonValueObject>(GraphA),
+            MakeShared<FJsonValueObject>(GraphB)
+        });
+    ResignGraphSnapshot(Snapshot);
+    return Snapshot;
+}
+
+TSharedPtr<FJsonObject> SnapshotGraph(
+    const TSharedRef<FJsonObject>& Snapshot,
+    const int32 GraphIndex = 0)
+{
+    return Snapshot->GetArrayField(TEXT("graphs"))[GraphIndex]->AsObject();
+}
+
+TSharedPtr<FJsonObject> SnapshotNode(
+    const TSharedRef<FJsonObject>& Snapshot,
+    const int32 NodeIndex = 0)
+{
+    return SnapshotGraph(Snapshot)->GetArrayField(TEXT("nodes"))[NodeIndex]
+        ->AsObject();
+}
+
+TSharedPtr<FJsonObject> SnapshotPin(
+    const TSharedRef<FJsonObject>& Snapshot,
+    const int32 NodeIndex = 0,
+    const int32 PinIndex = 0)
+{
+    return SnapshotNode(Snapshot, NodeIndex)->GetArrayField(TEXT("pins"))[PinIndex]
+        ->AsObject();
+}
+
+void ReplaceFirstConnectionSource(
+    const TSharedRef<FJsonObject>& Snapshot,
+    const FString& NewPinId)
+{
+    SnapshotGraph(Snapshot)->GetArrayField(TEXT("connections"))[0]
+        ->AsObject()->SetStringField(TEXT("source_pin_id"), NewPinId);
+}
+
 void CleanupFixturePackages(const TArray<UPackage*>& Packages)
 {
     for (UPackage* Package : Packages)
@@ -752,6 +951,518 @@ bool FMCPythonBlueprint2TargetIdsTest::RunTest(const FString& Parameters)
         GlobalCapabilities->TryGetBoolField(
             TEXT("has_k2_graphs"),
             bHasK2Graphs) && !bHasK2Graphs);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2SnapshotStableIdentityTest,
+    "UnrealMCPython.Blueprint2.SnapshotStableIdentity",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2SnapshotStableIdentityTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+
+    const FString Root = FString::Printf(
+        TEXT("/Game/__MCPTests/Blueprint2_%s"),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    UBlueprint* Blueprint = MakeBlueprintFixture(
+        *FString::Printf(TEXT("%s/SnapshotStableIdentity"), *Root));
+    const TArray<UPackage*> FixturePackages = {Blueprint->GetOutermost()};
+    ON_SCOPE_EXIT
+    {
+        CleanupFixturePackages(FixturePackages);
+    };
+
+    UEdGraph* GraphA = MakeGraphFixture(
+        Blueprint,
+        TEXT("GraphA"),
+        UEdGraphSchema_K2::StaticClass());
+    Blueprint->UbergraphPages.AddUnique(GraphA);
+    UK2Node_CustomEvent* NodeA = MakeNodeFixture<UK2Node_CustomEvent>(
+        GraphA,
+        TEXT("NodeA"));
+    GraphA->AddNode(NodeA, false, false);
+    UEdGraphPin* PinA = MakePinFixture(
+        NodeA,
+        TEXT("InputA"),
+        UEdGraphSchema_K2::PC_Boolean);
+
+    const FString RequestJson = TEXT("{\"graph_ids\":[]}");
+    auto ExpectPreconditionFailure = [this, Blueprint](
+        const FString& SnapshotRequest,
+        const TCHAR* Label,
+        const TCHAR* ExpectedPathFragment)
+    {
+        const FString ResponseJson = UMCPythonHelper::SnapshotBlueprintGraph(
+            Blueprint,
+            SnapshotRequest);
+        const TSharedPtr<FJsonObject> Response = ParseJsonObject(ResponseJson);
+        bool bSuccess = true;
+        const bool bRejected = Response.IsValid() &&
+            Response->TryGetBoolField(TEXT("success"), bSuccess) &&
+            !bSuccess;
+        TestTrue(Label, bRejected);
+        if (!bRejected)
+        {
+            AddError(FString::Printf(
+                TEXT("Unexpected snapshot response: %s"),
+                *ResponseJson));
+            return;
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>* Errors = nullptr;
+        TestTrue(
+            TEXT("Snapshot precondition response includes one error"),
+            Response->TryGetArrayField(TEXT("errors"), Errors) &&
+                Errors && Errors->Num() == 1);
+        if (!Errors || Errors->Num() != 1 || !(*Errors)[0].IsValid())
+        {
+            return;
+        }
+        const TSharedPtr<FJsonObject> Error = (*Errors)[0]->AsObject();
+        TestTrue(TEXT("Snapshot precondition error is an object"), Error.IsValid());
+        if (!Error)
+        {
+            return;
+        }
+        TestEqualSensitive(
+            TEXT("Snapshot rejects unstable identity as a precondition failure"),
+            Error->GetStringField(TEXT("code")),
+            TEXT("PRECONDITION_FAILED"));
+        TestTrue(
+            TEXT("Snapshot precondition error identifies the asset graph field"),
+            Error->GetStringField(TEXT("path")).Contains(ExpectedPathFragment));
+    };
+
+    ExpectPreconditionFailure(
+        RequestJson,
+        TEXT("Snapshot rejects an invalid graph GUID"),
+        TEXT("graphs"));
+
+    GraphA->GraphGuid = FGuid::NewGuid();
+    ExpectPreconditionFailure(
+        RequestJson,
+        TEXT("Snapshot rejects an invalid node GUID"),
+        TEXT("nodes"));
+
+    NodeA->NodeGuid = FGuid::NewGuid();
+    ExpectPreconditionFailure(
+        RequestJson,
+        TEXT("Snapshot rejects an invalid pin GUID"),
+        TEXT("pins"));
+
+    PinA->PinId = FGuid::NewGuid();
+    UEdGraph* GraphB = MakeGraphFixture(
+        Blueprint,
+        TEXT("GraphB"),
+        UEdGraphSchema_K2::StaticClass());
+    Blueprint->UbergraphPages.AddUnique(GraphB);
+
+    const TSharedRef<FJsonObject> SelectedGraphRequest = MakeShared<FJsonObject>();
+    SelectedGraphRequest->SetArrayField(
+        TEXT("graph_ids"),
+        {MakeShared<FJsonValueString>(
+            UE::MCPython::Blueprint2::DescribeGraphTarget(
+                Blueprint,
+                GraphA).Id)});
+    const FString SelectedGraphRequestJson = SerializeJsonObject(
+        SelectedGraphRequest);
+    const FString SelectedResponseJson =
+        UMCPythonHelper::SnapshotBlueprintGraph(
+            Blueprint,
+            SelectedGraphRequestJson);
+    const TSharedPtr<FJsonObject> SelectedResponse = ParseJsonObject(
+        SelectedResponseJson);
+    bool bSelectedSuccess = false;
+    TestTrue(
+        TEXT("Selected graph snapshot ignores an unrelated graph without a GUID"),
+        SelectedResponse.IsValid() &&
+            SelectedResponse->TryGetBoolField(
+                TEXT("success"), bSelectedSuccess) &&
+            bSelectedSuccess);
+    if (!bSelectedSuccess)
+    {
+        AddError(FString::Printf(
+            TEXT("Unexpected selected graph snapshot response: %s"),
+            *SelectedResponseJson));
+    }
+
+    GraphB->GraphGuid = GraphA->GraphGuid;
+    ExpectPreconditionFailure(
+        RequestJson,
+        TEXT("Snapshot rejects duplicate graph GUIDs"),
+        TEXT("graphs"));
+
+    GraphB->GraphGuid = FGuid::NewGuid();
+    UK2Node_CustomEvent* NodeB = MakeNodeFixture<UK2Node_CustomEvent>(
+        GraphB,
+        TEXT("NodeB"));
+    NodeB->NodeGuid = NodeA->NodeGuid;
+    GraphB->AddNode(NodeB, false, false);
+    UEdGraphPin* PinB = MakePinFixture(
+        NodeB,
+        TEXT("InputB"),
+        UEdGraphSchema_K2::PC_Boolean);
+    PinB->PinId = FGuid::NewGuid();
+    ExpectPreconditionFailure(
+        SelectedGraphRequestJson,
+        TEXT("Selected graph snapshot rejects an asset-wide duplicate node GUID"),
+        TEXT("nodes"));
+    ExpectPreconditionFailure(
+        RequestJson,
+        TEXT("Snapshot rejects duplicate node GUIDs"),
+        TEXT("nodes"));
+
+    NodeB->NodeGuid = FGuid::NewGuid();
+    PinB->PinId = PinA->PinId;
+    ExpectPreconditionFailure(
+        SelectedGraphRequestJson,
+        TEXT("Selected graph snapshot rejects an asset-wide duplicate pin GUID"),
+        TEXT("pins"));
+    ExpectPreconditionFailure(
+        RequestJson,
+        TEXT("Snapshot rejects duplicate pin GUIDs"),
+        TEXT("pins"));
+
+    PinB->PinId = FGuid::NewGuid();
+    const FString ValidResponseJson = UMCPythonHelper::SnapshotBlueprintGraph(
+        Blueprint,
+        RequestJson);
+    const TSharedPtr<FJsonObject> ValidResponse = ParseJsonObject(
+        ValidResponseJson);
+    bool bSuccess = false;
+    TestTrue(
+        TEXT("Snapshot accepts unique persisted graph, node, and pin GUIDs"),
+        ValidResponse.IsValid() &&
+            ValidResponse->TryGetBoolField(TEXT("success"), bSuccess) &&
+            bSuccess);
+    if (!bSuccess)
+    {
+        AddError(FString::Printf(
+            TEXT("Unexpected valid snapshot response: %s"),
+            *ValidResponseJson));
+    }
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprint2SnapshotValidationTest,
+    "UnrealMCPython.Blueprint2.SnapshotValidation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprint2SnapshotValidationTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+
+    auto DiffSnapshot = [](const TSharedRef<FJsonObject>& Before)
+    {
+        const TSharedRef<FJsonObject> Request = MakeShared<FJsonObject>();
+        Request->SetObjectField(TEXT("before_snapshot"), Before);
+        Request->SetObjectField(
+            TEXT("after_snapshot"), MakeCanonicalGraphSnapshotFixture());
+        Request->SetArrayField(TEXT("queries"), {});
+        return UMCPythonHelper::DiffBlueprintGraphs(SerializeJsonObject(Request));
+    };
+    auto ExpectSuccess = [this, &DiffSnapshot](
+        const TSharedRef<FJsonObject>& Snapshot,
+        const FString& Label)
+    {
+        const FString ResponseJson = DiffSnapshot(Snapshot);
+        const TSharedPtr<FJsonObject> Response = ParseJsonObject(ResponseJson);
+        bool bSuccess = false;
+        TestTrue(
+            Label,
+            Response.IsValid() &&
+                Response->TryGetBoolField(TEXT("success"), bSuccess) &&
+                bSuccess);
+        if (!bSuccess)
+        {
+            AddError(FString::Printf(
+                TEXT("Unexpected diff response: %s"), *ResponseJson));
+        }
+    };
+    auto ExpectRejected = [this, &DiffSnapshot](
+        const FString& Label,
+        const FString& ExpectedPath,
+        const TFunction<void(const TSharedRef<FJsonObject>&)>& Mutate)
+    {
+        const TSharedRef<FJsonObject> Before =
+            MakeCanonicalGraphSnapshotFixture();
+        Mutate(Before);
+        ResignGraphSnapshot(Before);
+        const FString ResponseJson = DiffSnapshot(Before);
+        const TSharedPtr<FJsonObject> Response = ParseJsonObject(ResponseJson);
+        bool bSuccess = true;
+        const bool bRejected = Response.IsValid() &&
+            Response->TryGetBoolField(TEXT("success"), bSuccess) &&
+            !bSuccess;
+        TestTrue(Label, bRejected);
+        if (!bRejected)
+        {
+            AddError(FString::Printf(
+                TEXT("Malformed snapshot was accepted: %s"), *ResponseJson));
+            return;
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>* Errors = nullptr;
+        if (!Response->TryGetArrayField(TEXT("errors"), Errors) ||
+            !Errors || Errors->Num() != 1 || !(*Errors)[0].IsValid() ||
+            (*Errors)[0]->Type != EJson::Object)
+        {
+            AddError(FString::Printf(
+                TEXT("Malformed snapshot response has no single error: %s"),
+                *ResponseJson));
+            return;
+        }
+        FString ActualPath;
+        const TSharedPtr<FJsonObject> Error = (*Errors)[0]->AsObject();
+        TestTrue(
+            Label + TEXT(" reports its structural path"),
+            Error.IsValid() &&
+                Error->TryGetStringField(TEXT("path"), ActualPath) &&
+                ActualPath == ExpectedPath);
+        TestFalse(
+            Label + TEXT(" is not rejected as a digest mismatch"),
+            ActualPath.EndsWith(TEXT(".digest")));
+    };
+
+    ExpectSuccess(
+        MakeCanonicalGraphSnapshotFixture(),
+        TEXT("Canonical signed snapshot is accepted before malformed cases"));
+    {
+        const TSharedRef<FJsonObject> SchemaValidScriptPaths =
+            MakeCanonicalGraphSnapshotFixture();
+        SchemaValidScriptPaths->SetStringField(
+            TEXT("blueprint_class"), TEXT("/Script/A"));
+        SnapshotGraph(SchemaValidScriptPaths)->SetStringField(
+            TEXT("schema_path"), TEXT("/Script/B"));
+        SnapshotNode(SchemaValidScriptPaths)->SetStringField(
+            TEXT("class_path"), TEXT("/Script/C"));
+        ResignGraphSnapshot(SchemaValidScriptPaths);
+        ExpectSuccess(
+            SchemaValidScriptPaths,
+            TEXT("Diff accepts every FULL_UNREAL_PATH shape allowed by the MCP schema"));
+    }
+
+    ExpectRejected(
+        TEXT("Diff rejects a node ID in a graph ID field"),
+        TEXT("params.before_snapshot.graphs[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotGraph(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("node:11111111-1111-4111-8111-11111111111a"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects a pin ID in a node ID field"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotNode(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("pin:11111111-1111-4111-8111-11111111111a"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects a graph ID in a pin ID field"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const FString Id =
+                TEXT("graph:11111111-1111-4111-8111-11111111111a");
+            SnapshotPin(Snapshot)->SetStringField(TEXT("id"), Id);
+            ReplaceFirstConnectionSource(Snapshot, Id);
+        });
+
+    ExpectRejected(
+        TEXT("Diff rejects a fallback graph ID"),
+        TEXT("params.before_snapshot.graphs[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotGraph(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("fallback:graph:1111111111111111111111111111111111111111"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects a fallback node ID"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotNode(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("fallback:node:1111111111111111111111111111111111111111"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects a fallback pin ID"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const FString Id =
+                TEXT("fallback:pin:1111111111111111111111111111111111111111");
+            SnapshotPin(Snapshot)->SetStringField(TEXT("id"), Id);
+            ReplaceFirstConnectionSource(Snapshot, Id);
+        });
+
+    ExpectRejected(
+        TEXT("Diff rejects an uppercase graph GUID"),
+        TEXT("params.before_snapshot.graphs[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotGraph(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("graph:11111111-1111-4111-8111-11111111111A"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects an uppercase node GUID"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotNode(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("node:11111111-1111-4111-8111-11111111111A"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects an uppercase pin GUID"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const FString Id =
+                TEXT("pin:11111111-1111-4111-8111-11111111111A");
+            SnapshotPin(Snapshot)->SetStringField(TEXT("id"), Id);
+            ReplaceFirstConnectionSource(Snapshot, Id);
+        });
+
+    ExpectRejected(
+        TEXT("Diff rejects an all-zero graph GUID"),
+        TEXT("params.before_snapshot.graphs[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotGraph(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("graph:00000000-0000-0000-0000-000000000000"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects an all-zero node GUID"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotNode(Snapshot)->SetStringField(
+                TEXT("id"),
+                TEXT("node:00000000-0000-0000-0000-000000000000"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects an all-zero pin GUID"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[0].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const FString Id =
+                TEXT("pin:00000000-0000-0000-0000-000000000000");
+            SnapshotPin(Snapshot)->SetStringField(TEXT("id"), Id);
+            ReplaceFirstConnectionSource(Snapshot, Id);
+        });
+
+    ExpectRejected(
+        TEXT("Diff rejects noncanonical graph order"),
+        TEXT("params.before_snapshot.graphs[1].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            TArray<TSharedPtr<FJsonValue>> Graphs =
+                Snapshot->GetArrayField(TEXT("graphs"));
+            Graphs.Swap(0, 1);
+            Snapshot->SetArrayField(TEXT("graphs"), Graphs);
+        });
+    ExpectRejected(
+        TEXT("Diff rejects noncanonical node order"),
+        TEXT("params.before_snapshot.graphs[0].nodes[1].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const TSharedPtr<FJsonObject> Graph = SnapshotGraph(Snapshot);
+            TArray<TSharedPtr<FJsonValue>> Nodes =
+                Graph->GetArrayField(TEXT("nodes"));
+            Nodes.Swap(0, 1);
+            Graph->SetArrayField(TEXT("nodes"), Nodes);
+        });
+    ExpectRejected(
+        TEXT("Diff rejects noncanonical pin order"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[1].id"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const TSharedPtr<FJsonObject> Node = SnapshotNode(Snapshot);
+            TArray<TSharedPtr<FJsonValue>> Pins =
+                Node->GetArrayField(TEXT("pins"));
+            Pins.Swap(0, 1);
+            Node->SetArrayField(TEXT("pins"), Pins);
+        });
+    ExpectRejected(
+        TEXT("Diff rejects noncanonical connection order"),
+        TEXT("params.before_snapshot.graphs[0].connections[1]"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const TSharedPtr<FJsonObject> Graph = SnapshotGraph(Snapshot);
+            TArray<TSharedPtr<FJsonValue>> Connections =
+                Graph->GetArrayField(TEXT("connections"));
+            Connections.Swap(0, 1);
+            Graph->SetArrayField(TEXT("connections"), Connections);
+        });
+
+    ExpectRejected(
+        TEXT("Diff rejects a recursively nested container pin type"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[1].type.item"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const TSharedRef<FJsonObject> InnerArray =
+                MakeSnapshotType(TEXT("array"));
+            InnerArray->SetObjectField(
+                TEXT("item"), MakeSnapshotType(TEXT("bool")));
+            const TSharedRef<FJsonObject> OuterArray =
+                MakeSnapshotType(TEXT("array"));
+            OuterArray->SetObjectField(TEXT("item"), InnerArray);
+            SnapshotPin(Snapshot, 0, 1)->SetObjectField(
+                TEXT("type"), OuterArray);
+        });
+    ExpectRejected(
+        TEXT("Diff rejects unknown fields in a scalar pin type"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[0].type.extra"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            const TSharedRef<FJsonObject> Type = MakeSnapshotType(TEXT("bool"));
+            Type->SetBoolField(TEXT("extra"), true);
+            SnapshotPin(Snapshot)->SetObjectField(TEXT("type"), Type);
+        });
+    ExpectRejected(
+        TEXT("Diff rejects an object pin type without class_path"),
+        TEXT("params.before_snapshot.graphs[0].nodes[1].pins[0].type.class_path"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotPin(Snapshot, 1, 0)->SetObjectField(
+                TEXT("type"), MakeSnapshotType(TEXT("object")));
+        });
+
+    ExpectRejected(
+        TEXT("Diff rejects missing node properties"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].properties"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotNode(Snapshot)->RemoveField(TEXT("properties"));
+        });
+    ExpectRejected(
+        TEXT("Diff rejects non-object node properties"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].properties"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotNode(Snapshot)->SetArrayField(TEXT("properties"), {});
+        });
+    ExpectRejected(
+        TEXT("Diff rejects a missing pin default"),
+        TEXT("params.before_snapshot.graphs[0].nodes[0].pins[0].default"),
+        [](const TSharedRef<FJsonObject>& Snapshot)
+        {
+            SnapshotPin(Snapshot)->RemoveField(TEXT("default"));
+        });
 
     return true;
 }

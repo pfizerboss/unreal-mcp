@@ -338,6 +338,14 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString GetBlueprintHealth(UBlueprint* Blueprint);
 
+    /** Serialize supported Blueprint graphs into a deterministic versioned snapshot. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SnapshotBlueprintGraph(UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Diff two complete deterministic Blueprint graph snapshots. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString DiffBlueprintGraphs(const FString& RequestJson);
+
     /** Set any CDO property including inherited C++ UPROPERTYs (e.g. DefaultPawnClass on GameModeBase BPs).
      *  Uses TFieldIterator with IncludeSuper to bypass the Python set_editor_property limitation. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")

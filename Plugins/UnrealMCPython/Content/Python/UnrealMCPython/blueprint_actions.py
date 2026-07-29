@@ -1159,17 +1159,33 @@ def ue_get_blueprint_health(asset_path: str = None,
     return json.dumps(result, separators=(",", ":"), ensure_ascii=False)
 
 
-def ue_snapshot_blueprint_graph(asset_path: str = None, graph_id: str = None,
-                                      detailed: bool = False) -> str:
+def ue_snapshot_blueprint_graph(
+    asset_path: str = None,
+    graph_ids: list[str] = (),
+) -> str:
     """Returns a deterministic compact graph snapshot ordered by stable ID."""
-    return _blueprint2_unsupported("snapshot_blueprint_graph")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({"graph_ids": list(graph_ids or [])})
+    return blueprint2.call_asset_helper(
+        "snapshot_blueprint_graph", asset_path, request
+    )
 
 
-def ue_diff_blueprint_graphs(before_snapshot: dict = None,
-                                   after_snapshot: dict = None,
-                                   queries: list = None) -> str:
+def ue_diff_blueprint_graphs(
+    before_snapshot: dict = None,
+    after_snapshot: dict = None,
+    queries: list[dict] = (),
+) -> str:
     """Diffs two graph snapshots with independently paginated sections."""
-    return _blueprint2_unsupported("diff_blueprint_graphs")
+    from UnrealMCPython import blueprint2
+
+    request = deepcopy({
+        "before_snapshot": before_snapshot,
+        "after_snapshot": after_snapshot,
+        "queries": list(queries or []),
+    })
+    return blueprint2.call_json_helper("diff_blueprint_graphs", request)
 
 
 # Literal metadata consumed by mcp-server/generate_catalog.py.
