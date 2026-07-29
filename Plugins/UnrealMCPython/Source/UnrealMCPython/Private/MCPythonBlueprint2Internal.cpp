@@ -15,8 +15,11 @@
 #include "Engine/SimpleConstructionScript.h"
 #include "Misc/Base64.h"
 #include "Misc/EngineVersion.h"
+#include "Misc/DateTime.h"
 #include "Misc/PackageName.h"
 #include "Misc/SecureHash.h"
+#include "Misc/ScopeLock.h"
+#include "Misc/Timespan.h"
 #include "ScopedTransaction.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -48,6 +51,162 @@ FString Sha1(const FString& Value)
     uint8 Digest[FSHA1::DigestSize];
     FSHA1::HashBuffer(Utf8.Get(), Utf8.Length(), Digest);
     return BytesToHex(Digest, FSHA1::DigestSize).ToLower();
+}
+
+struct FStoredPaletteAction
+{
+    FPaletteActionRecord Record;
+    FString EditorSessionId;
+    FDateTime CreatedAt;
+    FDateTime LastUsedAt;
+};
+
+struct FStoredPaletteCursor
+{
+    FPaletteCursorRecord Record;
+    FString EditorSessionId;
+    FDateTime CreatedAt;
+    FDateTime LastUsedAt;
+};
+
+struct FStoredPaletteBinding
+{
+    FPaletteBindingRecord Record;
+    FString EditorSessionId;
+    FDateTime CreatedAt;
+    FDateTime LastUsedAt;
+};
+
+struct FPaletteTokenState
+{
+    TMap<FString, FStoredPaletteAction> Actions;
+    TMap<FString, FStoredPaletteCursor> Cursors;
+    TMap<FString, FStoredPaletteBinding> Bindings;
+    TArray<FString> ActionOrder;
+    TArray<FString> CursorOrder;
+    TArray<FString> BindingOrder;
+    TOptional<FDateTime> TestNow;
+    FCriticalSection Mutex;
+};
+
+FPaletteTokenState& PaletteTokenState()
+{
+    static FPaletteTokenState State;
+    return State;
+}
+
+FDateTime PaletteNow(const FPaletteTokenState& State)
+{
+    return State.TestNow.IsSet() ? State.TestNow.GetValue() : FDateTime::UtcNow();
+}
+
+FString CurrentPaletteSessionId()
+{
+    return UE::MCPython::GetEditorSessionId().ToString(
+        EGuidFormats::DigitsWithHyphensLower);
+}
+
+bool IsOpaqueToken(const FString& Token, const FString& Prefix)
+{
+    if (!Token.StartsWith(Prefix) || Token.Len() != Prefix.Len() + 40)
+    {
+        return false;
+    }
+    for (int32 Index = Prefix.Len(); Index < Token.Len(); ++Index)
+    {
+        const TCHAR Character = Token[Index];
+        if (!((Character >= TEXT('0') && Character <= TEXT('9')) ||
+              (Character >= TEXT('a') && Character <= TEXT('f'))))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void SetPaletteError(
+    FError& OutError,
+    const FString& Code,
+    const FString& Path,
+    const FString& Message,
+    const FString& Hint)
+{
+    OutError = FError{};
+    OutError.Code = Code;
+    OutError.Path = Path;
+    OutError.Message = Message;
+    OutError.Hint = Hint;
+}
+
+FString CanonicalPaletteContext(const FPaletteContext& Context)
+{
+    return Context.AssetPath + TEXT("\n") +
+        Context.GraphId + TEXT("\n") +
+        Context.GraphSchemaPath + TEXT("\n") +
+        Context.SourcePinId + TEXT("\n") +
+        Context.RequestDigest + TEXT("\n") +
+        Context.ResultDigest + TEXT("\n") +
+        FString::FromInt(Context.Limit);
+}
+
+bool PaletteContextMatches(
+    const FPaletteContext& Stored,
+    const FPaletteContext& Expected)
+{
+    auto Matches = [](const FString& StoredValue, const FString& ExpectedValue)
+    {
+        return ExpectedValue.IsEmpty() || StoredValue == ExpectedValue;
+    };
+    return Matches(Stored.AssetPath, Expected.AssetPath) &&
+        Matches(Stored.GraphId, Expected.GraphId) &&
+        Matches(Stored.GraphSchemaPath, Expected.GraphSchemaPath) &&
+        Matches(Stored.SourcePinId, Expected.SourcePinId) &&
+        Matches(Stored.RequestDigest, Expected.RequestDigest) &&
+        Matches(Stored.ResultDigest, Expected.ResultDigest) &&
+        (Expected.Limit <= 0 || Stored.Limit == Expected.Limit);
+}
+
+template <typename StoredType>
+void RemoveExpiredRecords(
+    TMap<FString, StoredType>& Records,
+    TArray<FString>& Order,
+    const FDateTime& Now)
+{
+    static const FTimespan Lifetime = FTimespan::FromMinutes(30.0);
+    TArray<FString> Expired;
+    for (const TPair<FString, StoredType>& Pair : Records)
+    {
+        if (Now - Pair.Value.LastUsedAt > Lifetime)
+        {
+            Expired.Add(Pair.Key);
+        }
+    }
+    for (const FString& Id : Expired)
+    {
+        Records.Remove(Id);
+        Order.Remove(Id);
+    }
+}
+
+template <typename StoredType>
+void EnforceRecordBound(
+    TMap<FString, StoredType>& Records,
+    TArray<FString>& Order,
+    const int32 Maximum)
+{
+    while (Records.Num() > Maximum && !Order.IsEmpty())
+    {
+        const FString Oldest = Order[0];
+        Order.RemoveAt(0);
+        Records.Remove(Oldest);
+    }
+}
+
+void PurgeExpiredPaletteRecords(FPaletteTokenState& State, const FDateTime& Now)
+{
+    RemoveExpiredRecords(State.Actions, State.ActionOrder, Now);
+    RemoveExpiredRecords(State.Cursors, State.CursorOrder, Now);
+    RemoveExpiredRecords(State.Bindings, State.BindingOrder, Now);
 }
 
 FString EscapeCanonicalJsonString(const FString& Value)
@@ -1843,6 +2002,312 @@ FString Sha1Hex(const FString& Value)
 {
     return Sha1(Value);
 }
+
+FString RegisterPaletteActionToken(FPaletteActionRecord& Record)
+{
+    if (Record.Context.AssetPath.IsEmpty() ||
+        Record.Context.GraphId.IsEmpty() ||
+        Record.Context.GraphSchemaPath.IsEmpty() ||
+        Record.Context.RequestDigest.IsEmpty() ||
+        Record.Context.ResultDigest.IsEmpty() ||
+        Record.Context.Limit <= 0 ||
+        Record.CandidateKey.IsEmpty() ||
+        Record.SpawnerSignature.IsEmpty() ||
+        Record.SortKey.IsEmpty())
+    {
+        return FString();
+    }
+
+    Record.BindingPaths.Sort();
+    const FString SessionId = CurrentPaletteSessionId();
+    const FString Canonical = SessionId + TEXT("\n") +
+        CanonicalPaletteContext(Record.Context) + TEXT("\n") +
+        Record.CandidateKey + TEXT("\n") +
+        Record.SpawnerSignature + TEXT("\n") +
+        Record.OwnerPath + TEXT("\n") +
+        FString::Join(Record.BindingPaths, TEXT("\n")) + TEXT("\n") +
+        Record.SortKey;
+    Record.ActionId = TEXT("action:") + Sha1(Canonical);
+
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    if (FStoredPaletteAction* Existing = State.Actions.Find(Record.ActionId))
+    {
+        Existing->Record = Record;
+        Existing->LastUsedAt = Now;
+        return Record.ActionId;
+    }
+
+    FStoredPaletteAction Stored;
+    Stored.Record = Record;
+    Stored.EditorSessionId = SessionId;
+    Stored.CreatedAt = Now;
+    Stored.LastUsedAt = Now;
+    State.Actions.Add(Record.ActionId, MoveTemp(Stored));
+    State.ActionOrder.Add(Record.ActionId);
+    EnforceRecordBound(State.Actions, State.ActionOrder, 4096);
+    return Record.ActionId;
+}
+
+bool ResolvePaletteActionToken(
+    const FString& ActionId,
+    const FPaletteContext& Expected,
+    FPaletteActionRecord& OutRecord,
+    FError& OutError)
+{
+    OutRecord = FPaletteActionRecord{};
+    OutError = FError{};
+    if (!IsOpaqueToken(ActionId, TEXT("action:")))
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.action_id"),
+            TEXT("action_id must be an opaque action token returned by palette search."),
+            TEXT("Repeat the palette search and use the returned action_id unchanged."));
+        return false;
+    }
+
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    FStoredPaletteAction* Stored = State.Actions.Find(ActionId);
+    if (!Stored)
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.action_id"),
+            TEXT("action_id is unknown, expired, evicted, or tampered."),
+            TEXT("Repeat the palette search and use a current action_id."));
+        return false;
+    }
+    if (Stored->EditorSessionId != CurrentPaletteSessionId() ||
+        !PaletteContextMatches(Stored->Record.Context, Expected))
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("action_id no longer matches the current editor, asset, graph, pin, or palette context."),
+            TEXT("Repeat the palette search in the current context."));
+        return false;
+    }
+
+    Stored->LastUsedAt = Now;
+    OutRecord = Stored->Record;
+    return true;
+}
+
+FString RegisterPaletteCursor(FPaletteCursorRecord& Record)
+{
+    if (Record.Context.AssetPath.IsEmpty() ||
+        Record.Context.GraphId.IsEmpty() ||
+        Record.Context.GraphSchemaPath.IsEmpty() ||
+        Record.Context.RequestDigest.IsEmpty() ||
+        Record.Context.ResultDigest.IsEmpty() ||
+        Record.Context.Limit <= 0 ||
+        Record.LastSortKey.IsEmpty())
+    {
+        return FString();
+    }
+
+    const FString SessionId = CurrentPaletteSessionId();
+    Record.CursorId = TEXT("palette-cursor:") + Sha1(
+        SessionId + TEXT("\n") + CanonicalPaletteContext(Record.Context) +
+        TEXT("\n") + Record.LastSortKey);
+
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    if (FStoredPaletteCursor* Existing = State.Cursors.Find(Record.CursorId))
+    {
+        Existing->Record = Record;
+        Existing->LastUsedAt = Now;
+        return Record.CursorId;
+    }
+
+    FStoredPaletteCursor Stored;
+    Stored.Record = Record;
+    Stored.EditorSessionId = SessionId;
+    Stored.CreatedAt = Now;
+    Stored.LastUsedAt = Now;
+    State.Cursors.Add(Record.CursorId, MoveTemp(Stored));
+    State.CursorOrder.Add(Record.CursorId);
+    EnforceRecordBound(State.Cursors, State.CursorOrder, 1024);
+    return Record.CursorId;
+}
+
+bool ResolvePaletteCursor(
+    const FString& Cursor,
+    const FPaletteContext& Expected,
+    FPaletteCursorRecord& OutRecord,
+    FError& OutError)
+{
+    OutRecord = FPaletteCursorRecord{};
+    OutError = FError{};
+    if (!IsOpaqueToken(Cursor, TEXT("palette-cursor:")))
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.cursor"),
+            TEXT("cursor must be an opaque palette cursor returned by the previous page."),
+            TEXT("Restart palette search without a cursor."));
+        return false;
+    }
+
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    FStoredPaletteCursor* Stored = State.Cursors.Find(Cursor);
+    if (!Stored)
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.cursor"),
+            TEXT("cursor is unknown, expired, evicted, or tampered."),
+            TEXT("Restart palette search without a cursor."));
+        return false;
+    }
+    if (Stored->EditorSessionId != CurrentPaletteSessionId() ||
+        !PaletteContextMatches(Stored->Record.Context, Expected))
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.cursor"),
+            TEXT("cursor no longer matches the current request or palette result set."),
+            TEXT("Restart palette search without a cursor."));
+        return false;
+    }
+
+    Stored->LastUsedAt = Now;
+    OutRecord = Stored->Record;
+    return true;
+}
+
+FString RegisterPaletteBinding(FPaletteBindingRecord& Record)
+{
+    if (!IsOpaqueToken(Record.ActionId, TEXT("action:")) ||
+        Record.ObjectPath.IsEmpty() ||
+        Record.ExpectedClassPath.IsEmpty())
+    {
+        return FString();
+    }
+
+    const FString SessionId = CurrentPaletteSessionId();
+    Record.BindingId = TEXT("binding:") + Sha1(
+        SessionId + TEXT("\n") + Record.ActionId + TEXT("\n") +
+        Record.ObjectPath + TEXT("\n") + Record.ExpectedClassPath);
+
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    if (FStoredPaletteBinding* Existing = State.Bindings.Find(Record.BindingId))
+    {
+        Existing->Record = Record;
+        Existing->LastUsedAt = Now;
+        return Record.BindingId;
+    }
+
+    FStoredPaletteBinding Stored;
+    Stored.Record = Record;
+    Stored.EditorSessionId = SessionId;
+    Stored.CreatedAt = Now;
+    Stored.LastUsedAt = Now;
+    State.Bindings.Add(Record.BindingId, MoveTemp(Stored));
+    State.BindingOrder.Add(Record.BindingId);
+    EnforceRecordBound(State.Bindings, State.BindingOrder, 1024);
+    return Record.BindingId;
+}
+
+bool ResolvePaletteBindings(
+    const FString& ActionId,
+    const TArray<FString>& BindingIds,
+    TArray<FPaletteBindingRecord>& OutRecords,
+    FError& OutError)
+{
+    OutRecords.Reset();
+    OutError = FError{};
+    if (!IsOpaqueToken(ActionId, TEXT("action:")) || BindingIds.Num() > 32)
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.bindings"),
+            TEXT("bindings require one valid action_id and at most 32 opaque binding IDs."),
+            TEXT("Use only binding IDs returned with the selected palette action."));
+        return false;
+    }
+
+    TSet<FString> UniqueIds;
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    for (const FString& BindingId : BindingIds)
+    {
+        if (!IsOpaqueToken(BindingId, TEXT("binding:")) ||
+            UniqueIds.Contains(BindingId))
+        {
+            SetPaletteError(
+                OutError,
+                TEXT("INVALID_INPUT"),
+                TEXT("params.bindings"),
+                TEXT("binding IDs must be unique opaque values returned by palette search."),
+                TEXT("Remove duplicate or modified binding IDs."));
+            OutRecords.Reset();
+            return false;
+        }
+        UniqueIds.Add(BindingId);
+
+        FStoredPaletteBinding* Stored = State.Bindings.Find(BindingId);
+        if (!Stored || Stored->EditorSessionId != CurrentPaletteSessionId() ||
+            Stored->Record.ActionId != ActionId)
+        {
+            SetPaletteError(
+                OutError,
+                TEXT("INVALID_INPUT"),
+                TEXT("params.bindings"),
+                TEXT("binding ID is unknown, expired, or belongs to another action."),
+                TEXT("Describe or search the action again and use its binding IDs."));
+            OutRecords.Reset();
+            return false;
+        }
+        Stored->LastUsedAt = Now;
+        OutRecords.Add(Stored->Record);
+    }
+    return true;
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+void ResetPaletteTokenStateForTests()
+{
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    State.Actions.Reset();
+    State.Cursors.Reset();
+    State.Bindings.Reset();
+    State.ActionOrder.Reset();
+    State.CursorOrder.Reset();
+    State.BindingOrder.Reset();
+}
+
+void SetPaletteTokenClockForTests(const TOptional<FDateTime>& Now)
+{
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    State.TestNow = Now;
+}
+#endif
 
 FString EncodeCursor(const FString& AssetPath, const FPageRequest& Page)
 {

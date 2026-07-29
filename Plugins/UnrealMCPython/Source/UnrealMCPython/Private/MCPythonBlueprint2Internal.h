@@ -61,6 +61,43 @@ struct FError
     FString Hint;
 };
 
+struct FPaletteContext
+{
+    FString AssetPath;
+    FString GraphId;
+    FString GraphSchemaPath;
+    FString SourcePinId;
+    FString RequestDigest;
+    FString ResultDigest;
+    int32 Limit = 50;
+};
+
+struct FPaletteActionRecord
+{
+    FPaletteContext Context;
+    FString ActionId;
+    FString CandidateKey;
+    FString SpawnerSignature;
+    FString OwnerPath;
+    TArray<FString> BindingPaths;
+    FString SortKey;
+};
+
+struct FPaletteCursorRecord
+{
+    FPaletteContext Context;
+    FString CursorId;
+    FString LastSortKey;
+};
+
+struct FPaletteBindingRecord
+{
+    FString BindingId;
+    FString ActionId;
+    FString ObjectPath;
+    FString ExpectedClassPath;
+};
+
 struct FNormalizedDefault
 {
     FString DefaultValue;
@@ -112,6 +149,28 @@ FResolvedTarget ResolveTarget(
 FString CanonicalQueryDigest(const TSharedRef<FJsonObject>& Query);
 FString CanonicalJsonString(const TSharedPtr<FJsonValue>& Value);
 FString Sha1Hex(const FString& Value);
+FString RegisterPaletteActionToken(FPaletteActionRecord& Record);
+bool ResolvePaletteActionToken(
+    const FString& ActionId,
+    const FPaletteContext& Expected,
+    FPaletteActionRecord& OutRecord,
+    FError& OutError);
+FString RegisterPaletteCursor(FPaletteCursorRecord& Record);
+bool ResolvePaletteCursor(
+    const FString& Cursor,
+    const FPaletteContext& Expected,
+    FPaletteCursorRecord& OutRecord,
+    FError& OutError);
+FString RegisterPaletteBinding(FPaletteBindingRecord& Record);
+bool ResolvePaletteBindings(
+    const FString& ActionId,
+    const TArray<FString>& BindingIds,
+    TArray<FPaletteBindingRecord>& OutRecords,
+    FError& OutError);
+#if WITH_DEV_AUTOMATION_TESTS
+void ResetPaletteTokenStateForTests();
+void SetPaletteTokenClockForTests(const TOptional<FDateTime>& Now);
+#endif
 FString EncodeCursor(
     const FString& AssetPath,
     const FPageRequest& Page);
