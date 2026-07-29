@@ -92,6 +92,42 @@ TSharedRef<FJsonObject> MakeSearchRequest(
     return Request;
 }
 
+TSharedRef<FJsonObject> MakeSpawnRequest(
+    const FString& GraphId,
+    const FString& ActionId,
+    const double X,
+    const double Y,
+    const TArray<FString>& BindingIds = {})
+{
+    const TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
+    Position->SetNumberField(TEXT("x"), X);
+    Position->SetNumberField(TEXT("y"), Y);
+    TArray<TSharedPtr<FJsonValue>> Bindings;
+    for (const FString& BindingId : BindingIds)
+    {
+        Bindings.Add(MakeShared<FJsonValueString>(BindingId));
+    }
+    const TSharedRef<FJsonObject> Request = MakeShared<FJsonObject>();
+    Request->SetStringField(TEXT("graph_id"), GraphId);
+    Request->SetStringField(TEXT("action_id"), ActionId);
+    Request->SetObjectField(TEXT("position"), Position);
+    Request->SetArrayField(TEXT("bindings"), MoveTemp(Bindings));
+    return Request;
+}
+
+FString FirstErrorCode(const TSharedPtr<FJsonObject>& Result)
+{
+    if (!Result || !Result->HasTypedField<EJson::Array>(TEXT("errors")))
+    {
+        return FString();
+    }
+    const TArray<TSharedPtr<FJsonValue>>& Errors =
+        Result->GetArrayField(TEXT("errors"));
+    return Errors.IsEmpty() || !Errors[0].IsValid()
+        ? FString()
+        : Errors[0]->AsObject()->GetStringField(TEXT("code"));
+}
+
 void CleanupFixturePackage(UPackage* Package)
 {
     if (!Package)
@@ -568,6 +604,282 @@ bool FMCPythonBlueprintPaletteDescribeTest::RunTest(const FString& Parameters)
         TEXT("describing an action does not mutate the target graph"),
         Fixture.Graph->Nodes.Num(),
         NodeCountBefore);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprintPaletteSpawnTest,
+    "UnrealMCP.Blueprint2.Palette.Spawn",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprintPaletteSpawnTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    using namespace UE::MCPython::Blueprint2;
+
+    ResetPaletteTokenStateForTests();
+    FPaletteBlueprintFixture Fixture = MakePaletteBlueprintFixture(
+        TEXT("MCPythonBlueprintPaletteSpawnTest"));
+    ON_SCOPE_EXIT
+    {
+        ResetPaletteTokenStateForTests();
+        CleanupFixturePackage(Fixture.Package);
+    };
+    TestNotNull(TEXT("palette spawn fixture Blueprint is created"), Fixture.Blueprint);
+    TestNotNull(TEXT("palette spawn fixture EventGraph exists"), Fixture.Graph);
+    if (!Fixture.Blueprint || !Fixture.Graph || Fixture.GraphId.IsEmpty())
+    {
+        return false;
+    }
+
+    const TSharedPtr<FJsonObject> Search = ParseJsonObject(
+        UMCPythonHelper::SearchBlueprintNodeActions(
+            Fixture.Blueprint,
+            SerializeJsonObject(MakeSearchRequest(
+                Fixture.GraphId, TEXT("Get Actor Location"), TEXT(""), 50))));
+    TestTrue(
+        TEXT("palette spawn setup search succeeds"),
+        Search.IsValid() && Search->GetBoolField(TEXT("success")));
+    if (!Search || !Search->GetBoolField(TEXT("success")))
+    {
+        return false;
+    }
+    const TArray<TSharedPtr<FJsonValue>>& SearchItems =
+        Search->GetObjectField(TEXT("data"))->GetArrayField(TEXT("items"));
+    TestTrue(TEXT("palette spawn setup returns an action"), !SearchItems.IsEmpty());
+    if (SearchItems.IsEmpty())
+    {
+        return false;
+    }
+    const TSharedPtr<FJsonObject> Action = SearchItems[0]->AsObject();
+    const FString ActionId = Action->GetStringField(TEXT("action_id"));
+
+    Fixture.Blueprint->Status = BS_UpToDate;
+    Fixture.Package->SetDirtyFlag(false);
+    const EBlueprintStatus StatusBefore = Fixture.Blueprint->Status;
+    const bool bPackageDirtyBefore = Fixture.Package->IsDirty();
+    const int32 NodeCountBefore = Fixture.Graph->Nodes.Num();
+    TSet<UEdGraphNode*> NodesBefore;
+    for (UEdGraphNode* Node : Fixture.Graph->Nodes)
+    {
+        if (Node)
+        {
+            NodesBefore.Add(Node);
+        }
+    }
+
+    const TSharedPtr<FJsonObject> Spawn = ParseJsonObject(
+        UMCPythonHelper::AddBlueprintActionNode(
+            Fixture.Blueprint,
+            SerializeJsonObject(MakeSpawnRequest(
+                Fixture.GraphId, ActionId, 320.0, 160.0))));
+    TestTrue(
+        TEXT("palette action spawn succeeds"),
+        Spawn.IsValid() && Spawn->GetBoolField(TEXT("success")));
+    if (!Spawn || !Spawn->GetBoolField(TEXT("success")))
+    {
+        return false;
+    }
+
+    const TSharedPtr<FJsonObject> Data = Spawn->GetObjectField(TEXT("data"));
+    TestEqual(
+        TEXT("palette spawn adds exactly one primary node"),
+        Fixture.Graph->Nodes.Num(),
+        NodeCountBefore + 1);
+    TestEqual(
+        TEXT("palette spawn preserves its action ID"),
+        Data->GetStringField(TEXT("action_id")),
+        ActionId);
+    const FString NodeId = Data->GetStringField(TEXT("node_id"));
+    TestTrue(TEXT("palette spawn returns a stable node ID"), NodeId.StartsWith(TEXT("node:")));
+    UEdGraphNode* NewNode = nullptr;
+    for (UEdGraphNode* Node : Fixture.Graph->Nodes)
+    {
+        if (Node && !NodesBefore.Contains(Node))
+        {
+            TestNull(TEXT("palette spawn has only one primary node"), NewNode);
+            NewNode = Node;
+        }
+    }
+    TestNotNull(TEXT("palette spawn primary node exists"), NewNode);
+    if (!NewNode)
+    {
+        return false;
+    }
+    TestEqual(
+        TEXT("returned stable node ID identifies the new node"),
+        NodeId,
+        DescribeNodeTarget(Fixture.Blueprint, NewNode).Id);
+    TestEqual(
+        TEXT("palette spawn returns the exact node class"),
+        Data->GetStringField(TEXT("class_path")),
+        NewNode->GetClass()->GetPathName());
+    TestEqual(TEXT("palette spawn x position is exact"), NewNode->NodePosX, 320);
+    TestEqual(TEXT("palette spawn y position is exact"), NewNode->NodePosY, 160);
+    TestEqual(
+        TEXT("serialized x position is exact"),
+        Data->GetObjectField(TEXT("position"))->GetIntegerField(TEXT("x")),
+        320);
+    TestEqual(
+        TEXT("serialized y position is exact"),
+        Data->GetObjectField(TEXT("position"))->GetIntegerField(TEXT("y")),
+        160);
+
+    const TArray<TSharedPtr<FJsonValue>>& PinIds =
+        Data->GetArrayField(TEXT("pin_ids"));
+    const TArray<TSharedPtr<FJsonValue>>& Pins = Data->GetArrayField(TEXT("pins"));
+    TestFalse(TEXT("palette spawn returns visible stable pins"), PinIds.IsEmpty());
+    TestEqual(TEXT("pin details align with pin IDs"), Pins.Num(), PinIds.Num());
+    for (int32 Index = 0; Index < PinIds.Num(); ++Index)
+    {
+        const FString PinId = PinIds[Index]->AsString();
+        TestTrue(
+            *FString::Printf(TEXT("pin %d has a stable ID"), Index),
+            PinId.StartsWith(TEXT("pin:")));
+        TestEqual(
+            *FString::Printf(TEXT("pin %d detail uses the same ID"), Index),
+            Pins[Index]->AsObject()->GetStringField(TEXT("id")),
+            PinId);
+    }
+    TestTrue(
+        TEXT("simple function spawn has no auxiliary nodes"),
+        Data->GetArrayField(TEXT("auxiliary_node_ids")).IsEmpty());
+    const TArray<TSharedPtr<FJsonValue>>& Changes =
+        Spawn->GetArrayField(TEXT("changes"));
+    TestEqual(TEXT("palette spawn emits one change"), Changes.Num(), 1);
+    if (Changes.Num() == 1)
+    {
+        TestEqual(
+            TEXT("palette spawn emits a create change"),
+            Changes[0]->AsObject()->GetStringField(TEXT("kind")),
+            FString(TEXT("create")));
+        TestEqual(
+            TEXT("palette spawn change targets the new node"),
+            Changes[0]->AsObject()->GetStringField(TEXT("target_id")),
+            NodeId);
+    }
+    const TArray<TSharedPtr<FJsonValue>>& NextActions =
+        Spawn->GetArrayField(TEXT("next_actions"));
+    TestEqual(TEXT("palette spawn emits one next action"), NextActions.Num(), 1);
+    if (NextActions.Num() == 1)
+    {
+        TestEqual(
+            TEXT("palette spawn requires explicit compilation"),
+            NextActions[0]->AsObject()->GetStringField(TEXT("action")),
+            FString(TEXT("compile_blueprint")));
+    }
+    TestEqual(TEXT("fixture begins up to date"), StatusBefore, BS_UpToDate);
+    TestFalse(TEXT("fixture begins with a clean package"), bPackageDirtyBefore);
+    TestEqual(
+        TEXT("palette spawn marks Blueprint compile status dirty"),
+        Fixture.Blueprint->Status,
+        BS_Dirty);
+    TestTrue(
+        TEXT("palette spawn marks the package dirty without saving"),
+        Fixture.Package->IsDirty());
+
+    const int32 CountAfterSpawn = Fixture.Graph->Nodes.Num();
+    const TSharedPtr<FJsonObject> Tampered = ParseJsonObject(
+        UMCPythonHelper::AddBlueprintActionNode(
+            Fixture.Blueprint,
+            SerializeJsonObject(MakeSpawnRequest(
+                Fixture.GraphId, TamperToken(ActionId), 640.0, 160.0))));
+    TestTrue(
+        TEXT("tampered palette action is rejected"),
+        Tampered.IsValid() && !Tampered->GetBoolField(TEXT("success")));
+    TestEqual(
+        TEXT("tampered palette action is invalid input"),
+        FirstErrorCode(Tampered),
+        FString(TEXT("INVALID_INPUT")));
+    TestEqual(
+        TEXT("tampered palette action does not mutate the graph"),
+        Fixture.Graph->Nodes.Num(),
+        CountAfterSpawn);
+
+    const FGuid OriginalGraphGuid = Fixture.Graph->GraphGuid;
+    Fixture.Graph->GraphGuid = FGuid::NewGuid();
+    const TSharedPtr<FJsonObject> Stale = ParseJsonObject(
+        UMCPythonHelper::AddBlueprintActionNode(
+            Fixture.Blueprint,
+            SerializeJsonObject(MakeSpawnRequest(
+                Fixture.GraphId, ActionId, 640.0, 160.0))));
+    TestTrue(
+        TEXT("stale graph palette action is rejected"),
+        Stale.IsValid() && !Stale->GetBoolField(TEXT("success")));
+    TestEqual(
+        TEXT("stale graph palette action is a precondition"),
+        FirstErrorCode(Stale),
+        FString(TEXT("PRECONDITION_FAILED")));
+    TestEqual(
+        TEXT("stale graph palette action does not invoke the spawner"),
+        Fixture.Graph->Nodes.Num(),
+        CountAfterSpawn);
+    Fixture.Graph->GraphGuid = OriginalGraphGuid;
+
+    const TSharedPtr<FJsonObject> EventSearch = ParseJsonObject(
+        UMCPythonHelper::SearchBlueprintNodeActions(
+            Fixture.Blueprint,
+            SerializeJsonObject(MakeSearchRequest(
+                Fixture.GraphId, TEXT("Event BeginPlay"), TEXT(""), 200))));
+    TestTrue(
+        TEXT("singleton event search succeeds"),
+        EventSearch.IsValid() && EventSearch->GetBoolField(TEXT("success")));
+    TSharedPtr<FJsonObject> EventAction;
+    if (EventSearch && EventSearch->GetBoolField(TEXT("success")))
+    {
+        for (const TSharedPtr<FJsonValue>& Item :
+            EventSearch->GetObjectField(TEXT("data"))->GetArrayField(TEXT("items")))
+        {
+            const TSharedPtr<FJsonObject> Candidate = Item->AsObject();
+            if (Candidate->GetStringField(TEXT("action_kind")) == TEXT("event") &&
+                Candidate->GetStringField(TEXT("member_path")).Contains(
+                    TEXT("ReceiveBeginPlay")))
+            {
+                EventAction = Candidate;
+                break;
+            }
+        }
+    }
+    TestTrue(
+        TEXT("singleton BeginPlay event action is available"),
+        EventAction.IsValid());
+    if (EventAction)
+    {
+        const FString EventActionId =
+            EventAction->GetStringField(TEXT("action_id"));
+        const TSharedPtr<FJsonObject> ActivatedEvent = ParseJsonObject(
+            UMCPythonHelper::AddBlueprintActionNode(
+                Fixture.Blueprint,
+                SerializeJsonObject(MakeSpawnRequest(
+                    Fixture.GraphId,
+                    EventActionId,
+                    960.0,
+                    160.0))));
+        TestTrue(
+            TEXT("native spawner activates the default BeginPlay ghost"),
+            ActivatedEvent.IsValid() &&
+                ActivatedEvent->GetBoolField(TEXT("success")));
+        const int32 CountBeforeSingleton = Fixture.Graph->Nodes.Num();
+        const TSharedPtr<FJsonObject> Singleton = ParseJsonObject(
+            UMCPythonHelper::AddBlueprintActionNode(
+                Fixture.Blueprint,
+                SerializeJsonObject(MakeSpawnRequest(
+                    Fixture.GraphId,
+                    EventActionId,
+                    1280.0,
+                    160.0))));
+        TestTrue(
+            TEXT("existing singleton event is rejected"),
+            Singleton.IsValid() && !Singleton->GetBoolField(TEXT("success")));
+        TestEqual(
+            TEXT("existing singleton event reports a precondition"),
+            FirstErrorCode(Singleton),
+            FString(TEXT("PRECONDITION_FAILED")));
+        TestEqual(
+            TEXT("singleton rejection rolls back without a second event"),
+            Fixture.Graph->Nodes.Num(),
+            CountBeforeSingleton);
+    }
     return true;
 }
 

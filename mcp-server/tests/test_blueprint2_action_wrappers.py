@@ -46,6 +46,7 @@ GRAPH_SOURCE = PRIVATE / "MCPythonHelper_BlueprintGraph.cpp"
 VARIABLE_SOURCE = PRIVATE / "MCPythonHelper_BlueprintVariables.cpp"
 COMPONENT_SOURCE = PRIVATE / "MCPythonHelper_BlueprintComponents.cpp"
 DIAGNOSTICS_SOURCE = PRIVATE / "MCPythonHelper_BlueprintDiagnostics.cpp"
+PALETTE_SOURCE = PRIVATE / "MCPythonHelper_BlueprintPalette.cpp"
 BUILD_SOURCE = PRIVATE.parent / "UnrealMCPython.Build.cs"
 BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
 EDITOR_TESTS = (
@@ -63,6 +64,16 @@ INSPECTION_EDITOR_TEST = EDITOR_TESTS / "test_blueprint2_inspection.py"
 EDITOR_RUN_ALL = EDITOR_TESTS / "run_all.py"
 SELF_HOSTED_WORKFLOW = ROOT / ".github" / "workflows" / "e2e-selfhosted.yml"
 PLUGIN_PYTHON = ADAPTER_FILE.parents[1]
+
+
+def test_palette_spawn_has_no_implicit_compile_save_or_python_escape():
+    source = PALETTE_SOURCE.read_text(encoding="utf-8")
+
+    assert "CompileBlueprint" not in source
+    assert "SaveAsset" not in source
+    assert "EditorAssetLibrary" not in source
+    assert "execute_python" not in source
+    assert "UBlueprintNodeSpawner::Invoke" in source or "->Invoke(" in source
 
 
 def _load_blueprint_actions(monkeypatch, helper):

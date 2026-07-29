@@ -20,6 +20,7 @@
 #include "K2Node_MacroInstance.h"
 #include "K2Node_StructOperation.h"
 #include "K2Node_Variable.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/EngineVersionComparison.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -46,6 +47,15 @@ struct FPaletteRequest
     FString FiltersJson;
     FString Cursor;
     int32 Limit = 50;
+};
+
+struct FPaletteSpawnRequest
+{
+    FString GraphId;
+    FString ActionId;
+    double PositionX = 0.0;
+    double PositionY = 0.0;
+    TArray<FString> BindingIds;
 };
 
 struct FPaletteBindingCandidate
@@ -429,6 +439,103 @@ bool ParseSearchRequest(
     return true;
 }
 
+bool ReadFinitePositionCoordinate(
+    const TSharedRef<FJsonObject>& Position,
+    const FString& Name,
+    double& OutValue,
+    FError& OutError)
+{
+    const TSharedPtr<FJsonValue>* Field = FindField(Position, Name);
+    const FString Path = TEXT("params.position.") + Name;
+    if (!Field)
+    {
+        return SetInvalid(OutError, Path, TEXT("Required number field is missing."));
+    }
+    if (!Field->IsValid() || (*Field)->Type != EJson::Number)
+    {
+        return SetInvalid(OutError, Path, TEXT("Expected a JSON number."));
+    }
+    OutValue = (*Field)->AsNumber();
+    if (!FMath::IsFinite(OutValue) ||
+        OutValue < -1000000000.0 || OutValue > 1000000000.0)
+    {
+        return SetInvalid(
+            OutError,
+            Path,
+            TEXT("Graph coordinates must be finite and between -1000000000 and 1000000000."));
+    }
+    return true;
+}
+
+bool ParseSpawnRequest(
+    const FString& RequestJson,
+    FPaletteSpawnRequest& OutRequest,
+    FError& OutError)
+{
+    TSharedPtr<FJsonObject> Request;
+    if (!ParseObject(RequestJson, Request, OutError))
+    {
+        return false;
+    }
+    static const TSet<FString> AllowedFields = {
+        TEXT("graph_id"), TEXT("action_id"), TEXT("position"),
+        TEXT("bindings")};
+    if (!ValidateClosedObject(Request.ToSharedRef(), AllowedFields, TEXT("params"), OutError) ||
+        !ReadString(
+            Request.ToSharedRef(),
+            TEXT("graph_id"),
+            TEXT("params.graph_id"),
+            true,
+            128,
+            OutRequest.GraphId,
+            OutError) ||
+        !ReadString(
+            Request.ToSharedRef(),
+            TEXT("action_id"),
+            TEXT("params.action_id"),
+            true,
+            47,
+            OutRequest.ActionId,
+            OutError) ||
+        !ReadStringArray(
+            Request.ToSharedRef(),
+            TEXT("bindings"),
+            TEXT("params.bindings"),
+            32,
+            48,
+            OutRequest.BindingIds,
+            OutError))
+    {
+        return false;
+    }
+
+    const TSharedPtr<FJsonValue>* PositionValue =
+        FindField(Request.ToSharedRef(), TEXT("position"));
+    if (!PositionValue)
+    {
+        return SetInvalid(
+            OutError,
+            TEXT("params.position"),
+            TEXT("Required position object is missing."));
+    }
+    if (!PositionValue->IsValid() || (*PositionValue)->Type != EJson::Object)
+    {
+        return SetInvalid(
+            OutError,
+            TEXT("params.position"),
+            TEXT("Expected a JSON object."));
+    }
+    const TSharedRef<FJsonObject> Position =
+        (*PositionValue)->AsObject().ToSharedRef();
+    static const TSet<FString> PositionFields = {TEXT("x"), TEXT("y")};
+    return ValidateClosedObject(
+            Position, PositionFields, TEXT("params.position"), OutError) &&
+        ReadFinitePositionCoordinate(
+            Position, TEXT("x"), OutRequest.PositionX, OutError) &&
+        ReadFinitePositionCoordinate(
+            Position, TEXT("y"), OutRequest.PositionY, OutError);
+}
+
 bool ParseStoredFilters(
     const FString& FiltersJson,
     FPaletteFilters& OutFilters,
@@ -483,6 +590,109 @@ bool ResolveStableGraph(
             TEXT("Choose a K2 Blueprint graph and repeat palette search."));
     }
     OutGraph = Resolved.Graph;
+    return true;
+}
+
+bool ResolveActionSourcePin(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    const FString& SourcePinId,
+    UEdGraphPin*& OutPin,
+    FError& OutError)
+{
+    OutPin = nullptr;
+    if (SourcePinId.IsEmpty())
+    {
+        return true;
+    }
+    FTargetRef Target;
+    Target.Id = SourcePinId;
+    FString ResolveError;
+    const FResolvedTarget Resolved = ResolveTarget(
+        Blueprint, ETargetKind::Pin, Target, ResolveError);
+    if (!Resolved.Pin || !Resolved.bStable || !Resolved.Node ||
+        Resolved.Node->GetGraph() != Graph)
+    {
+        return SetPrecondition(
+            OutError,
+            TEXT("params.action_id"),
+            TEXT("The source pin bound to action_id no longer exists in the requested graph."),
+            TEXT("Request new pin suggestions and use a current action_id."));
+    }
+    OutPin = Resolved.Pin;
+    return true;
+}
+
+UObject* ResolveBindingObject(const FString& ObjectPath)
+{
+    if (UObject* Existing = FindObject<UObject>(nullptr, *ObjectPath))
+    {
+        return Existing;
+    }
+    return LoadObject<UObject>(nullptr, *ObjectPath);
+}
+
+FProperty* ResolveBindingField(const FString& ObjectPath)
+{
+    int32 Separator = INDEX_NONE;
+    if (!ObjectPath.FindLastChar(TEXT(':'), Separator) ||
+        Separator <= 0 || Separator >= ObjectPath.Len() - 1)
+    {
+        return nullptr;
+    }
+    const FString OwnerPath = ObjectPath.Left(Separator);
+    const FName FieldName(*ObjectPath.Mid(Separator + 1));
+    UStruct* Owner = FindObject<UStruct>(nullptr, *OwnerPath);
+    if (!Owner)
+    {
+        Owner = LoadObject<UStruct>(nullptr, *OwnerPath);
+    }
+    return Owner ? FindFProperty<FProperty>(Owner, FieldName) : nullptr;
+}
+
+bool ResolveBindingObjects(
+    const TArray<FPaletteBindingRecord>& Records,
+    IBlueprintNodeBinder::FBindingSet& OutBindings,
+    FError& OutError)
+{
+    OutBindings.Reset();
+    for (int32 Index = 0; Index < Records.Num(); ++Index)
+    {
+        const FPaletteBindingRecord& Record = Records[Index];
+        const FString Path = FString::Printf(TEXT("params.bindings[%d]"), Index);
+        if (UObject* Object = ResolveBindingObject(Record.ObjectPath))
+        {
+            if (Object->GetClass()->GetPathName() != Record.ExpectedClassPath)
+            {
+                return SetPrecondition(
+                    OutError,
+                    Path,
+                    TEXT("The binding object class has changed."),
+                    TEXT("Repeat palette search and use its current binding IDs."));
+            }
+            OutBindings.Add(FBindingObject(Object));
+            continue;
+        }
+        if (FProperty* Field = ResolveBindingField(Record.ObjectPath))
+        {
+            if (Record.ExpectedClassPath != TEXT("/Script/CoreUObject.Field") &&
+                Record.ExpectedClassPath != Field->GetClass()->GetName())
+            {
+                return SetPrecondition(
+                    OutError,
+                    Path,
+                    TEXT("The binding field class has changed."),
+                    TEXT("Repeat palette search and use its current binding IDs."));
+            }
+            OutBindings.Add(FBindingObject(Field));
+            continue;
+        }
+        return SetPrecondition(
+            OutError,
+            Path,
+            TEXT("The object or field bound to this binding ID no longer exists."),
+            TEXT("Repeat palette search and use its current binding IDs."));
+    }
     return true;
 }
 
@@ -920,6 +1130,30 @@ FString ResultDigest(const TArray<FPaletteCandidate>& Candidates)
         MakeShared<FJsonValueArray>(Keys)));
 }
 
+TArray<FString> CandidateBindingPaths(const FPaletteCandidate& Candidate)
+{
+    TArray<FString> Paths;
+    for (const FPaletteBindingCandidate& Binding : Candidate.BindingDetails)
+    {
+        Paths.Add(Binding.ObjectPath);
+    }
+    return Paths;
+}
+
+const FPaletteCandidate* FindExactCandidate(
+    const TArray<FPaletteCandidate>& Candidates,
+    const FPaletteActionRecord& Record)
+{
+    return Candidates.FindByPredicate(
+        [&Record](const FPaletteCandidate& Item)
+        {
+            return Item.CandidateKey == Record.CandidateKey &&
+                Item.SpawnerSignature == Record.SpawnerSignature &&
+                Item.OwnerPath == Record.OwnerPath &&
+                CandidateBindingPaths(Item) == Record.BindingPaths;
+        });
+}
+
 FString RequestDigest(const FPaletteRequest& Request)
 {
     TSharedPtr<FJsonObject> Filters;
@@ -1119,11 +1353,12 @@ TSharedPtr<FJsonValue> TemplatePinDefault(const UEdGraphPin* Pin)
     {
         return MakeShared<FJsonValueNull>();
     }
-    return SerializeDefaultValue(
+    TSharedPtr<FJsonValue> Result = SerializeDefaultValue(
         Pin->PinType,
         Pin->DefaultValue,
         Pin->DefaultObject,
         Pin->DefaultTextValue);
+    return Result.IsValid() ? Result : MakeShared<FJsonValueNull>();
 }
 
 void AddTemplatePins(
@@ -1154,6 +1389,135 @@ void AddTemplatePins(
     }
     Data->SetBoolField(TEXT("pin_preview_available"), TemplateNode != nullptr);
     Data->SetArrayField(TEXT("template_pins"), MoveTemp(Pins));
+}
+
+FString RollbackPaletteFailure(
+    FMutationScope& Scope,
+    const FString& Code,
+    const FString& Path,
+    const FString& Message,
+    const FString& Hint)
+{
+    const FRollbackResult Rollback = Scope.Rollback();
+    if (!Rollback.bSucceeded && !Rollback.bDeferredToWorkflow)
+    {
+        return Failure(
+            TEXT("ROLLBACK_FAILED"),
+            TEXT("transaction"),
+            TEXT("Blueprint palette mutation rollback failed."),
+            TEXT("Inspect the graph before attempting another mutation."));
+    }
+    return Failure(Code, Path, Message, Hint);
+}
+
+bool GraphMatchesNodeSnapshot(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    const TMap<UEdGraphNode*, FString>& Snapshot)
+{
+    if (!Blueprint || !Graph || Graph->Nodes.Num() != Snapshot.Num())
+    {
+        return false;
+    }
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        const FString* ExpectedId = Node ? Snapshot.Find(Node) : nullptr;
+        if (!ExpectedId || DescribeNodeTarget(Blueprint, Node).Id != *ExpectedId)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+TSharedRef<FJsonObject> SerializeSpawnPin(
+    UBlueprint* Blueprint,
+    const UEdGraphPin* Pin)
+{
+    const TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("id"), DescribePinTarget(Blueprint, Pin).Id);
+    Result->SetStringField(TEXT("name"), Pin->PinName.ToString());
+    Result->SetStringField(
+        TEXT("direction"),
+        Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+    Result->SetObjectField(TEXT("type"), SerializeTypeSpec(Pin->PinType));
+    Result->SetField(TEXT("default"), TemplatePinDefault(Pin));
+    return Result;
+}
+
+TSharedRef<FJsonObject> MakeCompileNextAction(UBlueprint* Blueprint)
+{
+    const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+    Params->SetStringField(
+        TEXT("asset_path"), Blueprint ? Blueprint->GetPathName() : FString());
+    const TSharedRef<FJsonObject> NextAction = MakeShared<FJsonObject>();
+    NextAction->SetStringField(TEXT("domain"), TEXT("blueprint"));
+    NextAction->SetStringField(TEXT("action"), TEXT("compile_blueprint"));
+    NextAction->SetObjectField(TEXT("params"), Params);
+    return NextAction;
+}
+
+FString SpawnSuccess(
+    UBlueprint* Blueprint,
+    const FString& GraphId,
+    const FString& ActionId,
+    UEdGraphNode* Node,
+    const TArray<TPair<FString, UEdGraphNode*>>& AuxiliaryNodes)
+{
+    const FString NodeId = DescribeNodeTarget(Blueprint, Node).Id;
+    TArray<TSharedPtr<FJsonValue>> PinIds;
+    TArray<TSharedPtr<FJsonValue>> Pins;
+    for (const UEdGraphPin* Pin : Node->Pins)
+    {
+        if (!Pin || Pin->bHidden)
+        {
+            continue;
+        }
+        const TSharedRef<FJsonObject> PinObject = SerializeSpawnPin(Blueprint, Pin);
+        PinIds.Add(MakeShared<FJsonValueString>(
+            PinObject->GetStringField(TEXT("id"))));
+        Pins.Add(MakeShared<FJsonValueObject>(PinObject));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> AuxiliaryIds;
+    for (const TPair<FString, UEdGraphNode*>& Auxiliary : AuxiliaryNodes)
+    {
+        AuxiliaryIds.Add(MakeShared<FJsonValueString>(Auxiliary.Key));
+    }
+    const TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
+    Position->SetNumberField(TEXT("x"), Node->NodePosX);
+    Position->SetNumberField(TEXT("y"), Node->NodePosY);
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Data->SetStringField(TEXT("graph_id"), GraphId);
+    Data->SetStringField(TEXT("action_id"), ActionId);
+    Data->SetStringField(TEXT("node_id"), NodeId);
+    Data->SetStringField(TEXT("class_path"), Node->GetClass()->GetPathName());
+    Data->SetObjectField(TEXT("position"), Position);
+    Data->SetArrayField(TEXT("pin_ids"), MoveTemp(PinIds));
+    Data->SetArrayField(TEXT("pins"), MoveTemp(Pins));
+    Data->SetArrayField(TEXT("auxiliary_node_ids"), MoveTemp(AuxiliaryIds));
+
+    const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+    Details->SetStringField(TEXT("graph_id"), GraphId);
+    Details->SetStringField(TEXT("class_path"), Node->GetClass()->GetPathName());
+    Details->SetStringField(TEXT("action_id"), ActionId);
+    const TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
+    Change->SetStringField(TEXT("kind"), TEXT("create"));
+    Change->SetStringField(TEXT("target_id"), NodeId);
+    Change->SetObjectField(TEXT("details"), Details);
+
+    const TSharedRef<FJsonObject> Result = MakeSuccess(
+        FString::Printf(
+            TEXT("Spawned Blueprint palette node '%s'."),
+            *Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString()),
+        Data);
+    Result->SetArrayField(
+        TEXT("changes"), {MakeShared<FJsonValueObject>(Change)});
+    Result->SetArrayField(
+        TEXT("next_actions"),
+        {MakeShared<FJsonValueObject>(MakeCompileNextAction(Blueprint))});
+    return SerializeResult(Result);
 }
 
 UBlueprint* ResolveBlueprintAsset(const FString& AssetPath)
@@ -1352,13 +1716,262 @@ FString UMCPythonHelper::AddBlueprintActionNode(
     UBlueprint* Blueprint,
     const FString& RequestJson)
 {
-    (void)Blueprint;
-    (void)RequestJson;
+#if UE_VERSION_NEWER_THAN(5, 7, 99) || UE_VERSION_OLDER_THAN(5, 7, 0)
     return Failure(
         TEXT("UE_VERSION_UNSUPPORTED"),
-        TEXT("params.action_id"),
-        TEXT("Blueprint palette spawning is not available in this adapter phase."),
-        TEXT("Use search and describe until the transactional spawn adapter is installed."));
+        TEXT("params"),
+        TEXT("Blueprint palette spawning is not validated for this Unreal Engine version."),
+        TEXT("Use the validated UE 5.7 adapter or add an explicit compatibility guard."));
+#else
+    using namespace UE::MCPython::Blueprint2;
+
+    if (!Blueprint)
+    {
+        return Failure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.asset_path"),
+            TEXT("A loaded Blueprint asset is required."),
+            TEXT("Pass a valid Blueprint asset path."));
+    }
+    FPaletteSpawnRequest Request;
+    FError Error;
+    if (!ParseSpawnRequest(RequestJson, Request, Error))
+    {
+        return Failure(Error);
+    }
+
+    FPaletteContext ExpectedContext;
+    ExpectedContext.AssetPath = Blueprint->GetPathName();
+    ExpectedContext.GraphId = Request.GraphId;
+    ExpectedContext.Limit = 0;
+    FPaletteActionRecord ActionRecord;
+    if (!ResolvePaletteActionToken(
+            Request.ActionId, ExpectedContext, ActionRecord, Error))
+    {
+        return Failure(Error);
+    }
+
+    UEdGraph* Graph = nullptr;
+    if (!ResolveStableGraph(
+            Blueprint, Request.GraphId, Graph, Error, true))
+    {
+        return Failure(Error);
+    }
+    if (Graph->GetSchema()->GetClass()->GetPathName() !=
+        ActionRecord.Context.GraphSchemaPath)
+    {
+        return Failure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The action's graph schema has changed."),
+            TEXT("Repeat palette search for the current graph."));
+    }
+    UEdGraphPin* SourcePin = nullptr;
+    if (!ResolveActionSourcePin(
+            Blueprint,
+            Graph,
+            ActionRecord.Context.SourcePinId,
+            SourcePin,
+            Error))
+    {
+        return Failure(Error);
+    }
+
+    FPaletteFilters Filters;
+    if (!ParseStoredFilters(ActionRecord.FiltersJson, Filters, Error))
+    {
+        return Failure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The action's stored search context is no longer valid."),
+            TEXT("Repeat palette search."));
+    }
+    TArray<FPaletteCandidate> Candidates;
+    BuildCandidates(
+        Blueprint,
+        Graph,
+        SourcePin,
+        ActionRecord.Query,
+        Filters,
+        Candidates);
+    if (ResultDigest(Candidates) != ActionRecord.Context.ResultDigest)
+    {
+        return Failure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The native Blueprint action result set has changed."),
+            TEXT("Repeat palette search and use a current action_id."));
+    }
+    const FPaletteCandidate* Candidate = FindExactCandidate(
+        Candidates, ActionRecord);
+    if (!Candidate)
+    {
+        return Failure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The native Blueprint action is no longer available."),
+            TEXT("Repeat palette search and select a current action_id."));
+    }
+
+    TArray<FPaletteBindingRecord> BindingRecords;
+    if (!ResolvePaletteBindings(
+            Request.ActionId,
+            Request.BindingIds,
+            BindingRecords,
+            Error))
+    {
+        return Failure(Error);
+    }
+    TArray<FString> BindingPaths;
+    for (const FPaletteBindingRecord& Binding : BindingRecords)
+    {
+        BindingPaths.Add(Binding.ObjectPath);
+    }
+    BindingPaths.Sort();
+    if (BindingPaths != ActionRecord.BindingPaths)
+    {
+        return Failure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.bindings"),
+            TEXT("bindings must contain exactly the IDs returned for this action."),
+            TEXT("Search again and pass the selected action's complete bindings array."));
+    }
+    IBlueprintNodeBinder::FBindingSet ResolvedBindings;
+    if (!ResolveBindingObjects(BindingRecords, ResolvedBindings, Error))
+    {
+        return Failure(Error);
+    }
+
+    TMap<UEdGraphNode*, FString> NodesBefore;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node)
+        {
+            NodesBefore.Add(Node, DescribeNodeTarget(Blueprint, Node).Id);
+        }
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "MCPython", "AddBlueprintActionNode", "Add Blueprint palette node"));
+    if (!Scope.IsValid())
+    {
+        return Failure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Could not begin a Blueprint palette transaction."),
+            TEXT("Close any conflicting editor transaction and retry."));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+
+    UEdGraphNode* NewNode = Candidate->Spawner->Invoke(
+        Graph,
+        ResolvedBindings,
+        FVector2D(Request.PositionX, Request.PositionY));
+    if (!NewNode)
+    {
+        return RollbackPaletteFailure(
+            Scope,
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The native Blueprint action did not create a node."),
+            TEXT("Repeat palette search or choose another compatible action."));
+    }
+    if (NodesBefore.Contains(NewNode))
+    {
+        const FRollbackResult Rollback = Scope.Rollback();
+        if (!Rollback.bSucceeded && !Rollback.bDeferredToWorkflow &&
+            !GraphMatchesNodeSnapshot(Blueprint, Graph, NodesBefore))
+        {
+            return Failure(
+                TEXT("ROLLBACK_FAILED"),
+                TEXT("transaction"),
+                TEXT("Blueprint palette singleton rollback left a graph delta."),
+                TEXT("Inspect the graph before attempting another mutation."));
+        }
+        return Failure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The action resolved to an existing singleton node."),
+            TEXT("Choose an action that can create a new node in this graph."));
+    }
+    if (NewNode->GetGraph() != Graph || !Graph->Nodes.Contains(NewNode))
+    {
+        return RollbackPaletteFailure(
+            Scope,
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The action resolved to an existing or out-of-graph singleton node."),
+            TEXT("Choose an action that can create a new node in this graph."));
+    }
+    if (NewNode->GetClass()->GetPathName() != Candidate->NodeClassPath)
+    {
+        return RollbackPaletteFailure(
+            Scope,
+            TEXT("INTERNAL_ERROR"),
+            TEXT("params.action_id"),
+            TEXT("The native spawner returned an unexpected node class."),
+            TEXT("Repeat palette search and report the action signature."));
+    }
+
+    const FString NewNodeId = DescribeNodeTarget(Blueprint, NewNode).Id;
+    if (!NewNodeId.StartsWith(TEXT("node:")))
+    {
+        return RollbackPaletteFailure(
+            Scope,
+            TEXT("INTERNAL_ERROR"),
+            TEXT("result.node_id"),
+            TEXT("The spawned node did not receive a stable node ID."),
+            TEXT("Retry after the graph has finished loading."));
+    }
+    for (const UEdGraphPin* Pin : NewNode->Pins)
+    {
+        if (Pin && !Pin->bHidden &&
+            !DescribePinTarget(Blueprint, Pin).Id.StartsWith(TEXT("pin:")))
+        {
+            return RollbackPaletteFailure(
+                Scope,
+                TEXT("INTERNAL_ERROR"),
+                TEXT("result.pin_ids"),
+                TEXT("A visible spawned pin did not receive a stable pin ID."),
+                TEXT("Retry after the graph has finished loading."));
+        }
+    }
+
+    TArray<TPair<FString, UEdGraphNode*>> AuxiliaryNodes;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (!Node || Node == NewNode || NodesBefore.Contains(Node))
+        {
+            continue;
+        }
+        const FString NodeId = DescribeNodeTarget(Blueprint, Node).Id;
+        if (!NodeId.StartsWith(TEXT("node:")))
+        {
+            return RollbackPaletteFailure(
+                Scope,
+                TEXT("INTERNAL_ERROR"),
+                TEXT("result.auxiliary_node_ids"),
+                TEXT("An auxiliary spawned node did not receive a stable node ID."),
+                TEXT("Retry after the graph has finished loading."));
+        }
+        AuxiliaryNodes.Emplace(NodeId, Node);
+    }
+    AuxiliaryNodes.Sort(
+        [](const TPair<FString, UEdGraphNode*>& Left,
+           const TPair<FString, UEdGraphNode*>& Right)
+        {
+            return Left.Key < Right.Key;
+        });
+
+    FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+    return SpawnSuccess(
+        Blueprint,
+        Request.GraphId,
+        Request.ActionId,
+        NewNode,
+        AuxiliaryNodes);
+#endif
 }
 
 FString UMCPythonHelper::SuggestBlueprintNodesForPin(
