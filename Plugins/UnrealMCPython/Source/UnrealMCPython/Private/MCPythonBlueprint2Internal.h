@@ -76,6 +76,8 @@ struct FPaletteActionRecord
 {
     FPaletteContext Context;
     FString ActionId;
+    FString Query;
+    FString FiltersJson;
     FString CandidateKey;
     FString SpawnerSignature;
     FString OwnerPath;

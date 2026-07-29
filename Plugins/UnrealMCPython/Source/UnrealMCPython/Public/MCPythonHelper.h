@@ -202,6 +202,25 @@ public:
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString InspectBlueprint(UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Search Unreal's native action database for one Blueprint graph. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SearchBlueprintNodeActions(
+        UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Describe a previously returned opaque palette action. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString DescribeBlueprintNodeAction(const FString& RequestJson);
+
+    /** Spawn a previously returned opaque palette action. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString AddBlueprintActionNode(
+        UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Search native actions compatible with one stable pin. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SuggestBlueprintNodesForPin(
+        UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Create a user-authored function with a complete ordered signature. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString CreateBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);

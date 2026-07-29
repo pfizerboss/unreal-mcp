@@ -2022,6 +2022,8 @@ FString RegisterPaletteActionToken(FPaletteActionRecord& Record)
     const FString SessionId = CurrentPaletteSessionId();
     const FString Canonical = SessionId + TEXT("\n") +
         CanonicalPaletteContext(Record.Context) + TEXT("\n") +
+        Record.Query + TEXT("\n") +
+        Record.FiltersJson + TEXT("\n") +
         Record.CandidateKey + TEXT("\n") +
         Record.SpawnerSignature + TEXT("\n") +
         Record.OwnerPath + TEXT("\n") +
@@ -2878,6 +2880,13 @@ TSharedRef<FJsonObject> BuildCapabilities(UBlueprint* Blueprint)
     const bool bSupportsCompilerTokens = SupportsCompilerTokens();
     Result->SetBoolField(TEXT("supports_k2_schema"), true);
     Result->SetBoolField(TEXT("supports_scs_operations"), true);
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION == 7
+    Result->SetBoolField(TEXT("supports_blueprint_node_palette"), true);
+#else
+    Result->SetBoolField(TEXT("supports_blueprint_node_palette"), false);
+#endif
+    Result->SetBoolField(
+        TEXT("has_palette_compatible_graphs"), bHasK2Graph);
     Result->SetBoolField(
         TEXT("supports_compiler_tokens"),
         bSupportsCompilerTokens);
