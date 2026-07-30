@@ -778,6 +778,137 @@ def ue_suggest_blueprint_nodes_for_pin(
     )
 
 
+def ue_suggest_blueprint_nodes_for_connection(
+    asset_path: str = None,
+    graph_id: str = None,
+    source_pin_id: str = None,
+    target_pin_id: str = None,
+    query: str = "",
+    filters: dict = None,
+    allow_conversion: bool = False,
+    cursor: str = "",
+    limit: int = 50,
+) -> str:
+    """Return palette actions that can bridge two stable Blueprint pins."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "source_pin_id": source_pin_id,
+        "target_pin_id": target_pin_id,
+        "query": query,
+        "filters": deepcopy(filters) if filters is not None else {},
+        "allow_conversion": allow_conversion,
+        "cursor": cursor,
+        "limit": limit,
+    }
+    return blueprint2.call_asset_helper(
+        "suggest_blueprint_nodes_for_connection", asset_path, request
+    )
+
+
+def ue_add_blueprint_connected_action_node(
+    asset_path: str = None,
+    graph_id: str = None,
+    pin_id: str = None,
+    action_id: str = None,
+    connection_binding_id: str = None,
+    position: dict = None,
+    allow_conversion: bool = False,
+    bindings: tuple[str, ...] = (),
+) -> str:
+    """Spawn one pin-bound palette action and connect it atomically."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "pin_id": pin_id,
+        "action_id": action_id,
+        "connection_binding_id": connection_binding_id,
+        "position": deepcopy(position),
+        "allow_conversion": allow_conversion,
+        "bindings": list(bindings),
+    }
+    return blueprint2.call_asset_helper(
+        "add_blueprint_connected_action_node", asset_path, request
+    )
+
+
+def ue_insert_blueprint_action_node(
+    asset_path: str = None,
+    graph_id: str = None,
+    source_pin_id: str = None,
+    target_pin_id: str = None,
+    action_id: str = None,
+    input_binding_id: str = None,
+    output_binding_id: str = None,
+    position: dict = None,
+    bindings: tuple[str, ...] = (),
+) -> str:
+    """Insert one two-pin-bound palette action into an existing edge."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "source_pin_id": source_pin_id,
+        "target_pin_id": target_pin_id,
+        "action_id": action_id,
+        "input_binding_id": input_binding_id,
+        "output_binding_id": output_binding_id,
+        "position": deepcopy(position),
+        "bindings": list(bindings),
+    }
+    return blueprint2.call_asset_helper(
+        "insert_blueprint_action_node", asset_path, request
+    )
+
+
+def ue_preview_blueprint_action_replacement(
+    asset_path: str = None,
+    graph_id: str = None,
+    node_id: str = None,
+    action_id: str = None,
+    bindings: tuple[str, ...] = (),
+    pin_mapping: tuple[dict, ...] = (),
+    allow_conversion: bool = False,
+    allow_loss: bool = False,
+) -> str:
+    """Preview a snapshot-bound palette action replacement without mutation."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "node_id": node_id,
+        "action_id": action_id,
+        "bindings": list(bindings),
+        "pin_mapping": deepcopy(list(pin_mapping)),
+        "allow_conversion": allow_conversion,
+        "allow_loss": allow_loss,
+    }
+    return blueprint2.call_asset_helper(
+        "preview_blueprint_action_replacement", asset_path, request
+    )
+
+
+def ue_replace_blueprint_node_with_action(
+    asset_path: str = None,
+    graph_id: str = None,
+    replacement_plan_id: str = None,
+    allow_loss: bool = False,
+) -> str:
+    """Apply one unchanged snapshot-bound Blueprint replacement plan."""
+    from UnrealMCPython import blueprint2
+
+    request = {
+        "graph_id": graph_id,
+        "replacement_plan_id": replacement_plan_id,
+        "allow_loss": allow_loss,
+    }
+    return blueprint2.call_asset_helper(
+        "replace_blueprint_node_with_action", asset_path, request
+    )
+
+
 def ue_create_blueprint_function(asset_path: str = None, function_name: str = None,
                                        inputs: list = [], outputs: list = [],
                                        pure: bool = False, const: bool = False,

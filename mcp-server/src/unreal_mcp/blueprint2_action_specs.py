@@ -613,7 +613,12 @@ def _write(
 
 
 def _destructive(
-    action: str, description: str, input_schema: dict, example_params: dict
+    action: str,
+    description: str,
+    input_schema: dict,
+    example_params: dict,
+    *,
+    success_data_schema: dict | None = None,
 ) -> dict:
     return _spec(
         action,
@@ -626,6 +631,7 @@ def _destructive(
         supports_preview=True,
         supports_undo=True,
         requires_confirmation=True,
+        success_data_schema=success_data_schema,
     )
 
 
@@ -823,6 +829,427 @@ PALETTE_SPAWN_DATA = _object(
     ),
 )
 
+REPLACEMENT_PLAN_ID = {
+    "type": "string",
+    "pattern": r"^replacement-plan:[0-9a-f]{40}$",
+}
+SEMANTIC_PALETTE_CURSOR = {
+    "type": "string",
+    "pattern": r"^(?:|palette-cursor:[0-9a-f]{40})$",
+    "default": "",
+}
+CONNECTION_RESPONSE_KIND = {
+    "type": "string",
+    "enum": [
+        "direct",
+        "break_planned_source_link",
+        "break_planned_target_link",
+        "break_planned_both_links",
+        "conversion_node",
+        "promotion",
+    ],
+}
+CONNECTION_RESPONSE = _object(
+    {
+        "kind": CONNECTION_RESPONSE_KIND,
+        "message": {"type": "string"},
+        "requires_conversion": {"type": "boolean"},
+    },
+    ("kind", "message", "requires_conversion"),
+)
+SEMANTIC_EDGE = _object(
+    {
+        "source_pin_id": PIN_ID,
+        "target_pin_id": PIN_ID,
+        "response": CONNECTION_RESPONSE,
+        "auxiliary_node_ids": _array(
+            NODE_ID,
+            maxItems=32,
+            uniqueItems=True,
+        ),
+    },
+    (
+        "source_pin_id",
+        "target_pin_id",
+        "response",
+        "auxiliary_node_ids",
+    ),
+)
+CONNECTION_BINDING = _object(
+    {
+        "binding_id": BINDING_ID,
+        "pin_name": {"type": "string"},
+        "direction": {"type": "string", "enum": ["input", "output"]},
+        "type": SNAPSHOT_PIN_TYPE,
+        "response": CONNECTION_RESPONSE,
+        "rank": {"type": "integer", "minimum": 0},
+    },
+    ("binding_id", "pin_name", "direction", "type", "response", "rank"),
+)
+CONNECTION_BINDING_PAIR = _object(
+    {
+        "input_binding_id": BINDING_ID,
+        "output_binding_id": BINDING_ID,
+        "input_pin_name": {"type": "string"},
+        "output_pin_name": {"type": "string"},
+        "input_type": SNAPSHOT_PIN_TYPE,
+        "output_type": SNAPSHOT_PIN_TYPE,
+        "source_response": CONNECTION_RESPONSE,
+        "target_response": CONNECTION_RESPONSE,
+        "requires_conversion": {"type": "boolean"},
+        "rank": {"type": "integer", "minimum": 0},
+    },
+    (
+        "input_binding_id",
+        "output_binding_id",
+        "input_pin_name",
+        "output_pin_name",
+        "input_type",
+        "output_type",
+        "source_response",
+        "target_response",
+        "requires_conversion",
+        "rank",
+    ),
+)
+PALETTE_PIN_SUGGESTION_CARD = _object(
+    {
+        **deepcopy(PALETTE_ACTION_CARD_PROPERTIES),
+        "connection_bindings": _array(
+            CONNECTION_BINDING,
+            minItems=1,
+            maxItems=256,
+        ),
+    },
+    (*PALETTE_ACTION_CARD_REQUIRED, "connection_bindings"),
+)
+PALETTE_PIN_PAGE_DATA = _object(
+    {
+        "asset_path": ASSET_PATH,
+        "graph_id": GRAPH_ID,
+        "source_pin_id": PIN_ID,
+        "items": _array(PALETTE_PIN_SUGGESTION_CARD, maxItems=200),
+        "total_count": {"type": "integer", "minimum": 0},
+        "returned_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 200,
+        },
+        "next_cursor": {"type": "string", "maxLength": 4096},
+        "result_digest": SHA1_DIGEST,
+    },
+    (
+        "asset_path",
+        "graph_id",
+        "source_pin_id",
+        "items",
+        "total_count",
+        "returned_count",
+        "next_cursor",
+        "result_digest",
+    ),
+)
+CONNECTION_ACTION_CARD = _object(
+    {
+        **deepcopy(PALETTE_ACTION_CARD_PROPERTIES),
+        "binding_pairs": _array(
+            CONNECTION_BINDING_PAIR,
+            minItems=1,
+            maxItems=65_536,
+        ),
+    },
+    (*PALETTE_ACTION_CARD_REQUIRED, "binding_pairs"),
+)
+CONNECTION_PAGE_DATA = _object(
+    {
+        "asset_path": ASSET_PATH,
+        "graph_id": GRAPH_ID,
+        "source_pin_id": PIN_ID,
+        "target_pin_id": PIN_ID,
+        "allow_conversion": {"type": "boolean"},
+        "items": _array(CONNECTION_ACTION_CARD, maxItems=200),
+        "total_count": {"type": "integer", "minimum": 0},
+        "returned_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 200,
+        },
+        "next_cursor": SEMANTIC_PALETTE_CURSOR,
+        "result_digest": SHA1_DIGEST,
+    },
+    (
+        "asset_path",
+        "graph_id",
+        "source_pin_id",
+        "target_pin_id",
+        "allow_conversion",
+        "items",
+        "total_count",
+        "returned_count",
+        "next_cursor",
+        "result_digest",
+    ),
+)
+CONNECTED_SPAWN_DATA = _object(
+    {
+        **deepcopy(PALETTE_SPAWN_DATA["properties"]),
+        "source_pin_id": PIN_ID,
+        "connection_binding_id": BINDING_ID,
+        "connections": _array(
+            SEMANTIC_EDGE,
+            minItems=1,
+            maxItems=512,
+        ),
+        "transaction_recorded": {"const": True},
+        "saved": {"const": False},
+    },
+    (
+        *PALETTE_SPAWN_DATA["required"],
+        "source_pin_id",
+        "connection_binding_id",
+        "connections",
+        "transaction_recorded",
+        "saved",
+    ),
+)
+REPLACED_CONNECTION = _object(
+    {
+        "source_pin_id": PIN_ID,
+        "target_pin_id": PIN_ID,
+    },
+    ("source_pin_id", "target_pin_id"),
+)
+INSERT_DATA = _object(
+    {
+        **deepcopy(PALETTE_SPAWN_DATA["properties"]),
+        "input_binding_id": BINDING_ID,
+        "output_binding_id": BINDING_ID,
+        "replaced_connection": REPLACED_CONNECTION,
+        "connections": _array(
+            SEMANTIC_EDGE,
+            minItems=2,
+            maxItems=512,
+        ),
+        "transaction_recorded": {"const": True},
+        "saved": {"const": False},
+    },
+    (
+        *PALETTE_SPAWN_DATA["required"],
+        "input_binding_id",
+        "output_binding_id",
+        "replaced_connection",
+        "connections",
+        "transaction_recorded",
+        "saved",
+    ),
+)
+PIN_MAPPING_INPUT = _object(
+    {
+        "old_pin_id": PIN_ID,
+        "new_binding_id": BINDING_ID,
+    },
+    ("old_pin_id", "new_binding_id"),
+)
+REPLACEMENT_MAPPING = _object(
+    {
+        "old_pin_id": PIN_ID,
+        "new_binding_id": BINDING_ID,
+        "new_pin_name": {"type": "string"},
+        "origin": {"type": "string", "enum": ["explicit", "inferred"]},
+        "reason": {"type": "string", "minLength": 1},
+    },
+    (
+        "old_pin_id",
+        "new_binding_id",
+        "new_pin_name",
+        "origin",
+        "reason",
+    ),
+)
+RETAINED_CONNECTION = _object(
+    {
+        "old_pin_id": PIN_ID,
+        "new_binding_id": BINDING_ID,
+        "linked_pin_id": PIN_ID,
+        "response": CONNECTION_RESPONSE,
+    },
+    ("old_pin_id", "new_binding_id", "linked_pin_id", "response"),
+)
+RETAINED_DEFAULT = _object(
+    {
+        "old_pin_id": PIN_ID,
+        "new_binding_id": BINDING_ID,
+        "value": {},
+    },
+    ("old_pin_id", "new_binding_id", "value"),
+)
+LOST_CONNECTION = _object(
+    {
+        "old_pin_id": PIN_ID,
+        "linked_pin_id": PIN_ID,
+        "reason": {"type": "string", "minLength": 1},
+    },
+    ("old_pin_id", "linked_pin_id", "reason"),
+)
+LOST_DEFAULT = _object(
+    {
+        "old_pin_id": PIN_ID,
+        "value": {},
+        "reason": {"type": "string", "minLength": 1},
+    },
+    ("old_pin_id", "value", "reason"),
+)
+UNSUPPORTED_METADATA = _object(
+    {
+        "field": {"type": "string", "minLength": 1},
+        "reason": {"type": "string", "minLength": 1},
+    },
+    ("field", "reason"),
+)
+SELECTED_ACTION_SUMMARY = _object(
+    {
+        "action_id": ACTION_ID,
+        "title": {"type": "string", "minLength": 1},
+        "node_class_path": {"type": "string", "minLength": 1},
+        "owner_path": {"type": "string"},
+        "member_path": {"type": "string"},
+    },
+    ("action_id", "title", "node_class_path", "owner_path", "member_path"),
+)
+TARGET_NODE_SUMMARY = _object(
+    {
+        "node_id": NODE_ID,
+        "class_path": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "position": POSITION,
+        "comment": {"type": "string"},
+        "comment_bubble_visible": {"type": "boolean"},
+        "enabled_state": {
+            "type": "string",
+            "enum": ["enabled", "disabled", "development_only"],
+        },
+    },
+    (
+        "node_id",
+        "class_path",
+        "title",
+        "position",
+        "comment",
+        "comment_bubble_visible",
+        "enabled_state",
+    ),
+)
+REPLACEMENT_PREVIEW_DATA = _object(
+    {
+        "replacement_plan_id": REPLACEMENT_PLAN_ID,
+        "asset_path": ASSET_PATH,
+        "graph_id": GRAPH_ID,
+        "node_snapshot_digest": SHA1_DIGEST,
+        "action_result_digest": SHA1_DIGEST,
+        "selected_action": SELECTED_ACTION_SUMMARY,
+        "target_node": TARGET_NODE_SUMMARY,
+        "mappings": _array(REPLACEMENT_MAPPING, maxItems=256),
+        "retained_connections": _array(
+            RETAINED_CONNECTION,
+            maxItems=4096,
+        ),
+        "retained_defaults": _array(RETAINED_DEFAULT, maxItems=256),
+        "unmapped_connections": _array(
+            LOST_CONNECTION,
+            maxItems=4096,
+        ),
+        "unmapped_defaults": _array(LOST_DEFAULT, maxItems=256),
+        "unsupported_metadata": _array(
+            UNSUPPORTED_METADATA,
+            maxItems=256,
+        ),
+        "loss_count": {"type": "integer", "minimum": 0},
+        "warnings": _array({"type": "string", "minLength": 1}, maxItems=512),
+        "applicable": {"type": "boolean"},
+        "allow_conversion": {"type": "boolean"},
+        "allow_loss": {"type": "boolean"},
+    },
+    (
+        "replacement_plan_id",
+        "asset_path",
+        "graph_id",
+        "node_snapshot_digest",
+        "action_result_digest",
+        "selected_action",
+        "target_node",
+        "mappings",
+        "retained_connections",
+        "retained_defaults",
+        "unmapped_connections",
+        "unmapped_defaults",
+        "unsupported_metadata",
+        "loss_count",
+        "warnings",
+        "applicable",
+        "allow_conversion",
+        "allow_loss",
+    ),
+)
+PRESERVED_METADATA = {
+    "type": "string",
+    "enum": [
+        "position",
+        "comment",
+        "comment_bubble_visible",
+        "enabled_state",
+    ],
+}
+REPLACEMENT_APPLY_DATA = _object(
+    {
+        "replacement_plan_id": REPLACEMENT_PLAN_ID,
+        "asset_path": ASSET_PATH,
+        "graph_id": GRAPH_ID,
+        "action_id": ACTION_ID,
+        "old_node_id": NODE_ID,
+        "new_node_id": NODE_ID,
+        "class_path": {"type": "string", "minLength": 1},
+        "position": POSITION,
+        "pin_ids": _array(PIN_ID, maxItems=256, uniqueItems=True),
+        "pins": _array(SNAPSHOT_PIN, maxItems=256),
+        "auxiliary_node_ids": _array(
+            NODE_ID,
+            maxItems=256,
+            uniqueItems=True,
+        ),
+        "connections": _array(SEMANTIC_EDGE, maxItems=4096),
+        "preserved_defaults": _array(RETAINED_DEFAULT, maxItems=256),
+        "dropped_connections": _array(LOST_CONNECTION, maxItems=4096),
+        "dropped_defaults": _array(LOST_DEFAULT, maxItems=256),
+        "preserved_metadata": _array(
+            PRESERVED_METADATA,
+            maxItems=4,
+            uniqueItems=True,
+        ),
+        "transaction_recorded": {"const": True},
+        "saved": {"const": False},
+    },
+    (
+        "replacement_plan_id",
+        "asset_path",
+        "graph_id",
+        "action_id",
+        "old_node_id",
+        "new_node_id",
+        "class_path",
+        "position",
+        "pin_ids",
+        "pins",
+        "auxiliary_node_ids",
+        "connections",
+        "preserved_defaults",
+        "dropped_connections",
+        "dropped_defaults",
+        "preserved_metadata",
+        "transaction_recorded",
+        "saved",
+    ),
+)
+
 INSPECT_OPS = [
     "overview",
     "variables",
@@ -1013,7 +1440,193 @@ BLUEPRINT2_ACTION_SPECS = {
             "query": "Branch",
             "limit": 50,
         },
-        success_data_schema=PALETTE_PAGE_DATA,
+        success_data_schema=PALETTE_PIN_PAGE_DATA,
+    ),
+    "suggest_blueprint_nodes_for_connection": _read(
+        "suggest_blueprint_nodes_for_connection",
+        "Return native palette actions that can bridge two stable pins.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "source_pin_id": PIN_ID,
+                "target_pin_id": PIN_ID,
+                "query": PALETTE_QUERY,
+                "filters": PALETTE_FILTERS_WITH_DEFAULT,
+                "allow_conversion": {"type": "boolean", "default": False},
+                "cursor": SEMANTIC_PALETTE_CURSOR,
+                "limit": PALETTE_LIMIT,
+            },
+            (
+                "asset_path",
+                "graph_id",
+                "source_pin_id",
+                "target_pin_id",
+            ),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "source_pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "target_pin_id": "pin:33333333-3333-4333-8333-333333333333",
+            "query": "Convert",
+            "filters": {"action_kinds": ["function"]},
+            "allow_conversion": False,
+            "limit": 50,
+        },
+        success_data_schema=CONNECTION_PAGE_DATA,
+    ),
+    "add_blueprint_connected_action_node": _write(
+        "add_blueprint_connected_action_node",
+        "Spawn one pin-bound palette action and connect it atomically.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "pin_id": PIN_ID,
+                "action_id": ACTION_ID,
+                "connection_binding_id": BINDING_ID,
+                "position": POSITION,
+                "allow_conversion": {"type": "boolean", "default": False},
+                "bindings": _array(
+                    BINDING_ID,
+                    maxItems=32,
+                    uniqueItems=True,
+                    default=[],
+                ),
+            },
+            (
+                "asset_path",
+                "graph_id",
+                "pin_id",
+                "action_id",
+                "connection_binding_id",
+                "position",
+            ),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "action_id": "action:0123456789abcdef0123456789abcdef01234567",
+            "connection_binding_id": (
+                "binding:89abcdef0123456789abcdef0123456789abcdef"
+            ),
+            "position": {"x": 320, "y": 160},
+            "allow_conversion": False,
+            "bindings": [],
+        },
+        idempotent=False,
+        success_data_schema=CONNECTED_SPAWN_DATA,
+    ),
+    "insert_blueprint_action_node": _write(
+        "insert_blueprint_action_node",
+        "Insert one two-pin-bound palette action into an existing edge.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "source_pin_id": PIN_ID,
+                "target_pin_id": PIN_ID,
+                "action_id": ACTION_ID,
+                "input_binding_id": BINDING_ID,
+                "output_binding_id": BINDING_ID,
+                "position": POSITION,
+                "bindings": _array(
+                    BINDING_ID,
+                    maxItems=32,
+                    uniqueItems=True,
+                    default=[],
+                ),
+            },
+            (
+                "asset_path",
+                "graph_id",
+                "source_pin_id",
+                "target_pin_id",
+                "action_id",
+                "input_binding_id",
+                "output_binding_id",
+                "position",
+            ),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "source_pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "target_pin_id": "pin:33333333-3333-4333-8333-333333333333",
+            "action_id": "action:0123456789abcdef0123456789abcdef01234567",
+            "input_binding_id": (
+                "binding:89abcdef0123456789abcdef0123456789abcdef"
+            ),
+            "output_binding_id": (
+                "binding:fedcba9876543210fedcba9876543210fedcba98"
+            ),
+            "position": {"x": 480, "y": 160},
+            "bindings": [],
+        },
+        idempotent=False,
+        success_data_schema=INSERT_DATA,
+    ),
+    "preview_blueprint_action_replacement": _read(
+        "preview_blueprint_action_replacement",
+        "Preview a snapshot-bound palette action replacement without mutation.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "node_id": NODE_ID,
+                "action_id": ACTION_ID,
+                "bindings": _array(
+                    BINDING_ID,
+                    maxItems=32,
+                    uniqueItems=True,
+                    default=[],
+                ),
+                "pin_mapping": _array(
+                    PIN_MAPPING_INPUT,
+                    maxItems=256,
+                    uniqueItems=True,
+                    default=[],
+                ),
+                "allow_conversion": {"type": "boolean", "default": False},
+                "allow_loss": {"type": "boolean", "default": False},
+            },
+            ("asset_path", "graph_id", "node_id", "action_id"),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "node_id": "node:44444444-4444-4444-8444-444444444444",
+            "action_id": "action:0123456789abcdef0123456789abcdef01234567",
+            "bindings": [],
+            "pin_mapping": [],
+            "allow_conversion": False,
+            "allow_loss": False,
+        },
+        success_data_schema=REPLACEMENT_PREVIEW_DATA,
+    ),
+    "replace_blueprint_node_with_action": _destructive(
+        "replace_blueprint_node_with_action",
+        "Apply one unchanged snapshot-bound Blueprint replacement plan.",
+        _object(
+            {
+                "asset_path": ASSET_PATH,
+                "graph_id": GRAPH_ID,
+                "replacement_plan_id": REPLACEMENT_PLAN_ID,
+                "allow_loss": {"type": "boolean", "default": False},
+            },
+            ("asset_path", "graph_id", "replacement_plan_id"),
+        ),
+        {
+            "asset_path": "/Game/BP_Player.BP_Player",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "replacement_plan_id": (
+                "replacement-plan:0123456789abcdef0123456789abcdef01234567"
+            ),
+            "allow_loss": False,
+        },
+        success_data_schema=REPLACEMENT_APPLY_DATA,
     ),
     "create_blueprint_function": _write(
         "create_blueprint_function",

@@ -53,6 +53,11 @@ NEW_BLUEPRINT2_ACTIONS = {
     "describe_blueprint_node_action",
     "add_blueprint_action_node",
     "suggest_blueprint_nodes_for_pin",
+    "suggest_blueprint_nodes_for_connection",
+    "add_blueprint_connected_action_node",
+    "insert_blueprint_action_node",
+    "preview_blueprint_action_replacement",
+    "replace_blueprint_node_with_action",
 }
 
 PALETTE_ACTIONS = {
@@ -60,6 +65,14 @@ PALETTE_ACTIONS = {
     "describe_blueprint_node_action",
     "add_blueprint_action_node",
     "suggest_blueprint_nodes_for_pin",
+}
+
+SEMANTIC_ACTIONS = {
+    "suggest_blueprint_nodes_for_connection",
+    "add_blueprint_connected_action_node",
+    "insert_blueprint_action_node",
+    "preview_blueprint_action_replacement",
+    "replace_blueprint_node_with_action",
 }
 
 
@@ -71,6 +84,8 @@ READ_ACTIONS = {
     "search_blueprint_node_actions",
     "describe_blueprint_node_action",
     "suggest_blueprint_nodes_for_pin",
+    "suggest_blueprint_nodes_for_connection",
+    "preview_blueprint_action_replacement",
 }
 
 WRITE_ACTIONS = {
@@ -88,6 +103,8 @@ WRITE_ACTIONS = {
     "set_blueprint_variable_replication",
     "set_blueprint_component_transform",
     "add_blueprint_action_node",
+    "add_blueprint_connected_action_node",
+    "insert_blueprint_action_node",
 }
 
 DESTRUCTIVE_ACTIONS = {
@@ -102,6 +119,7 @@ DESTRUCTIVE_ACTIONS = {
     "rename_blueprint_component",
     "reparent_blueprint_component",
     "reorder_blueprint_component",
+    "replace_blueprint_node_with_action",
 }
 
 
@@ -118,9 +136,240 @@ def test_blueprint2_actions_are_additive_and_registry_aligned():
 
     assert NEW_BLUEPRINT2_ACTIONS <= set(catalog["blueprint"])
     assert set(catalog["blueprint"]) == set(registry["blueprint"])
-    # The 19 legacy Blueprint actions remain available alongside all 29 additions.
-    assert len(catalog["blueprint"]) == 52
-    assert sum(len(actions) for actions in catalog.values()) == 294
+    # The 19 legacy Blueprint actions remain available alongside all 38 additions.
+    assert len(catalog["blueprint"]) == 57
+    assert sum(len(actions) for actions in catalog.values()) == 299
+
+
+def test_semantic_blueprint_contracts_are_closed_bounded_and_opaque():
+    specs = _new_specs()
+    suggest = specs["suggest_blueprint_nodes_for_connection"]["input_schema"]
+    connected = specs["add_blueprint_connected_action_node"]["input_schema"]
+    insert = specs["insert_blueprint_action_node"]["input_schema"]
+    preview = specs["preview_blueprint_action_replacement"]["input_schema"]
+    replace = specs["replace_blueprint_node_with_action"]["input_schema"]
+
+    for schema in (suggest, connected, insert, preview, replace):
+        assert schema["additionalProperties"] is False
+        Draft202012Validator.check_schema(schema)
+
+    assert suggest["required"] == [
+        "asset_path",
+        "graph_id",
+        "source_pin_id",
+        "target_pin_id",
+    ]
+    assert suggest["properties"]["limit"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200,
+        "default": 50,
+    }
+    assert suggest["properties"]["cursor"]["pattern"] == (
+        r"^(?:|palette-cursor:[0-9a-f]{40})$"
+    )
+    assert connected["required"] == [
+        "asset_path",
+        "graph_id",
+        "pin_id",
+        "action_id",
+        "connection_binding_id",
+        "position",
+    ]
+    assert connected["properties"]["bindings"]["maxItems"] == 32
+    assert insert["required"] == [
+        "asset_path",
+        "graph_id",
+        "source_pin_id",
+        "target_pin_id",
+        "action_id",
+        "input_binding_id",
+        "output_binding_id",
+        "position",
+    ]
+    assert preview["properties"]["pin_mapping"]["maxItems"] == 256
+    assert preview["properties"]["pin_mapping"]["uniqueItems"] is True
+    assert replace["properties"]["replacement_plan_id"]["pattern"] == (
+        r"^replacement-plan:[0-9a-f]{40}$"
+    )
+
+    Draft202012Validator(connected).validate(
+        {
+            "asset_path": "/Game/BP.BP",
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "action_id": "action:" + "a" * 40,
+            "connection_binding_id": "binding:" + "b" * 40,
+            "position": {"x": 320, "y": 160},
+            "allow_conversion": False,
+            "bindings": [],
+        }
+    )
+    with pytest.raises(ValidationError):
+        Draft202012Validator(replace).validate(
+            {
+                "asset_path": "/Game/BP.BP",
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "replacement_plan_id": "replacement-plan:tampered",
+                "allow_loss": False,
+            }
+        )
+
+    for action in SEMANTIC_ACTIONS:
+        Draft202012Validator.check_schema(specs[action]["output_schema"])
+
+
+def test_semantic_inputs_reject_tampered_duplicate_and_over_limit_values():
+    specs = _new_specs()
+    invalid_cases = []
+
+    connected = deepcopy(
+        specs["add_blueprint_connected_action_node"]["examples"][0]["params"]
+    )
+    connected["action_id"] = "action:tampered"
+    invalid_cases.append(("add_blueprint_connected_action_node", connected))
+
+    connected_binding = deepcopy(
+        specs["add_blueprint_connected_action_node"]["examples"][0]["params"]
+    )
+    connected_binding["connection_binding_id"] = "binding:tampered"
+    invalid_cases.append(
+        ("add_blueprint_connected_action_node", connected_binding)
+    )
+
+    connected_many = deepcopy(
+        specs["add_blueprint_connected_action_node"]["examples"][0]["params"]
+    )
+    connected_many["bindings"] = [
+        f"binding:{index:040x}" for index in range(33)
+    ]
+    invalid_cases.append(
+        ("add_blueprint_connected_action_node", connected_many)
+    )
+
+    preview_duplicate = deepcopy(
+        specs["preview_blueprint_action_replacement"]["examples"][0]["params"]
+    )
+    mapping = {
+        "old_pin_id": "pin:22222222-2222-4222-8222-222222222222",
+        "new_binding_id": "binding:" + "b" * 40,
+    }
+    preview_duplicate["pin_mapping"] = [mapping, deepcopy(mapping)]
+    invalid_cases.append(
+        ("preview_blueprint_action_replacement", preview_duplicate)
+    )
+
+    preview_many = deepcopy(
+        specs["preview_blueprint_action_replacement"]["examples"][0]["params"]
+    )
+    preview_many["pin_mapping"] = [
+        {
+            "old_pin_id": (
+                f"pin:00000001-0001-4001-8001-{index + 1:012x}"
+            ),
+            "new_binding_id": f"binding:{index:040x}",
+        }
+        for index in range(257)
+    ]
+    invalid_cases.append(
+        ("preview_blueprint_action_replacement", preview_many)
+    )
+
+    for action, params in invalid_cases:
+        with pytest.raises(ValidationError):
+            Draft202012Validator(
+                specs[action]["input_schema"]
+            ).validate(params)
+
+
+def test_semantic_success_contracts_enforce_nonempty_topology():
+    specs = _new_specs()
+
+    pin_page = specs["suggest_blueprint_nodes_for_pin"]["output_schema"][
+        "allOf"
+    ][0]["then"]["properties"]["data"]
+    pin_bindings = pin_page["properties"]["items"]["items"]["properties"][
+        "connection_bindings"
+    ]
+    with pytest.raises(ValidationError):
+        Draft202012Validator(pin_bindings).validate([])
+
+    connection_page = specs[
+        "suggest_blueprint_nodes_for_connection"
+    ]["output_schema"]["allOf"][0]["then"]["properties"]["data"]
+    response = {
+        "kind": "direct",
+        "message": "",
+        "requires_conversion": False,
+    }
+    pair = {
+        "input_binding_id": "binding:" + "b" * 40,
+        "output_binding_id": "binding:" + "c" * 40,
+        "input_pin_name": "In",
+        "output_pin_name": "Out",
+        "input_type": {"kind": "int"},
+        "output_type": {"kind": "int"},
+        "source_response": response,
+        "target_response": response,
+        "requires_conversion": False,
+        "rank": 0,
+    }
+    card = {
+        "action_id": "action:" + "a" * 40,
+        "title": "Identity",
+        "category": "Utilities",
+        "keywords": ["identity"],
+        "action_kind": "function",
+        "node_class_path": "/Script/BlueprintGraph.K2Node_CallFunction",
+        "owner_path": "/Script/Engine.KismetSystemLibrary",
+        "member_path": "/Script/Engine.KismetSystemLibrary:Identity",
+        "pure": True,
+        "compatible": True,
+        "compatibility_summary": "Directly bridges both pins.",
+        "requires_binding": False,
+        "bindings": [],
+        "binding_pairs": [pair],
+    }
+    page = {
+        "asset_path": "/Game/BP.BP",
+        "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+        "source_pin_id": "pin:22222222-2222-4222-8222-222222222222",
+        "target_pin_id": "pin:33333333-3333-4333-8333-333333333333",
+        "allow_conversion": False,
+        "items": [card],
+        "total_count": 1,
+        "returned_count": 1,
+        "next_cursor": "",
+        "result_digest": "sha1:" + "d" * 40,
+    }
+    Draft202012Validator(connection_page).validate(page)
+    with pytest.raises(ValidationError):
+        invalid_card = deepcopy(card)
+        invalid_card["binding_pairs"] = []
+        Draft202012Validator(connection_page).validate(
+            {**page, "items": [invalid_card]}
+        )
+    with pytest.raises(ValidationError):
+        Draft202012Validator(connection_page).validate(
+            {
+                **page,
+                "items": [deepcopy(card) for _ in range(201)],
+                "total_count": 201,
+                "returned_count": 200,
+            }
+        )
+
+    for action, minimum in (
+        ("add_blueprint_connected_action_node", 1),
+        ("insert_blueprint_action_node", 2),
+    ):
+        data = specs[action]["output_schema"]["allOf"][0]["then"][
+            "properties"
+        ]["data"]
+        connections = data["properties"]["connections"]
+        assert connections["minItems"] == minimum
+        with pytest.raises(ValidationError):
+            Draft202012Validator(connections).validate([])
 
 
 def test_blueprint_palette_contracts_are_closed_bounded_and_opaque():
@@ -1218,6 +1467,11 @@ def test_blueprint2_wrappers_have_fixed_signatures_and_structured_stubs(monkeypa
             "describe_blueprint_node_action",
             "add_blueprint_action_node",
             "suggest_blueprint_nodes_for_pin",
+            "suggest_blueprint_nodes_for_connection",
+            "add_blueprint_connected_action_node",
+            "insert_blueprint_action_node",
+            "preview_blueprint_action_replacement",
+            "replace_blueprint_node_with_action",
         }
     for action in NEW_BLUEPRINT2_ACTIONS - active_actions:
         result = getattr(module, f"ue_{action}")()
@@ -1432,9 +1686,9 @@ def test_live_e2e_accounts_for_every_json_action():
     sweep_pair_set = set(sweep_pairs)
 
     assert excluded == {("vision", "capture_viewport")}
-    assert len(all_pairs) == 294
+    assert len(all_pairs) == 299
     assert len(sweep_pairs) == len(sweep_pair_set)
     assert sweep_pair_set.isdisjoint(excluded)
     assert sweep_pair_set | excluded == all_pairs
-    assert len(sweep_pair_set) == 293
+    assert len(sweep_pair_set) == 298
     assert "test_vision_capture_returns_image" in test_names

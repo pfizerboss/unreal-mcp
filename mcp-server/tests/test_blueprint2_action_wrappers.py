@@ -293,6 +293,181 @@ def test_suggest_blueprint_nodes_for_pin_wrapper(monkeypatch):
     ]
 
 
+def test_suggest_blueprint_nodes_for_connection_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    filters = {"action_kinds": ["function"], "pure_only": True}
+
+    result = module.ue_suggest_blueprint_nodes_for_connection(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        source_pin_id="pin:22222222-2222-4222-8222-222222222222",
+        target_pin_id="pin:33333333-3333-4333-8333-333333333333",
+        query="Convert",
+        filters=filters,
+        allow_conversion=True,
+        cursor="palette-cursor:" + "f" * 40,
+        limit=25,
+    )
+
+    filters["action_kinds"].append("operator")
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "suggest_blueprint_nodes_for_connection",
+            "/Game/BP.BP",
+            {
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "source_pin_id": (
+                    "pin:22222222-2222-4222-8222-222222222222"
+                ),
+                "target_pin_id": (
+                    "pin:33333333-3333-4333-8333-333333333333"
+                ),
+                "query": "Convert",
+                "filters": {
+                    "action_kinds": ["function"],
+                    "pure_only": True,
+                },
+                "allow_conversion": True,
+                "cursor": "palette-cursor:" + "f" * 40,
+                "limit": 25,
+            },
+        )
+    ]
+
+
+def test_add_blueprint_connected_action_node_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    position = {"x": 400, "y": 120}
+    bindings = ["binding:" + "c" * 40]
+
+    result = module.ue_add_blueprint_connected_action_node(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        pin_id="pin:22222222-2222-4222-8222-222222222222",
+        action_id="action:" + "a" * 40,
+        connection_binding_id="binding:" + "b" * 40,
+        position=position,
+        allow_conversion=True,
+        bindings=bindings,
+    )
+
+    position["x"] = -1
+    bindings.append("binding:" + "d" * 40)
+    assert json.loads(result)["marker"] == "native"
+    assert calls[0] == (
+        "add_blueprint_connected_action_node",
+        "/Game/BP.BP",
+        {
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "action_id": "action:" + "a" * 40,
+            "connection_binding_id": "binding:" + "b" * 40,
+            "position": {"x": 400, "y": 120},
+            "allow_conversion": True,
+            "bindings": ["binding:" + "c" * 40],
+        },
+    )
+
+
+def test_insert_blueprint_action_node_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    position = {"x": 600, "y": 80}
+    bindings = ["binding:" + "c" * 40]
+
+    result = module.ue_insert_blueprint_action_node(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        source_pin_id="pin:22222222-2222-4222-8222-222222222222",
+        target_pin_id="pin:33333333-3333-4333-8333-333333333333",
+        action_id="action:" + "a" * 40,
+        input_binding_id="binding:" + "b" * 40,
+        output_binding_id="binding:" + "d" * 40,
+        position=position,
+        bindings=bindings,
+    )
+
+    position["x"] = -1
+    bindings.append("binding:" + "e" * 40)
+    assert json.loads(result)["marker"] == "native"
+    assert calls[0] == (
+        "insert_blueprint_action_node",
+        "/Game/BP.BP",
+        {
+            "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+            "source_pin_id": (
+                "pin:22222222-2222-4222-8222-222222222222"
+            ),
+            "target_pin_id": (
+                "pin:33333333-3333-4333-8333-333333333333"
+            ),
+            "action_id": "action:" + "a" * 40,
+            "input_binding_id": "binding:" + "b" * 40,
+            "output_binding_id": "binding:" + "d" * 40,
+            "position": {"x": 600, "y": 80},
+            "bindings": ["binding:" + "c" * 40],
+        },
+    )
+
+
+def test_preview_blueprint_action_replacement_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+    mapping = [
+        {
+            "old_pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "new_binding_id": "binding:" + "b" * 40,
+        }
+    ]
+
+    result = module.ue_preview_blueprint_action_replacement(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        node_id="node:44444444-4444-4444-8444-444444444444",
+        action_id="action:" + "a" * 40,
+        bindings=["binding:" + "c" * 40],
+        pin_mapping=mapping,
+        allow_conversion=True,
+        allow_loss=False,
+    )
+
+    mapping[0]["new_binding_id"] = "binding:" + "d" * 40
+    assert json.loads(result)["marker"] == "native"
+    assert calls[0][0:2] == (
+        "preview_blueprint_action_replacement",
+        "/Game/BP.BP",
+    )
+    assert calls[0][2]["pin_mapping"] == [
+        {
+            "old_pin_id": "pin:22222222-2222-4222-8222-222222222222",
+            "new_binding_id": "binding:" + "b" * 40,
+        }
+    ]
+
+
+def test_replace_blueprint_node_with_action_wrapper(monkeypatch):
+    module, calls = _load_variable_wrapper(monkeypatch)
+
+    result = module.ue_replace_blueprint_node_with_action(
+        asset_path="/Game/BP.BP",
+        graph_id="graph:11111111-1111-4111-8111-111111111111",
+        replacement_plan_id="replacement-plan:" + "e" * 40,
+        allow_loss=True,
+    )
+
+    assert json.loads(result)["marker"] == "native"
+    assert calls == [
+        (
+            "replace_blueprint_node_with_action",
+            "/Game/BP.BP",
+            {
+                "graph_id": "graph:11111111-1111-4111-8111-111111111111",
+                "replacement_plan_id": "replacement-plan:" + "e" * 40,
+                "allow_loss": True,
+            },
+        )
+    ]
+
+
 def test_remove_blueprint_variable(monkeypatch):
     module, calls = _load_variable_wrapper(monkeypatch)
 

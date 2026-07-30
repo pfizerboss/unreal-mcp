@@ -379,6 +379,10 @@ CATALOG = {
             'params': 'asset_path, graph_id, action_id, position, bindings=()',
             'doc': 'Spawn one native palette action in a Blueprint graph.',
         },
+        'add_blueprint_connected_action_node': {
+            'params': 'asset_path, graph_id, pin_id, action_id, connection_binding_id, position, allow_conversion=False, bindings=()',
+            'doc': 'Spawn one pin-bound palette action and connect it atomically.',
+        },
         'add_blueprint_interface': {
             'params': 'asset_path, interface_path',
             'doc': 'Adds a Blueprint interface by full Unreal object path.',
@@ -479,6 +483,10 @@ CATALOG = {
             'params': '',
             'doc': 'Returns information about currently selected blueprint nodes in the editor.',
         },
+        'insert_blueprint_action_node': {
+            'params': 'asset_path, graph_id, source_pin_id, target_pin_id, action_id, input_binding_id, output_binding_id, position, bindings=()',
+            'doc': 'Insert one two-pin-bound palette action into an existing edge.',
+        },
         'inspect_blueprint': {
             'params': "asset_path, queries=(), cursor=''",
             'doc': 'Runs bounded, independently paginated queries against one Blueprint.',
@@ -494,6 +502,10 @@ CATALOG = {
         'list_callable_functions': {
             'params': "asset_path, filter=''",
             'doc': 'Lists callable functions available in a Blueprint context.',
+        },
+        'preview_blueprint_action_replacement': {
+            'params': 'asset_path, graph_id, node_id, action_id, bindings=(), pin_mapping=(), allow_conversion=False, allow_loss=False',
+            'doc': 'Preview a snapshot-bound palette action replacement without mutation.',
         },
         'remove_blueprint_interface': {
             'params': 'asset_path, interface_id',
@@ -534,6 +546,10 @@ CATALOG = {
         'reparent_blueprint_component': {
             'params': 'asset_path, component_id, parent_component_id',
             'doc': 'Reparents an SCS component using stable component IDs.',
+        },
+        'replace_blueprint_node_with_action': {
+            'params': 'asset_path, graph_id, replacement_plan_id, allow_loss=False',
+            'doc': 'Apply one unchanged snapshot-bound Blueprint replacement plan.',
         },
         'search_blueprint_node_actions': {
             'params': "asset_path, graph_id, query='', filters, cursor='', limit=50",
@@ -578,6 +594,10 @@ CATALOG = {
         'snapshot_blueprint_graph': {
             'params': 'asset_path, graph_ids=()',
             'doc': 'Returns a deterministic compact graph snapshot ordered by stable ID.',
+        },
+        'suggest_blueprint_nodes_for_connection': {
+            'params': "asset_path, graph_id, source_pin_id, target_pin_id, query='', filters, allow_conversion=False, cursor='', limit=50",
+            'doc': 'Return palette actions that can bridge two stable Blueprint pins.',
         },
         'suggest_blueprint_nodes_for_pin': {
             'params': "asset_path, graph_id, pin_id, query='', cursor='', limit=50",
