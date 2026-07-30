@@ -699,6 +699,10 @@ TSharedRef<FJsonObject> MakeKindObject(const TCHAR* Kind)
 TSharedRef<FJsonObject> SerializeScalarType(const FEdGraphPinType& Type)
 {
     const FName Category = Type.PinCategory;
+    if (Category == UEdGraphSchema_K2::PC_Exec)
+    {
+        return MakeKindObject(TEXT("exec"));
+    }
     if (Category == UEdGraphSchema_K2::PC_Boolean)
     {
         return MakeKindObject(TEXT("bool"));

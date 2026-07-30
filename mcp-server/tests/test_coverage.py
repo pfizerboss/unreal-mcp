@@ -95,6 +95,27 @@ def test_all_blueprint_actions_are_referenced_by_split_editor_suites():
     assert not KNOWN_UNTESTED.get("blueprint")
 
 
+def test_blueprint_palette_editor_suite_covers_required_scenarios():
+    source = (PLUGIN_TESTS / "test_blueprint2_palette.py").read_text(
+        encoding="utf-8"
+    )
+    required_tests = {
+        "test_search_is_deterministic_paginated_and_context_bound",
+        "test_describe_is_read_only_and_rejects_tampering",
+        "test_spawn_function_event_macro_cast_and_latent_families",
+        "test_spawn_returns_inspectable_stable_nodes_and_pins",
+        "test_pin_suggestions_differ_by_pin_type_and_direction",
+        "test_palette_spawn_requires_explicit_compile_and_never_saves",
+        "test_palette_spawn_rolls_back_with_outer_workflow",
+        "test_palette_workflow_stress_12_of_12",
+        "test_available_plugin_defined_action_round_trip",
+    }
+    missing = sorted(
+        name for name in required_tests if f"def {name}(" not in source
+    )
+    assert not missing, f"Palette editor acceptance scenarios missing: {missing}"
+
+
 @pytest.mark.parametrize("domain", sorted(CATALOG))
 def test_every_action_is_tested_or_allowlisted(domain):
     referenced = _referenced(domain)

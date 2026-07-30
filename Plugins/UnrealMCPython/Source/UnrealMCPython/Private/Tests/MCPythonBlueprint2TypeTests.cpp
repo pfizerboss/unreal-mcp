@@ -207,6 +207,14 @@ bool FMCPythonBlueprint2CanonicalTypesTest::RunTest(const FString& Parameters)
             GetPathNameSafe(Type.PinValueType.TerminalSubCategoryObject.Get()));
     }
 
+    FEdGraphPinType ExecType;
+    ExecType.PinCategory = UEdGraphSchema_K2::PC_Exec;
+    const TSharedRef<FJsonObject> SerializedExec = SerializeTypeSpec(ExecType);
+    TestEqual(
+        TEXT("execution pins serialize with their public snapshot kind"),
+        SerializedExec->GetStringField(TEXT("kind")),
+        FString(TEXT("exec")));
+
     auto ExpectInvalid = [this](
         const TCHAR* Label,
         const TSharedRef<FJsonObject>& Spec,
