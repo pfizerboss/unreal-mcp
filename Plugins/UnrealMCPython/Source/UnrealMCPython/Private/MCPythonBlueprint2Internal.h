@@ -276,11 +276,30 @@ bool BuildBlueprintGraphSnapshot(
     const TArray<FString>& GraphIds,
     TSharedPtr<FJsonObject>& OutSnapshot,
     FError& OutError);
+int32 ClassifySemanticPageCandidateBudget(
+    int32 ReturnedBindingCount,
+    int32 CandidateBindingCount);
 #if WITH_DEV_AUTOMATION_TESTS
+enum class ESemanticConnectedSpawnFailurePoint : uint8
+{
+    None,
+    AfterInvoke,
+    OutOfGraphResult,
+    MissingActualPin,
+    BeforeTryCreate,
+    AfterTryCreateBreakTopology,
+    ZeroVisiblePinGuid,
+    AfterRollbackResidual
+};
+
 void ResetPaletteTokenStateForTests();
 void SetPaletteTokenClockForTests(const TOptional<FDateTime>& Now);
 void ResetSemanticTokenStateForTests();
 void SetSemanticTokenClockForTests(const TOptional<FDateTime>& Now);
+void SetSemanticConnectedSpawnFailurePointForTests(
+    ESemanticConnectedSpawnFailurePoint Point);
+bool CorruptPaletteTemplatePinBindingForTests(const FString& BindingId);
+FString InjectStaleDynamicBindingForTests(const FString& ActionId);
 #endif
 FString EncodeCursor(
     const FString& AssetPath,

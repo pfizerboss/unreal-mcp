@@ -221,6 +221,16 @@ public:
     static FString SuggestBlueprintNodesForPin(
         UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Search native actions that can bridge two stable pins. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString SuggestBlueprintNodesForConnection(
+        UBlueprint* Blueprint, const FString& RequestJson);
+
+    /** Spawn a returned pin-context action and connect its selected pin. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString AddBlueprintConnectedActionNode(
+        UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Create a user-authored function with a complete ordered signature. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString CreateBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);

@@ -89,6 +89,74 @@ def test_semantic_helpers_reuse_the_private_palette_interface():
         assert "GetAllActions" not in semantic_source
 
 
+def test_semantic_suggestion_is_read_only_and_connected_spawn_is_transactional():
+    source = SEMANTIC_SOURCE.read_text(encoding="utf-8")
+    assert "Semantic.Pairs.SetNum(" not in source
+    assert "CandidateBindingCount > MaximumReturnedBindings" in source
+    over_budget = source.index("CandidateBindingCount > MaximumReturnedBindings")
+    budget_tail = source[over_budget : over_budget + 300]
+    assert "++NextIndex" not in budget_tail
+    assert "continue;" not in budget_tail
+    assert "SerializeFinalTopologyEdges" in source
+    assert "Values.Num() >= 511" not in source
+    suggest = source[
+        source.index("FString UMCPythonHelper::SuggestBlueprintNodesForConnection") :
+        source.index("FString UMCPythonHelper::AddBlueprintConnectedActionNode")
+    ]
+    spawn = source[
+        source.index("FString UMCPythonHelper::AddBlueprintConnectedActionNode") :
+    ]
+
+    for forbidden in (
+        "FMutationScope",
+        "->Invoke(",
+        "TryCreateConnection",
+        "MarkBlueprintAsModified",
+        "BuildBlueprintGraphSnapshot",
+    ):
+        assert forbidden not in suggest
+
+    for required in (
+        "FMutationScope Scope",
+        "BuildBlueprintGraphSnapshot",
+        "ResolvePaletteActionToken",
+        "ResolvePaletteTemplatePinBinding",
+        "->Invoke(",
+        "CanCreateConnection",
+        "TryCreateConnection",
+        "RollbackConnectedFailure",
+        "MarkBlueprintAsModified",
+    ):
+        assert required in spawn
+
+    assert "Scope.Rollback()" in source
+    assert "Rollback.ResidualChanges.IsEmpty()" in source
+    assert 'TEXT("before_digest")' in source
+    assert 'TEXT("after_digest")' in source
+    assert 'TEXT("affected_ids")' in source
+    assert 'TEXT("residual_changes")' in source
+    assert 'TEXT("saved"), false' in source
+
+    assert spawn.index("BuildBlueprintGraphSnapshot") < spawn.index(
+        "FMutationScope Scope"
+    )
+    assert spawn.index("CanCreateConnection") < spawn.index("FMutationScope Scope")
+    assert spawn.index("VerifyConnectedSpawnTopology") < spawn.index(
+        "MarkBlueprintAsModified"
+    )
+    assert spawn.index("ValidateStableConnectedSpawnResult") < spawn.index(
+        "MarkBlueprintAsModified"
+    )
+    for forbidden in (
+        "CompileBlueprint",
+        "SavePackage(",
+        "EditorAssetLibrary",
+        "execute_python",
+        "PlayInEditor",
+    ):
+        assert forbidden not in source
+
+
 def _load_blueprint_actions(monkeypatch, helper):
     monkeypatch.setitem(
         sys.modules, "unreal", SimpleNamespace(MCPythonHelper=helper)

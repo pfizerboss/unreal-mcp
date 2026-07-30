@@ -2729,6 +2729,54 @@ void SetPaletteTokenClockForTests(const TOptional<FDateTime>& Now)
     State.TestNow = Now;
 }
 
+bool CorruptPaletteTemplatePinBindingForTests(const FString& BindingId)
+{
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    FStoredPaletteBinding* Stored = State.Bindings.Find(BindingId);
+    if (!Stored ||
+        Stored->Record.Kind != EPaletteBindingKind::TemplatePin)
+    {
+        return false;
+    }
+    Stored->Record.PinName += TEXT("_stale_for_test");
+    return true;
+}
+
+FString InjectStaleDynamicBindingForTests(const FString& ActionId)
+{
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    if (!State.Actions.Contains(ActionId))
+    {
+        return FString();
+    }
+
+    const FString SessionId = CurrentPaletteSessionId();
+    const FString MissingObjectPath =
+        TEXT("/Script/Engine.__MCPMissingDynamicBindingForTest");
+    const FString ExpectedClassPath = TEXT("/Script/CoreUObject.Object");
+    FPaletteBindingRecord Record;
+    Record.Kind = EPaletteBindingKind::Object;
+    Record.ActionId = ActionId;
+    Record.ObjectPath = MissingObjectPath;
+    Record.ExpectedClassPath = ExpectedClassPath;
+    Record.BindingId = TEXT("binding:") + Sha1(
+        SessionId + TEXT("\n") + ActionId + TEXT("\n") +
+        MissingObjectPath + TEXT("\n") + ExpectedClassPath);
+
+    const FDateTime Now = PaletteNow(State);
+    FStoredPaletteBinding Stored;
+    Stored.Record = Record;
+    Stored.EditorSessionId = SessionId;
+    Stored.CreatedAt = Now;
+    Stored.LastUsedAt = Now;
+    State.Bindings.Add(Record.BindingId, MoveTemp(Stored));
+    TouchLru(State.BindingOrder, Record.BindingId);
+    EnforceRecordBound(State.Bindings, State.BindingOrder, 1024);
+    return Record.BindingId;
+}
+
 void ResetSemanticTokenStateForTests()
 {
     FSemanticTokenState& State = SemanticTokenState();
@@ -2839,7 +2887,8 @@ TSharedRef<FJsonObject> MakeFailure(
         TEXT("CONFIRMATION_EXPIRED"), TEXT("PLUGIN_REQUIRED"),
         TEXT("UE_VERSION_UNSUPPORTED"), TEXT("UE_UNAVAILABLE"),
         TEXT("TIMEOUT"), TEXT("COMPILE_FAILED"), TEXT("VERIFICATION_FAILED"),
-        TEXT("TRANSACTION_FAILED"), TEXT("ROLLBACK_FAILED"),
+        TEXT("OPERATION_FAILED"), TEXT("TRANSACTION_FAILED"),
+        TEXT("ROLLBACK_FAILED"),
         TEXT("INTERNAL_ERROR")};
     const FString SafeCode = ApprovedCodes.Contains(Code)
         ? Code
