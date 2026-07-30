@@ -522,6 +522,290 @@ def test_blueprint2_workflow_round_trip():
         assert canary.get("success") is True, canary
 
 
+def test_blueprint_palette_round_trip():
+    """Native palette capabilities survive the full MCP and workflow chain."""
+    asset_path = f"/Game/__MCPTests/BlueprintPalette_{uuid4().hex}"
+
+    def checked(result, label):
+        _assert_not_connection_error(result, label)
+        return result
+
+    def search_location_action():
+        cursor = ""
+        seen_action_ids = set()
+        seen_cursors = set()
+        followed_cursor = False
+        found_action = None
+        for _ in range(20):
+            if cursor:
+                assert cursor not in seen_cursors, cursor
+                seen_cursors.add(cursor)
+            searched = checked(run(disp._dispatch(
+                "blueprint",
+                "search_blueprint_node_actions",
+                {
+                    "asset_path": asset_path,
+                    "graph_id": graph_id,
+                    "query": "Get Actor Location",
+                    "filters": {"action_kinds": ["function"]},
+                    "cursor": cursor,
+                    "limit": 1,
+                },
+            )), "search_blueprint_node_actions")
+            assert searched.get("success") is True, searched
+            for item in searched["data"]["items"]:
+                action_id = item["action_id"]
+                assert action_id not in seen_action_ids, searched
+                seen_action_ids.add(action_id)
+                if item["member_path"].endswith(":K2_GetActorLocation"):
+                    found_action = item
+            next_cursor = searched["data"]["next_cursor"]
+            if found_action is not None and (followed_cursor or not next_cursor):
+                return found_action
+            if not next_cursor:
+                break
+            assert next_cursor not in seen_cursors, searched
+            cursor = next_cursor
+            followed_cursor = True
+        pytest.fail("Get Actor Location was not found through bounded pages")
+
+    try:
+        created = checked(run(disp._dispatch(
+            "blueprint",
+            "create_blueprint",
+            {
+                "asset_path": asset_path,
+                "parent_class_path": "/Script/Engine.Actor",
+            },
+        )), "create_blueprint")
+        assert created.get("success") is True, created
+        assert created.get("saved") is False, created
+
+        inspected = checked(run(disp._dispatch(
+            "blueprint",
+            "inspect_blueprint",
+            {
+                "asset_path": asset_path,
+                "queries": [
+                    {"op": "events", "detail": "detailed", "limit": 100}
+                ],
+            },
+        )), "inspect_blueprint graph")
+        assert inspected.get("success") is True, inspected
+        event_items = inspected["data"]["results"][0]["items"]
+        graph_ids = {
+            item["graph_id"]
+            for item in event_items
+            if item.get("graph_id", "").startswith("graph:")
+        }
+        assert len(graph_ids) == 1, inspected
+        graph_id = next(iter(graph_ids))
+        assert all(
+            item["graph_id_kind"] == "graph_guid"
+            and item["graph_stable"] is True
+            for item in event_items
+            if item.get("graph_id") == graph_id
+        ), inspected
+
+        action = search_location_action()
+        described = checked(run(disp._dispatch(
+            "blueprint",
+            "describe_blueprint_node_action",
+            {"action_id": action["action_id"]},
+        )), "describe_blueprint_node_action")
+        assert described.get("success") is True, described
+        assert described["data"]["action_id"] == action["action_id"]
+
+        initial = checked(run(disp._dispatch(
+            "blueprint",
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        )), "snapshot_blueprint_graph initial")
+        assert initial.get("success") is True, initial
+
+        spawned = checked(run(disp._dispatch(
+            "blueprint",
+            "add_blueprint_action_node",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "action_id": action["action_id"],
+                "position": {"x": 432, "y": 176},
+                "bindings": [
+                    item["binding_id"] for item in action["bindings"]
+                ],
+            },
+        )), "add_blueprint_action_node")
+        assert spawned.get("success") is True, spawned
+        assert spawned.get("saved") is not True, spawned
+        node_id = spawned["data"]["node_id"]
+        pin_ids = spawned["data"]["pin_ids"]
+        assert node_id.startswith("node:"), spawned
+        assert pin_ids and all(pin.startswith("pin:") for pin in pin_ids)
+
+        node_inspection = checked(run(disp._dispatch(
+            "blueprint",
+            "inspect_blueprint",
+            {
+                "asset_path": asset_path,
+                "queries": [
+                    {
+                        "op": "nodes",
+                        "member_id": node_id,
+                        "detail": "detailed",
+                    },
+                    {
+                        "op": "pins",
+                        "node_id": node_id,
+                        "detail": "detailed",
+                        "limit": 500,
+                    },
+                ],
+            },
+        )), "inspect_blueprint spawned node")
+        assert node_inspection.get("success") is True, node_inspection
+        nodes = node_inspection["data"]["results"][0]["items"]
+        pins = node_inspection["data"]["results"][1]["items"]
+        assert len(nodes) == 1 and nodes[0]["node_id"] == node_id
+        assert {pin["pin_id"] for pin in pins} == set(pin_ids)
+
+        suggested = checked(run(disp._dispatch(
+            "blueprint",
+            "suggest_blueprint_nodes_for_pin",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "pin_id": pin_ids[0],
+                "query": "",
+                "cursor": "",
+                "limit": 25,
+            },
+        )), "suggest_blueprint_nodes_for_pin")
+        assert suggested.get("success") is True, suggested
+        assert suggested["data"]["source_pin_id"] == pin_ids[0]
+        assert suggested["data"]["items"], suggested
+
+        compiled = checked(run(disp._dispatch(
+            "blueprint", "compile_blueprint", {"asset_path": asset_path}
+        )), "compile_blueprint")
+        assert compiled.get("success") is True, compiled
+        health = checked(run(disp._dispatch(
+            "blueprint", "get_blueprint_health", {"asset_path": asset_path}
+        )), "get_blueprint_health")
+        assert health.get("success") is True, health
+        assert health["data"]["healthy"] is True, health
+
+        saved = checked(run(disp._dispatch(
+            "asset", "save_asset", {"asset_path": asset_path}
+        )), "save_asset before workflow")
+        assert saved.get("success") is True, saved
+
+        workflow_action = search_location_action()
+        pre_workflow = checked(run(disp._dispatch(
+            "blueprint",
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        )), "snapshot_blueprint_graph before workflow")
+        assert pre_workflow.get("success") is True, pre_workflow
+
+        planned = checked(run(disp.workflow(action="plan", params={
+            "operations": [
+                {
+                    "id": "spawn-palette-node",
+                    "domain": "blueprint",
+                    "action": "add_blueprint_action_node",
+                    "params": {
+                        "asset_path": asset_path,
+                        "graph_id": graph_id,
+                        "action_id": workflow_action["action_id"],
+                        "position": {"x": 912, "y": 432},
+                        "bindings": [
+                            item["binding_id"]
+                            for item in workflow_action["bindings"]
+                        ],
+                    },
+                }
+            ]
+        })), "workflow.plan palette spawn")
+        assert planned.get("success") is True, planned
+        plan_id = planned["data"]["workflow_id"]
+        applied = checked(run(disp.workflow(action="apply", params={
+            "plan_id": plan_id,
+            "confirmation_token": planned["data"]["confirmation_token"],
+            "wait_for_completion": True,
+        })), "workflow.apply palette spawn")
+        assert applied.get("success") is True, applied
+        assert applied["data"].get("transaction_recorded") is True, applied
+        assert applied.get("saved") is not True, applied
+        undo_token = applied["data"].get("undo_token")
+        assert undo_token, applied
+
+        applied_snapshot = checked(run(disp._dispatch(
+            "blueprint",
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        )), "snapshot_blueprint_graph after workflow apply")
+        assert applied_snapshot.get("success") is True, applied_snapshot
+        applied_diff = checked(run(disp._dispatch(
+            "blueprint",
+            "diff_blueprint_graphs",
+            {
+                "before_snapshot": pre_workflow["data"],
+                "after_snapshot": applied_snapshot["data"],
+                "queries": [],
+            },
+        )), "diff_blueprint_graphs after workflow apply")
+        assert applied_diff.get("success") is True, applied_diff
+        assert any(
+            section["total_count"] > 0
+            for section in applied_diff["data"]["sections"]
+        ), applied_diff
+
+        undone = checked(run(disp.workflow(action="undo", params={
+            "plan_id": plan_id,
+            "undo_token": undo_token,
+        })), "workflow.undo palette spawn")
+        assert undone.get("success") is True, undone
+
+        restored = checked(run(disp._dispatch(
+            "blueprint",
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        )), "snapshot_blueprint_graph restored")
+        assert restored.get("success") is True, restored
+        assert restored["data"] == pre_workflow["data"], (
+            pre_workflow,
+            restored,
+        )
+        diff = checked(run(disp._dispatch(
+            "blueprint",
+            "diff_blueprint_graphs",
+            {
+                "before_snapshot": pre_workflow["data"],
+                "after_snapshot": restored["data"],
+                "queries": [],
+            },
+        )), "diff_blueprint_graphs restored workflow")
+        assert diff.get("success") is True, diff
+        assert all(
+            section["total_count"] == 0
+            for section in diff["data"]["sections"]
+        ), diff
+    finally:
+        present = checked(run(disp._dispatch(
+            "asset", "asset_exists", {"asset_path": asset_path}
+        )), "asset_exists palette cleanup")
+        if present.get("exists") is True:
+            deleted = checked(run(disp._dispatch(
+                "asset", "delete_asset", {"asset_path": asset_path}
+            )), "delete_asset palette cleanup")
+            assert deleted.get("success") is True, deleted
+        absent = checked(run(disp._dispatch(
+            "asset", "asset_exists", {"asset_path": asset_path}
+        )), "asset_exists after palette cleanup")
+        assert absent.get("exists") is False, absent
+
+
 def test_zzz_editor_survived_suite():
     """Last test in the file: the editor must still be alive after the full sweep."""
     assert _editor_reachable(), "Unreal editor is no longer reachable after the E2E suite (it crashed mid-run)."

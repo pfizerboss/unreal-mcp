@@ -1282,6 +1282,124 @@ def test_live_blueprint2_workflow_uses_safe_graph_and_diff_contracts():
     assert "execute_python" not in source
 
 
+def test_live_blueprint_palette_round_trip_uses_the_public_workflow():
+    e2e_path = Path(__file__).with_name("test_e2e.py")
+    tree = ast.parse(e2e_path.read_text(encoding="utf-8"))
+    workflow = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_blueprint_palette_round_trip"
+    )
+    source = ast.unparse(workflow)
+
+    for action in (
+        "create_blueprint",
+        "inspect_blueprint",
+        "search_blueprint_node_actions",
+        "describe_blueprint_node_action",
+        "snapshot_blueprint_graph",
+        "add_blueprint_action_node",
+        "suggest_blueprint_nodes_for_pin",
+        "compile_blueprint",
+        "get_blueprint_health",
+        "save_asset",
+        "diff_blueprint_graphs",
+        "delete_asset",
+    ):
+        assert action in source
+    for workflow_action in ("plan", "apply", "undo"):
+        assert f"action='{workflow_action}'" in source
+    assert "_assert_not_connection_error" in source
+    assert "get('saved') is False" in source
+    assert source.count("get('saved') is not True") >= 2
+    assert "execute_python" not in source
+
+    transport_calls = [
+        node
+        for node in ast.walk(workflow)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"_dispatch", "workflow"}
+    ]
+    checked_calls = [
+        node
+        for node in ast.walk(workflow)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "checked"
+    ]
+    assert transport_calls
+    assert all(
+        any(
+            transport is nested
+            for checked_call in checked_calls
+            for nested in ast.walk(checked_call)
+        )
+        for transport in transport_calls
+    )
+
+    save_lines = [
+        node.lineno
+        for node in transport_calls
+        if any(
+            isinstance(child, ast.Constant) and child.value == "save_asset"
+            for child in ast.walk(node)
+        )
+    ]
+    plan_lines = [
+        node.lineno
+        for node in transport_calls
+        if node.func.attr == "workflow"
+        and any(
+            keyword.arg == "action"
+            and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value == "plan"
+            for keyword in node.keywords
+        )
+    ]
+    assert save_lines and plan_lines and min(save_lines) < min(plan_lines)
+
+    finally_bodies = [
+        ast.unparse(ast.Module(body=node.finalbody, type_ignores=[]))
+        for node in ast.walk(workflow)
+        if isinstance(node, ast.Try) and node.finalbody
+    ]
+    assert any("delete_asset" in body for body in finally_bodies)
+
+    assigned_names = {
+        node.id
+        for node in ast.walk(workflow)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+    assert {
+        "seen_action_ids",
+        "followed_cursor",
+        "applied_snapshot",
+        "applied_diff",
+    } <= assigned_names
+    total_count_comparisons = [
+        node
+        for node in ast.walk(workflow)
+        if isinstance(node, ast.Compare)
+        and isinstance(node.left, ast.Subscript)
+        and isinstance(node.left.slice, ast.Constant)
+        and node.left.slice.value == "total_count"
+        and len(node.ops) == 1
+        and len(node.comparators) == 1
+        and isinstance(node.comparators[0], ast.Constant)
+        and node.comparators[0].value == 0
+    ]
+    assert any(
+        isinstance(comparison.ops[0], ast.Gt)
+        for comparison in total_count_comparisons
+    )
+    assert any(
+        isinstance(comparison.ops[0], ast.Eq)
+        for comparison in total_count_comparisons
+    )
+
+
 def test_live_e2e_accounts_for_every_json_action():
     e2e_path = Path(__file__).with_name("test_e2e.py")
     tree = ast.parse(e2e_path.read_text(encoding="utf-8"))

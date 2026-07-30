@@ -26,7 +26,7 @@ It enables smooth communication between MCP clients (e.g., Claude, Cursor, Winds
 ## Key Features
 
 - MCP server for communication with Unreal Engine
-- 22 namespace dispatcher tools exposing 290 actions, each callable as `{action, params}`
+- 22 namespace dispatcher tools exposing 294 actions, each callable as `{action, params}`
 - Supports Python 3.11 and later
 
 ## Universal Blueprint 2.0
@@ -34,9 +34,11 @@ It enables smooth communication between MCP clients (e.g., Claude, Cursor, Winds
 Recommended sequence:
 
 ```text
-get_blueprint_brief -> inspect_blueprint -> workflow.plan -> workflow.apply
--> compile_blueprint -> get_blueprint_health / snapshot_blueprint_graph
--> diff_blueprint_graphs -> workflow.undo
+get_blueprint_brief -> inspect_blueprint
+-> search_blueprint_node_actions / suggest_blueprint_nodes_for_pin
+-> describe_blueprint_node_action -> add_blueprint_action_node
+-> connect_blueprint_pins -> compile_blueprint -> get_blueprint_health
+-> asset.save_asset (only when persistence is wanted)
 ```
 
 Inspection is paginated per query with `limit` 1-500 (default 100). Its opaque
@@ -49,6 +51,12 @@ Stable IDs use `graph:`, `node:`, `pin:`, `variable:`, `component:`, and
 classes use full paths such as `/Game/Characters/BP_Hero.BP_Hero_C`.
 Reflected members also require exact paths, for example
 `/Script/Engine.Actor:K2_GetActorLocation`.
+
+Palette `action:` IDs and `palette-cursor:` values are bounded to the current
+editor session, asset, graph, query, and optional source pin. Repeat search or
+pin suggestion when an ID becomes stale; do not replay it in another graph.
+Native palette pages return at most 200 actions. Pin suggestions reflect
+Unreal's current native action filter, and spawning never auto-connects pins.
 
 Blueprint mutations do not compile or save implicitly. Compile explicitly,
 run the compile-backed health check as a separate diagnostic call, and save
