@@ -337,6 +337,8 @@ TSharedRef<FJsonObject> SnapshotNodeProperties(const UEdGraphNode* Node)
     Properties->SetStringField(
         TEXT("enabled_state"),
         SnapshotEnabledState(Node->GetDesiredEnabledState()));
+    Properties->SetBoolField(
+        TEXT("comment_bubble_visible"), Node->bCommentBubbleVisible);
 
     if (const UK2Node_CallFunction* Call = Cast<UK2Node_CallFunction>(Node))
     {
@@ -2723,86 +2725,59 @@ FString UMCPythonHelper::GetBlueprintHealth(UBlueprint* Blueprint)
     return SerializeResult(Result);
 }
 
-FString UMCPythonHelper::SnapshotBlueprintGraph(
+bool UE::MCPython::Blueprint2::BuildBlueprintGraphSnapshot(
     UBlueprint* Blueprint,
-    const FString& RequestJson)
+    const TArray<FString>& GraphIds,
+    TSharedPtr<FJsonObject>& OutSnapshot,
+    FError& OutError)
 {
     using namespace UE::MCPython::Blueprint2;
+    OutSnapshot.Reset();
+    OutError = FError{};
+    auto Fail = [&OutError](
+        const FString& Code,
+        const FString& Path,
+        const FString& Message,
+        const FString& Hint)
+    {
+        OutError.Code = Code;
+        OutError.Path = Path;
+        OutError.Message = Message;
+        OutError.Hint = Hint;
+        return false;
+    };
     if (!Blueprint)
     {
-        return SerializeResult(MakeFailure(
+        return Fail(
             TEXT("INVALID_INPUT"),
             TEXT("params.asset_path"),
             TEXT("Invalid Blueprint."),
-            false,
-            TEXT("Load a valid Blueprint asset and retry the snapshot.")));
+            TEXT("Load a valid Blueprint asset and retry the snapshot."));
     }
-
-    const TSharedPtr<FJsonObject> Request = ParseJsonObject(RequestJson);
-    if (!Request)
+    const TArray<FString>& RequestedGraphIds = GraphIds;
+    if (RequestedGraphIds.Num() > 64)
     {
-        return SerializeResult(MakeFailure(
-            TEXT("INVALID_INPUT"),
-            TEXT("params"),
-            TEXT("Snapshot request must be one JSON object."),
-            false,
-            TEXT("Provide graph_ids as an optional array of stable graph IDs.")));
-    }
-    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Request->Values)
-    {
-        if (Field.Key != TEXT("graph_ids"))
-        {
-            return SerializeResult(MakeFailure(
-                TEXT("INVALID_INPUT"),
-                TEXT("params.") + Field.Key,
-                TEXT("Snapshot request contains an unknown field."),
-                false,
-                TEXT("Only graph_ids is accepted.")));
-        }
-    }
-
-    TArray<FString> RequestedGraphIds;
-    const TArray<TSharedPtr<FJsonValue>>* RequestedValues = nullptr;
-    if (Request->TryGetArrayField(TEXT("graph_ids"), RequestedValues))
-    {
-        if (!RequestedValues || RequestedValues->Num() > 64)
-        {
-            return SerializeResult(MakeFailure(
-                TEXT("INVALID_INPUT"),
-                TEXT("params.graph_ids"),
-                TEXT("graph_ids must contain at most 64 stable graph IDs."),
-                false,
-                TEXT("Pass an empty array to snapshot every supported graph.")));
-        }
-        TSet<FString> SeenIds;
-        for (int32 Index = 0; Index < RequestedValues->Num(); ++Index)
-        {
-            FString GraphId;
-            FGuid ParsedGuid;
-            if (!(*RequestedValues)[Index].IsValid() ||
-                !(*RequestedValues)[Index]->TryGetString(GraphId) ||
-                !ParseTargetId(GraphId, ETargetKind::Graph, ParsedGuid) ||
-                SeenIds.Contains(GraphId))
-            {
-                return SerializeResult(MakeFailure(
-                    TEXT("INVALID_INPUT"),
-                    FString::Printf(TEXT("params.graph_ids[%d]"), Index),
-                    TEXT("Each graph ID must be one unique persisted graph:<guid> ID."),
-                    false,
-                    TEXT("Inspect the Blueprint and pass stable graph IDs exactly as returned.")));
-            }
-            SeenIds.Add(GraphId);
-            RequestedGraphIds.Add(GraphId);
-        }
-    }
-    else if (Request->HasField(TEXT("graph_ids")))
-    {
-        return SerializeResult(MakeFailure(
+        return Fail(
             TEXT("INVALID_INPUT"),
             TEXT("params.graph_ids"),
-            TEXT("graph_ids must be an array."),
-            false,
-            TEXT("Pass an array of stable graph IDs or an empty array.")));
+            TEXT("graph_ids must contain at most 64 stable graph IDs."),
+            TEXT("Pass an empty array to snapshot every supported graph."));
+    }
+    TSet<FString> UniqueRequestedGraphIds;
+    for (int32 Index = 0; Index < RequestedGraphIds.Num(); ++Index)
+    {
+        FGuid GraphGuid;
+        if (!ParseTargetId(
+                RequestedGraphIds[Index], ETargetKind::Graph, GraphGuid) ||
+            UniqueRequestedGraphIds.Contains(RequestedGraphIds[Index]))
+        {
+            return Fail(
+                TEXT("INVALID_INPUT"),
+                FString::Printf(TEXT("params.graph_ids[%d]"), Index),
+                TEXT("Each graph ID must be one unique persisted graph:<guid> ID."),
+                TEXT("Inspect the Blueprint and pass stable graph IDs exactly as returned."));
+        }
+        UniqueRequestedGraphIds.Add(RequestedGraphIds[Index]);
     }
 
     TArray<UEdGraph*> AllGraphs;
@@ -2826,12 +2801,11 @@ FString UMCPythonHelper::SnapshotBlueprintGraph(
             {
                 continue;
             }
-            return SerializeResult(MakeFailure(
+            return Fail(
                 TEXT("PRECONDITION_FAILED"),
                 GraphPath,
                 TEXT("Blueprint graph has no persisted GUID and cannot be snapshotted deterministically."),
-                false,
-                TEXT("Open and resave or repair the Blueprint so every graph has a valid GUID.")));
+                TEXT("Open and resave or repair the Blueprint so every graph has a valid GUID."));
         }
         const FString GraphId = MakeTargetId(
             ETargetKind::Graph,
@@ -2843,12 +2817,11 @@ FString UMCPythonHelper::SnapshotBlueprintGraph(
         }
         if (SeenGraphGuids.Contains(Graph->GraphGuid))
         {
-            return SerializeResult(MakeFailure(
+            return Fail(
                 TEXT("PRECONDITION_FAILED"),
                 GraphPath,
                 TEXT("Blueprint contains duplicate persisted graph GUIDs."),
-                false,
-                TEXT("Repair the duplicate graph GUIDs before requesting a snapshot.")));
+                TEXT("Repair the duplicate graph GUIDs before requesting a snapshot."));
         }
         SeenGraphGuids.Add(Graph->GraphGuid);
         Graphs.Add(Graph);
@@ -2858,12 +2831,11 @@ FString UMCPythonHelper::SnapshotBlueprintGraph(
     {
         if (!MatchedGraphIds.Contains(RequestedGraphIds[Index]))
         {
-            return SerializeResult(MakeFailure(
+            return Fail(
                 TEXT("INVALID_INPUT"),
                 FString::Printf(TEXT("params.graph_ids[%d]"), Index),
                 TEXT("Requested graph ID was not found in this Blueprint."),
-                false,
-                TEXT("Re-inspect the Blueprint and use a current supported K2 graph ID.")));
+                TEXT("Re-inspect the Blueprint and use a current supported K2 graph ID."));
         }
     }
     Graphs.Sort([Blueprint](const UEdGraph& Left, const UEdGraph& Right)
@@ -2920,22 +2892,20 @@ FString UMCPythonHelper::SnapshotBlueprintGraph(
                 *Node->GetName());
             if (!Node->NodeGuid.IsValid())
             {
-                return SerializeResult(MakeFailure(
+                return Fail(
                     TEXT("PRECONDITION_FAILED"),
                     NodePath,
                     TEXT("Blueprint node has no persisted GUID and cannot be snapshotted deterministically."),
-                    false,
-                    TEXT("Open and resave or repair the Blueprint so every node has a valid GUID.")));
+                    TEXT("Open and resave or repair the Blueprint so every node has a valid GUID."));
             }
             if (SeenNodeGuids.Contains(Node->NodeGuid) ||
                 AssetNodeGuidCounts.FindRef(Node->NodeGuid) > 1)
             {
-                return SerializeResult(MakeFailure(
+                return Fail(
                     TEXT("PRECONDITION_FAILED"),
                     NodePath,
                     TEXT("Blueprint contains duplicate persisted node GUIDs for a selected node."),
-                    false,
-                    TEXT("Repair the duplicate node GUIDs before requesting a snapshot.")));
+                    TEXT("Repair the duplicate node GUIDs before requesting a snapshot."));
             }
             SeenNodeGuids.Add(Node->NodeGuid);
 
@@ -2952,22 +2922,20 @@ FString UMCPythonHelper::SnapshotBlueprintGraph(
                     *Pin->PinName.ToString());
                 if (!Pin->PinId.IsValid())
                 {
-                    return SerializeResult(MakeFailure(
+                    return Fail(
                         TEXT("PRECONDITION_FAILED"),
                         PinPath,
                         TEXT("Blueprint pin has no persisted GUID and cannot be snapshotted deterministically."),
-                        false,
-                        TEXT("Open and resave or repair the Blueprint so every pin has a valid GUID.")));
+                        TEXT("Open and resave or repair the Blueprint so every pin has a valid GUID."));
                 }
                 if (SeenPinGuids.Contains(Pin->PinId) ||
                     AssetPinGuidCounts.FindRef(Pin->PinId) > 1)
                 {
-                    return SerializeResult(MakeFailure(
+                    return Fail(
                         TEXT("PRECONDITION_FAILED"),
                         PinPath,
                         TEXT("Blueprint contains duplicate persisted pin GUIDs for a selected pin."),
-                        false,
-                        TEXT("Repair the duplicate pin GUIDs before requesting a snapshot.")));
+                        TEXT("Repair the duplicate pin GUIDs before requesting a snapshot."));
                 }
                 SeenPinGuids.Add(Pin->PinId);
             }
@@ -3104,10 +3072,104 @@ FString UMCPythonHelper::SnapshotBlueprintGraph(
     const FString Digest = Sha1Hex(CanonicalJsonString(
         MakeShared<FJsonValueObject>(Snapshot)));
     Snapshot->SetStringField(TEXT("digest"), TEXT("sha1:") + Digest);
+    OutSnapshot = Snapshot;
+    return true;
+}
 
+FString UMCPythonHelper::SnapshotBlueprintGraph(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+    using namespace UE::MCPython::Blueprint2;
+    if (!Blueprint)
+    {
+        return SerializeResult(MakeFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.asset_path"),
+            TEXT("Invalid Blueprint."),
+            false,
+            TEXT("Load a valid Blueprint asset and retry the snapshot.")));
+    }
+
+    const TSharedPtr<FJsonObject> Request = ParseJsonObject(RequestJson);
+    if (!Request)
+    {
+        return SerializeResult(MakeFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params"),
+            TEXT("Snapshot request must be one JSON object."),
+            false,
+            TEXT("Provide graph_ids as an optional array of stable graph IDs.")));
+    }
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Request->Values)
+    {
+        if (Field.Key != TEXT("graph_ids"))
+        {
+            return SerializeResult(MakeFailure(
+                TEXT("INVALID_INPUT"),
+                TEXT("params.") + Field.Key,
+                TEXT("Snapshot request contains an unknown field."),
+                false,
+                TEXT("Only graph_ids is accepted.")));
+        }
+    }
+
+    TArray<FString> RequestedGraphIds;
+    const TArray<TSharedPtr<FJsonValue>>* RequestedValues = nullptr;
+    if (Request->TryGetArrayField(TEXT("graph_ids"), RequestedValues))
+    {
+        if (!RequestedValues || RequestedValues->Num() > 64)
+        {
+            return SerializeResult(MakeFailure(
+                TEXT("INVALID_INPUT"),
+                TEXT("params.graph_ids"),
+                TEXT("graph_ids must contain at most 64 stable graph IDs."),
+                false,
+                TEXT("Pass an empty array to snapshot every supported graph.")));
+        }
+        TSet<FString> SeenIds;
+        for (int32 Index = 0; Index < RequestedValues->Num(); ++Index)
+        {
+            FString GraphId;
+            FGuid ParsedGuid;
+            if (!(*RequestedValues)[Index].IsValid() ||
+                !(*RequestedValues)[Index]->TryGetString(GraphId) ||
+                !ParseTargetId(GraphId, ETargetKind::Graph, ParsedGuid) ||
+                SeenIds.Contains(GraphId))
+            {
+                return SerializeResult(MakeFailure(
+                    TEXT("INVALID_INPUT"),
+                    FString::Printf(TEXT("params.graph_ids[%d]"), Index),
+                    TEXT("Each graph ID must be one unique persisted graph:<guid> ID."),
+                    false,
+                    TEXT("Inspect the Blueprint and pass stable graph IDs exactly as returned.")));
+            }
+            SeenIds.Add(GraphId);
+            RequestedGraphIds.Add(GraphId);
+        }
+    }
+    else if (Request->HasField(TEXT("graph_ids")))
+    {
+        return SerializeResult(MakeFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.graph_ids"),
+            TEXT("graph_ids must be an array."),
+            false,
+            TEXT("Pass an array of stable graph IDs or an empty array.")));
+    }
+
+    TSharedPtr<FJsonObject> Snapshot;
+    FError Error;
+    if (!BuildBlueprintGraphSnapshot(
+            Blueprint, RequestedGraphIds, Snapshot, Error))
+    {
+        return SerializeResult(MakeFailure(
+            Error.Code, Error.Path, Error.Message, false, Error.Hint));
+    }
     return SerializeResult(MakeSuccess(
         FString::Printf(
-            TEXT("Snapshotted %d Blueprint graph(s)."), GraphValues.Num()),
+            TEXT("Snapshotted %d Blueprint graph(s)."),
+            Snapshot->GetArrayField(TEXT("graphs")).Num()),
         Snapshot));
 }
 

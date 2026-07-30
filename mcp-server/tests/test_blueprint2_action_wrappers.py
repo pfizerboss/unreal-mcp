@@ -47,6 +47,7 @@ VARIABLE_SOURCE = PRIVATE / "MCPythonHelper_BlueprintVariables.cpp"
 COMPONENT_SOURCE = PRIVATE / "MCPythonHelper_BlueprintComponents.cpp"
 DIAGNOSTICS_SOURCE = PRIVATE / "MCPythonHelper_BlueprintDiagnostics.cpp"
 PALETTE_SOURCE = PRIVATE / "MCPythonHelper_BlueprintPalette.cpp"
+SEMANTIC_SOURCE = PRIVATE / "MCPythonHelper_BlueprintSemantic.cpp"
 BUILD_SOURCE = PRIVATE.parent / "UnrealMCPython.Build.cs"
 BLUEPRINT_ACTIONS = ADAPTER_FILE.with_name("blueprint_actions.py")
 EDITOR_TESTS = (
@@ -74,6 +75,18 @@ def test_palette_spawn_has_no_implicit_compile_save_or_python_escape():
     assert "EditorAssetLibrary" not in source
     assert "execute_python" not in source
     assert "UBlueprintNodeSpawner::Invoke" in source or "->Invoke(" in source
+
+
+def test_semantic_helpers_reuse_the_private_palette_interface():
+    palette_source = PALETTE_SOURCE.read_text(encoding="utf-8")
+    assert '#include "MCPythonBlueprintPaletteInternal.h"' in palette_source
+
+    # The semantic implementation is introduced by the next native slice. Keep
+    # its architectural guard active as soon as that source exists.
+    if SEMANTIC_SOURCE.exists():
+        semantic_source = SEMANTIC_SOURCE.read_text(encoding="utf-8")
+        assert '#include "MCPythonBlueprintPaletteInternal.h"' in semantic_source
+        assert "GetAllActions" not in semantic_source
 
 
 def _load_blueprint_actions(monkeypatch, helper):

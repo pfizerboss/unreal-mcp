@@ -61,15 +61,35 @@ struct FError
     FString Hint;
 };
 
+enum class EPaletteContextKind : uint8 { Graph, Pin, Connection };
+enum class EPaletteBindingKind : uint8 { Object, TemplatePin };
+
 struct FPaletteContext
 {
     FString AssetPath;
     FString GraphId;
     FString GraphSchemaPath;
+    EPaletteContextKind Kind = EPaletteContextKind::Graph;
     FString SourcePinId;
+    FString TargetPinId;
+    bool bAllowConversion = false;
     FString RequestDigest;
     FString ResultDigest;
     int32 Limit = 50;
+};
+
+struct FPaletteContextExpectation
+{
+    FString AssetPath;
+    FString GraphId;
+    FString GraphSchemaPath;
+    TOptional<EPaletteContextKind> Kind;
+    FString SourcePinId;
+    FString TargetPinId;
+    TOptional<bool> AllowConversion;
+    FString RequestDigest;
+    FString ResultDigest;
+    int32 Limit = 0;
 };
 
 struct FPaletteActionRecord
@@ -94,10 +114,79 @@ struct FPaletteCursorRecord
 
 struct FPaletteBindingRecord
 {
+    EPaletteBindingKind Kind = EPaletteBindingKind::Object;
     FString BindingId;
     FString ActionId;
     FString ObjectPath;
     FString ExpectedClassPath;
+    FString PinName;
+    FString PinDirection;
+    FString PinTypeJson;
+    int32 PinOccurrence = 0;
+};
+
+struct FReplacementMappingRecord
+{
+    FString OldPinId;
+    FString NewBindingId;
+    FString Origin;
+    FString Reason;
+};
+
+struct FReplacementConnectionRecord
+{
+    FString OldPinId;
+    FString NewBindingId;
+    FString LinkedPinId;
+    FString ResponseKind;
+    FString ResponseMessage;
+};
+
+struct FReplacementDefaultRecord
+{
+    FString OldPinId;
+    FString NewBindingId;
+    FString CanonicalValueJson;
+};
+
+struct FReplacementConnectionLossRecord
+{
+    FString OldPinId;
+    FString LinkedPinId;
+    FString Reason;
+};
+
+struct FReplacementDefaultLossRecord
+{
+    FString OldPinId;
+    FString CanonicalValueJson;
+    FString Reason;
+};
+
+struct FReplacementPlanRecord
+{
+    FString PlanId;
+    FString AssetPath;
+    FString GraphId;
+    FString GraphSchemaPath;
+    FString NodeId;
+    FString NodeSnapshotDigest;
+    FString ActionId;
+    FString ActionResultDigest;
+    TArray<FString> DynamicBindingIds;
+    TArray<FReplacementMappingRecord> Mappings;
+    TArray<FReplacementConnectionRecord> Connections;
+    TArray<FReplacementDefaultRecord> Defaults;
+    TArray<FReplacementConnectionLossRecord> LostConnections;
+    TArray<FReplacementDefaultLossRecord> LostDefaults;
+    int32 PositionX = 0;
+    int32 PositionY = 0;
+    FString Comment;
+    bool bCommentBubbleVisible = false;
+    uint8 EnabledState = 0;
+    bool bAllowConversion = false;
+    bool bAllowLoss = false;
+    int32 LossCount = 0;
 };
 
 struct FNormalizedDefault
@@ -154,7 +243,7 @@ FString Sha1Hex(const FString& Value);
 FString RegisterPaletteActionToken(FPaletteActionRecord& Record);
 bool ResolvePaletteActionToken(
     const FString& ActionId,
-    const FPaletteContext& Expected,
+    const FPaletteContextExpectation& Expected,
     FPaletteActionRecord& OutRecord,
     FError& OutError);
 FString RegisterPaletteCursor(FPaletteCursorRecord& Record);
@@ -164,14 +253,34 @@ bool ResolvePaletteCursor(
     FPaletteCursorRecord& OutRecord,
     FError& OutError);
 FString RegisterPaletteBinding(FPaletteBindingRecord& Record);
+FString RegisterPaletteTemplatePinBinding(FPaletteBindingRecord& Record);
 bool ResolvePaletteBindings(
     const FString& ActionId,
     const TArray<FString>& BindingIds,
     TArray<FPaletteBindingRecord>& OutRecords,
     FError& OutError);
+bool ResolvePaletteTemplatePinBinding(
+    const FString& ActionId,
+    const FString& BindingId,
+    FPaletteBindingRecord& OutRecord,
+    FError& OutError);
+FString RegisterReplacementPlan(FReplacementPlanRecord& Record);
+bool ResolveReplacementPlan(
+    const FString& PlanId,
+    const FString& AssetPath,
+    const FString& GraphId,
+    FReplacementPlanRecord& OutRecord,
+    FError& OutError);
+bool BuildBlueprintGraphSnapshot(
+    UBlueprint* Blueprint,
+    const TArray<FString>& GraphIds,
+    TSharedPtr<FJsonObject>& OutSnapshot,
+    FError& OutError);
 #if WITH_DEV_AUTOMATION_TESTS
 void ResetPaletteTokenStateForTests();
 void SetPaletteTokenClockForTests(const TOptional<FDateTime>& Now);
+void ResetSemanticTokenStateForTests();
+void SetSemanticTokenClockForTests(const TOptional<FDateTime>& Now);
 #endif
 FString EncodeCursor(
     const FString& AssetPath,

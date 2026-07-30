@@ -89,13 +89,40 @@ struct FPaletteTokenState
     FCriticalSection Mutex;
 };
 
+struct FStoredReplacementPlan
+{
+    FReplacementPlanRecord Record;
+    FString EditorSessionId;
+    FDateTime CreatedAt;
+    FDateTime LastUsedAt;
+};
+
+struct FSemanticTokenState
+{
+    TMap<FString, FStoredReplacementPlan> ReplacementPlans;
+    TArray<FString> ReplacementPlanOrder;
+    TOptional<FDateTime> TestNow;
+    FCriticalSection Mutex;
+};
+
 FPaletteTokenState& PaletteTokenState()
 {
     static FPaletteTokenState State;
     return State;
 }
 
+FSemanticTokenState& SemanticTokenState()
+{
+    static FSemanticTokenState State;
+    return State;
+}
+
 FDateTime PaletteNow(const FPaletteTokenState& State)
+{
+    return State.TestNow.IsSet() ? State.TestNow.GetValue() : FDateTime::UtcNow();
+}
+
+FDateTime SemanticNow(const FSemanticTokenState& State)
 {
     return State.TestNow.IsSet() ? State.TestNow.GetValue() : FDateTime::UtcNow();
 }
@@ -140,16 +167,47 @@ void SetPaletteError(
 
 FString CanonicalPaletteContext(const FPaletteContext& Context)
 {
+    const TCHAR* Kind = TEXT("graph");
+    switch (Context.Kind)
+    {
+    case EPaletteContextKind::Graph: Kind = TEXT("graph"); break;
+    case EPaletteContextKind::Pin: Kind = TEXT("pin"); break;
+    case EPaletteContextKind::Connection: Kind = TEXT("connection"); break;
+    }
     return Context.AssetPath + TEXT("\n") +
         Context.GraphId + TEXT("\n") +
         Context.GraphSchemaPath + TEXT("\n") +
+        Kind + TEXT("\n") +
         Context.SourcePinId + TEXT("\n") +
+        Context.TargetPinId + TEXT("\n") +
+        (Context.bAllowConversion ? TEXT("true") : TEXT("false")) + TEXT("\n") +
         Context.RequestDigest + TEXT("\n") +
         Context.ResultDigest + TEXT("\n") +
         FString::FromInt(Context.Limit);
 }
 
-bool PaletteContextMatches(
+bool PaletteActionContextMatches(
+    const FPaletteContext& Stored,
+    const FPaletteContextExpectation& Expected)
+{
+    auto Matches = [](const FString& StoredValue, const FString& ExpectedValue)
+    {
+        return ExpectedValue.IsEmpty() || StoredValue == ExpectedValue;
+    };
+    return Matches(Stored.AssetPath, Expected.AssetPath) &&
+        Matches(Stored.GraphId, Expected.GraphId) &&
+        Matches(Stored.GraphSchemaPath, Expected.GraphSchemaPath) &&
+        (!Expected.Kind.IsSet() || Stored.Kind == Expected.Kind.GetValue()) &&
+        Matches(Stored.SourcePinId, Expected.SourcePinId) &&
+        Matches(Stored.TargetPinId, Expected.TargetPinId) &&
+        (!Expected.AllowConversion.IsSet() ||
+            Stored.bAllowConversion == Expected.AllowConversion.GetValue()) &&
+        Matches(Stored.RequestDigest, Expected.RequestDigest) &&
+        Matches(Stored.ResultDigest, Expected.ResultDigest) &&
+        (Expected.Limit <= 0 || Stored.Limit == Expected.Limit);
+}
+
+bool PaletteCursorContextMatches(
     const FPaletteContext& Stored,
     const FPaletteContext& Expected)
 {
@@ -160,10 +218,19 @@ bool PaletteContextMatches(
     return Matches(Stored.AssetPath, Expected.AssetPath) &&
         Matches(Stored.GraphId, Expected.GraphId) &&
         Matches(Stored.GraphSchemaPath, Expected.GraphSchemaPath) &&
+        Stored.Kind == Expected.Kind &&
         Matches(Stored.SourcePinId, Expected.SourcePinId) &&
+        Matches(Stored.TargetPinId, Expected.TargetPinId) &&
+        Stored.bAllowConversion == Expected.bAllowConversion &&
         Matches(Stored.RequestDigest, Expected.RequestDigest) &&
         Matches(Stored.ResultDigest, Expected.ResultDigest) &&
         (Expected.Limit <= 0 || Stored.Limit == Expected.Limit);
+}
+
+void TouchLru(TArray<FString>& Order, const FString& Id)
+{
+    Order.Remove(Id);
+    Order.Add(Id);
 }
 
 template <typename StoredType>
@@ -207,6 +274,12 @@ void PurgeExpiredPaletteRecords(FPaletteTokenState& State, const FDateTime& Now)
     RemoveExpiredRecords(State.Actions, State.ActionOrder, Now);
     RemoveExpiredRecords(State.Cursors, State.CursorOrder, Now);
     RemoveExpiredRecords(State.Bindings, State.BindingOrder, Now);
+}
+
+void PurgeExpiredSemanticRecords(FSemanticTokenState& State, const FDateTime& Now)
+{
+    RemoveExpiredRecords(
+        State.ReplacementPlans, State.ReplacementPlanOrder, Now);
 }
 
 FString EscapeCanonicalJsonString(const FString& Value)
@@ -279,6 +352,168 @@ FString CanonicalJsonValue(const TSharedPtr<FJsonValue>& Value)
     default:
         return TEXT("null");
     }
+}
+
+FString CanonicalReplacementPlan(const FReplacementPlanRecord& Record)
+{
+    const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetStringField(TEXT("asset_path"), Record.AssetPath);
+    Root->SetStringField(TEXT("graph_id"), Record.GraphId);
+    Root->SetStringField(TEXT("graph_schema_path"), Record.GraphSchemaPath);
+    Root->SetStringField(TEXT("node_id"), Record.NodeId);
+    Root->SetStringField(TEXT("node_snapshot_digest"), Record.NodeSnapshotDigest);
+    Root->SetStringField(TEXT("action_id"), Record.ActionId);
+    Root->SetStringField(TEXT("action_result_digest"), Record.ActionResultDigest);
+
+    TArray<TSharedPtr<FJsonValue>> DynamicBindingIds;
+    for (const FString& Id : Record.DynamicBindingIds)
+    {
+        DynamicBindingIds.Add(MakeShared<FJsonValueString>(Id));
+    }
+    Root->SetArrayField(TEXT("dynamic_binding_ids"), MoveTemp(DynamicBindingIds));
+
+    TArray<TSharedPtr<FJsonValue>> Mappings;
+    for (const FReplacementMappingRecord& Item : Record.Mappings)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Item.OldPinId);
+        Value->SetStringField(TEXT("new_binding_id"), Item.NewBindingId);
+        Value->SetStringField(TEXT("origin"), Item.Origin);
+        Value->SetStringField(TEXT("reason"), Item.Reason);
+        Mappings.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    Root->SetArrayField(TEXT("mappings"), MoveTemp(Mappings));
+
+    TArray<TSharedPtr<FJsonValue>> Connections;
+    for (const FReplacementConnectionRecord& Item : Record.Connections)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Item.OldPinId);
+        Value->SetStringField(TEXT("new_binding_id"), Item.NewBindingId);
+        Value->SetStringField(TEXT("linked_pin_id"), Item.LinkedPinId);
+        Value->SetStringField(TEXT("response_kind"), Item.ResponseKind);
+        Value->SetStringField(TEXT("response_message"), Item.ResponseMessage);
+        Connections.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    Root->SetArrayField(TEXT("connections"), MoveTemp(Connections));
+
+    TArray<TSharedPtr<FJsonValue>> Defaults;
+    for (const FReplacementDefaultRecord& Item : Record.Defaults)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Item.OldPinId);
+        Value->SetStringField(TEXT("new_binding_id"), Item.NewBindingId);
+        Value->SetStringField(TEXT("canonical_value_json"), Item.CanonicalValueJson);
+        Defaults.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    Root->SetArrayField(TEXT("defaults"), MoveTemp(Defaults));
+
+    TArray<TSharedPtr<FJsonValue>> LostConnections;
+    for (const FReplacementConnectionLossRecord& Item : Record.LostConnections)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Item.OldPinId);
+        Value->SetStringField(TEXT("linked_pin_id"), Item.LinkedPinId);
+        Value->SetStringField(TEXT("reason"), Item.Reason);
+        LostConnections.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    Root->SetArrayField(TEXT("lost_connections"), MoveTemp(LostConnections));
+
+    TArray<TSharedPtr<FJsonValue>> LostDefaults;
+    for (const FReplacementDefaultLossRecord& Item : Record.LostDefaults)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Item.OldPinId);
+        Value->SetStringField(TEXT("canonical_value_json"), Item.CanonicalValueJson);
+        Value->SetStringField(TEXT("reason"), Item.Reason);
+        LostDefaults.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    Root->SetArrayField(TEXT("lost_defaults"), MoveTemp(LostDefaults));
+
+    Root->SetNumberField(TEXT("position_x"), Record.PositionX);
+    Root->SetNumberField(TEXT("position_y"), Record.PositionY);
+    Root->SetStringField(TEXT("comment"), Record.Comment);
+    Root->SetBoolField(
+        TEXT("comment_bubble_visible"), Record.bCommentBubbleVisible);
+    Root->SetNumberField(TEXT("enabled_state"), Record.EnabledState);
+    Root->SetBoolField(TEXT("allow_conversion"), Record.bAllowConversion);
+    Root->SetBoolField(TEXT("allow_loss"), Record.bAllowLoss);
+    Root->SetNumberField(TEXT("loss_count"), Record.LossCount);
+    return CanonicalJsonValue(MakeShared<FJsonValueObject>(Root));
+}
+
+bool IsReplacementPlanValid(const FReplacementPlanRecord& Record)
+{
+    FGuid Ignored;
+    if (Record.AssetPath.IsEmpty() || Record.GraphSchemaPath.IsEmpty() ||
+        !ParseTargetId(Record.GraphId, ETargetKind::Graph, Ignored) ||
+        !ParseTargetId(Record.NodeId, ETargetKind::Node, Ignored) ||
+        !IsOpaqueToken(Record.NodeSnapshotDigest, TEXT("sha1:")) ||
+        !IsOpaqueToken(Record.ActionId, TEXT("action:")) ||
+        !IsOpaqueToken(Record.ActionResultDigest, TEXT("sha1:")) ||
+        Record.LossCount < 0)
+    {
+        return false;
+    }
+
+    TSet<FString> UniqueBindings;
+    for (const FString& Id : Record.DynamicBindingIds)
+    {
+        if (!IsOpaqueToken(Id, TEXT("binding:")) || UniqueBindings.Contains(Id))
+        {
+            return false;
+        }
+        UniqueBindings.Add(Id);
+    }
+    auto IsPinId = [](const FString& Id)
+    {
+        FGuid Guid;
+        return ParseTargetId(Id, ETargetKind::Pin, Guid);
+    };
+    for (const FReplacementMappingRecord& Item : Record.Mappings)
+    {
+        if (!IsPinId(Item.OldPinId) ||
+            !IsOpaqueToken(Item.NewBindingId, TEXT("binding:")) ||
+            Item.Origin.IsEmpty() || Item.Reason.IsEmpty())
+        {
+            return false;
+        }
+    }
+    for (const FReplacementConnectionRecord& Item : Record.Connections)
+    {
+        if (!IsPinId(Item.OldPinId) || !IsPinId(Item.LinkedPinId) ||
+            !IsOpaqueToken(Item.NewBindingId, TEXT("binding:")) ||
+            Item.ResponseKind.IsEmpty())
+        {
+            return false;
+        }
+    }
+    for (const FReplacementDefaultRecord& Item : Record.Defaults)
+    {
+        if (!IsPinId(Item.OldPinId) ||
+            !IsOpaqueToken(Item.NewBindingId, TEXT("binding:")) ||
+            Item.CanonicalValueJson.IsEmpty())
+        {
+            return false;
+        }
+    }
+    for (const FReplacementConnectionLossRecord& Item : Record.LostConnections)
+    {
+        if (!IsPinId(Item.OldPinId) || !IsPinId(Item.LinkedPinId) ||
+            Item.Reason.IsEmpty())
+        {
+            return false;
+        }
+    }
+    for (const FReplacementDefaultLossRecord& Item : Record.LostDefaults)
+    {
+        if (!IsPinId(Item.OldPinId) || Item.CanonicalValueJson.IsEmpty() ||
+            Item.Reason.IsEmpty())
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 const FTransaction* TransactionAtIndex(int32 TransactionIndex)
@@ -2059,7 +2294,7 @@ FString RegisterPaletteActionToken(FPaletteActionRecord& Record)
 
 bool ResolvePaletteActionToken(
     const FString& ActionId,
-    const FPaletteContext& Expected,
+    const FPaletteContextExpectation& Expected,
     FPaletteActionRecord& OutRecord,
     FError& OutError)
 {
@@ -2092,7 +2327,7 @@ bool ResolvePaletteActionToken(
         return false;
     }
     if (Stored->EditorSessionId != CurrentPaletteSessionId() ||
-        !PaletteContextMatches(Stored->Record.Context, Expected))
+        !PaletteActionContextMatches(Stored->Record.Context, Expected))
     {
         SetPaletteError(
             OutError,
@@ -2183,7 +2418,7 @@ bool ResolvePaletteCursor(
         return false;
     }
     if (Stored->EditorSessionId != CurrentPaletteSessionId() ||
-        !PaletteContextMatches(Stored->Record.Context, Expected))
+        !PaletteCursorContextMatches(Stored->Record.Context, Expected))
     {
         SetPaletteError(
             OutError,
@@ -2201,7 +2436,8 @@ bool ResolvePaletteCursor(
 
 FString RegisterPaletteBinding(FPaletteBindingRecord& Record)
 {
-    if (!IsOpaqueToken(Record.ActionId, TEXT("action:")) ||
+    if (Record.Kind != EPaletteBindingKind::Object ||
+        !IsOpaqueToken(Record.ActionId, TEXT("action:")) ||
         Record.ObjectPath.IsEmpty() ||
         Record.ExpectedClassPath.IsEmpty())
     {
@@ -2221,6 +2457,7 @@ FString RegisterPaletteBinding(FPaletteBindingRecord& Record)
     {
         Existing->Record = Record;
         Existing->LastUsedAt = Now;
+        TouchLru(State.BindingOrder, Record.BindingId);
         return Record.BindingId;
     }
 
@@ -2230,7 +2467,50 @@ FString RegisterPaletteBinding(FPaletteBindingRecord& Record)
     Stored.CreatedAt = Now;
     Stored.LastUsedAt = Now;
     State.Bindings.Add(Record.BindingId, MoveTemp(Stored));
-    State.BindingOrder.Add(Record.BindingId);
+    TouchLru(State.BindingOrder, Record.BindingId);
+    EnforceRecordBound(State.Bindings, State.BindingOrder, 1024);
+    return Record.BindingId;
+}
+
+FString RegisterPaletteTemplatePinBinding(FPaletteBindingRecord& Record)
+{
+    if (Record.Kind != EPaletteBindingKind::TemplatePin ||
+        !IsOpaqueToken(Record.ActionId, TEXT("action:")) ||
+        Record.PinName.IsEmpty() ||
+        (Record.PinDirection != TEXT("input") &&
+            Record.PinDirection != TEXT("output")) ||
+        Record.PinTypeJson.IsEmpty() ||
+        Record.PinOccurrence < 0)
+    {
+        return FString();
+    }
+
+    const FString SessionId = CurrentPaletteSessionId();
+    Record.BindingId = TEXT("binding:") + Sha1(
+        SessionId + TEXT("\n") + Record.ActionId + TEXT("\n") +
+        TEXT("template-pin\n") + Record.PinName + TEXT("\n") +
+        Record.PinDirection + TEXT("\n") + Record.PinTypeJson + TEXT("\n") +
+        FString::FromInt(Record.PinOccurrence));
+
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    if (FStoredPaletteBinding* Existing = State.Bindings.Find(Record.BindingId))
+    {
+        Existing->Record = Record;
+        Existing->LastUsedAt = Now;
+        TouchLru(State.BindingOrder, Record.BindingId);
+        return Record.BindingId;
+    }
+
+    FStoredPaletteBinding Stored;
+    Stored.Record = Record;
+    Stored.EditorSessionId = SessionId;
+    Stored.CreatedAt = Now;
+    Stored.LastUsedAt = Now;
+    State.Bindings.Add(Record.BindingId, MoveTemp(Stored));
+    TouchLru(State.BindingOrder, Record.BindingId);
     EnforceRecordBound(State.Bindings, State.BindingOrder, 1024);
     return Record.BindingId;
 }
@@ -2277,6 +2557,7 @@ bool ResolvePaletteBindings(
 
         FStoredPaletteBinding* Stored = State.Bindings.Find(BindingId);
         if (!Stored || Stored->EditorSessionId != CurrentPaletteSessionId() ||
+            Stored->Record.Kind != EPaletteBindingKind::Object ||
             Stored->Record.ActionId != ActionId)
         {
             SetPaletteError(
@@ -2289,8 +2570,142 @@ bool ResolvePaletteBindings(
             return false;
         }
         Stored->LastUsedAt = Now;
+        TouchLru(State.BindingOrder, BindingId);
         OutRecords.Add(Stored->Record);
     }
+    return true;
+}
+
+bool ResolvePaletteTemplatePinBinding(
+    const FString& ActionId,
+    const FString& BindingId,
+    FPaletteBindingRecord& OutRecord,
+    FError& OutError)
+{
+    OutRecord = FPaletteBindingRecord{};
+    OutError = FError{};
+    if (!IsOpaqueToken(ActionId, TEXT("action:")) ||
+        !IsOpaqueToken(BindingId, TEXT("binding:")))
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.connection_binding_id"),
+            TEXT("A valid action_id and opaque template-pin binding ID are required."),
+            TEXT("Use a connection binding returned for the selected palette action."));
+        return false;
+    }
+
+    FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = PaletteNow(State);
+    PurgeExpiredPaletteRecords(State, Now);
+    FStoredPaletteBinding* Stored = State.Bindings.Find(BindingId);
+    if (!Stored || Stored->EditorSessionId != CurrentPaletteSessionId() ||
+        Stored->Record.Kind != EPaletteBindingKind::TemplatePin ||
+        Stored->Record.ActionId != ActionId)
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.connection_binding_id"),
+            TEXT("Template-pin binding is unknown, expired, or belongs to another action."),
+            TEXT("Request current pin suggestions and use one returned connection binding."));
+        return false;
+    }
+    Stored->LastUsedAt = Now;
+    TouchLru(State.BindingOrder, BindingId);
+    OutRecord = Stored->Record;
+    return true;
+}
+
+FString RegisterReplacementPlan(FReplacementPlanRecord& Record)
+{
+    if (!IsReplacementPlanValid(Record))
+    {
+        return FString();
+    }
+    Record.DynamicBindingIds.Sort();
+    const FString SessionId = CurrentPaletteSessionId();
+    Record.PlanId = TEXT("replacement-plan:") + Sha1(
+        SessionId + TEXT("\n") + CanonicalReplacementPlan(Record));
+
+    FSemanticTokenState& State = SemanticTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = SemanticNow(State);
+    PurgeExpiredSemanticRecords(State, Now);
+    if (FStoredReplacementPlan* Existing =
+            State.ReplacementPlans.Find(Record.PlanId))
+    {
+        Existing->Record = Record;
+        Existing->LastUsedAt = Now;
+        TouchLru(State.ReplacementPlanOrder, Record.PlanId);
+        return Record.PlanId;
+    }
+
+    FStoredReplacementPlan Stored;
+    Stored.Record = Record;
+    Stored.EditorSessionId = SessionId;
+    Stored.CreatedAt = Now;
+    Stored.LastUsedAt = Now;
+    State.ReplacementPlans.Add(Record.PlanId, MoveTemp(Stored));
+    TouchLru(State.ReplacementPlanOrder, Record.PlanId);
+    EnforceRecordBound(
+        State.ReplacementPlans, State.ReplacementPlanOrder, 1024);
+    return Record.PlanId;
+}
+
+bool ResolveReplacementPlan(
+    const FString& PlanId,
+    const FString& AssetPath,
+    const FString& GraphId,
+    FReplacementPlanRecord& OutRecord,
+    FError& OutError)
+{
+    OutRecord = FReplacementPlanRecord{};
+    OutError = FError{};
+    if (!IsOpaqueToken(PlanId, TEXT("replacement-plan:")))
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("replacement_plan_id must be an opaque replacement-plan token."),
+            TEXT("Preview the replacement again and use the returned plan ID unchanged."));
+        return false;
+    }
+
+    FSemanticTokenState& State = SemanticTokenState();
+    FScopeLock Lock(&State.Mutex);
+    const FDateTime Now = SemanticNow(State);
+    PurgeExpiredSemanticRecords(State, Now);
+    FStoredReplacementPlan* Stored = State.ReplacementPlans.Find(PlanId);
+    if (!Stored)
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("replacement_plan_id is unknown, expired, evicted, or tampered."),
+            TEXT("Preview the replacement again and use the current plan ID."));
+        return false;
+    }
+    if (Stored->EditorSessionId != CurrentPaletteSessionId() ||
+        Stored->Record.AssetPath != AssetPath ||
+        Stored->Record.GraphId != GraphId)
+    {
+        SetPaletteError(
+            OutError,
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("replacement_plan_id no longer matches the editor, asset, or graph."),
+            TEXT("Preview the replacement again in the current graph context."));
+        return false;
+    }
+
+    Stored->LastUsedAt = Now;
+    TouchLru(State.ReplacementPlanOrder, PlanId);
+    OutRecord = Stored->Record;
     return true;
 }
 
@@ -2310,6 +2725,21 @@ void ResetPaletteTokenStateForTests()
 void SetPaletteTokenClockForTests(const TOptional<FDateTime>& Now)
 {
     FPaletteTokenState& State = PaletteTokenState();
+    FScopeLock Lock(&State.Mutex);
+    State.TestNow = Now;
+}
+
+void ResetSemanticTokenStateForTests()
+{
+    FSemanticTokenState& State = SemanticTokenState();
+    FScopeLock Lock(&State.Mutex);
+    State.ReplacementPlans.Reset();
+    State.ReplacementPlanOrder.Reset();
+}
+
+void SetSemanticTokenClockForTests(const TOptional<FDateTime>& Now)
+{
+    FSemanticTokenState& State = SemanticTokenState();
     FScopeLock Lock(&State.Mutex);
     State.TestNow = Now;
 }

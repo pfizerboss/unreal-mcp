@@ -3,6 +3,7 @@
 #include "MCPythonHelper.h"
 
 #include "MCPythonBlueprint2Internal.h"
+#include "MCPythonBlueprintPaletteInternal.h"
 
 #include "BlueprintActionDatabase.h"
 #include "BlueprintActionFilter.h"
@@ -27,17 +28,9 @@
 #include "UObject/ObjectKey.h"
 #include "UObject/UObjectGlobals.h"
 
-namespace
+namespace UE::MCPython::Blueprint2::Palette
 {
 using namespace UE::MCPython::Blueprint2;
-
-struct FPaletteFilters
-{
-    TSet<FString> ActionKinds;
-    TArray<FString> CategoryPrefixes;
-    TSet<FString> OwnerPaths;
-    bool bPureOnly = false;
-};
 
 struct FPaletteRequest
 {
@@ -58,34 +51,6 @@ struct FPaletteSpawnRequest
     TArray<FString> BindingIds;
 };
 
-struct FPaletteBindingCandidate
-{
-    FString ObjectPath;
-    FString ClassPath;
-};
-
-struct FPaletteCandidate
-{
-    const UObject* Owner = nullptr;
-    const UBlueprintNodeSpawner* Spawner = nullptr;
-    IBlueprintNodeBinder::FBindingSet Bindings;
-    TArray<FPaletteBindingCandidate> BindingDetails;
-    FString CandidateKey;
-    FString SpawnerSignature;
-    FString OwnerPath;
-    FString MemberPath;
-    FString NodeClassPath;
-    FString Title;
-    FString Category;
-    FString Tooltip;
-    FString DocumentationLink;
-    FString DocumentationExcerpt;
-    TArray<FString> Keywords;
-    FString ActionKind;
-    TOptional<bool> bPure;
-    int32 Score = 0;
-    FString SortKey;
-};
 
 FString Failure(const FError& Error, const bool bRetryable = false)
 {
@@ -769,6 +734,28 @@ bool ResolveBindingObjects(
     return true;
 }
 
+bool ResolveDynamicBindingObjects(
+    const FString& ActionId,
+    const TArray<FString>& BindingIds,
+    TArray<FPaletteBindingRecord>& OutRecords,
+    IBlueprintNodeBinder::FBindingSet& OutBindings,
+    FError& OutError)
+{
+    return ResolvePaletteBindings(
+            ActionId, BindingIds, OutRecords, OutError) &&
+        ResolveBindingObjects(OutRecords, OutBindings, OutError);
+}
+
+UEdGraphNode* GetBoundTemplateNode(
+    const FPaletteCandidate& Candidate,
+    UEdGraph* Graph,
+    const IBlueprintNodeBinder::FBindingSet& Bindings)
+{
+    return Candidate.Spawner
+        ? Candidate.Spawner->GetTemplateNode(Graph, Bindings)
+        : nullptr;
+}
+
 FString Normalize(const FString& Value)
 {
     return Value.TrimStartAndEnd().ToLower();
@@ -1072,7 +1059,7 @@ void BuildBindingDetails(FPaletteCandidate& Candidate)
 bool BuildCandidates(
     UBlueprint* Blueprint,
     UEdGraph* Graph,
-    UEdGraphPin* SourcePin,
+    TConstArrayView<UEdGraphPin*> ContextPins,
     const FString& Query,
     const FPaletteFilters& Filters,
     TArray<FPaletteCandidate>& OutCandidates)
@@ -1085,18 +1072,22 @@ bool BuildCandidates(
     FBlueprintActionFilter NativeFilter(FilterFlags);
     NativeFilter.Context.Blueprints.Add(Blueprint);
     NativeFilter.Context.Graphs.Add(Graph);
-    if (SourcePin)
+    for (UEdGraphPin* ContextPin : ContextPins)
     {
-        NativeFilter.Context.Pins.Add(SourcePin);
+        if (!ContextPin)
+        {
+            continue;
+        }
+        NativeFilter.Context.Pins.Add(ContextPin);
         if (UClass* PinClass = Cast<UClass>(
-                SourcePin->PinType.PinSubCategoryObject.Get()))
+                ContextPin->PinType.PinSubCategoryObject.Get()))
         {
             FBlueprintActionFilter::AddUnique(
                 NativeFilter.TargetClasses, PinClass);
         }
         const UEdGraphSchema_K2* K2Schema = Cast<UEdGraphSchema_K2>(
             Graph->GetSchema());
-        UEdGraphNode* OwningNode = SourcePin->GetOwningNodeUnchecked();
+        UEdGraphNode* OwningNode = ContextPin->GetOwningNodeUnchecked();
         if (K2Schema && OwningNode)
         {
             if (UEdGraphPin* SelfPin = K2Schema->FindSelfPin(
@@ -1213,6 +1204,34 @@ bool BuildCandidates(
     return true;
 }
 
+bool BuildCandidatesForSourcePin(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    UEdGraphPin* SourcePin,
+    const FString& Query,
+    const FPaletteFilters& Filters,
+    TArray<FPaletteCandidate>& OutCandidates)
+{
+    if (!SourcePin)
+    {
+        return BuildCandidates(
+            Blueprint,
+            Graph,
+            TConstArrayView<UEdGraphPin*>(),
+            Query,
+            Filters,
+            OutCandidates);
+    }
+    UEdGraphPin* ContextPins[] = {SourcePin};
+    return BuildCandidates(
+        Blueprint,
+        Graph,
+        MakeArrayView(ContextPins),
+        Query,
+        Filters,
+        OutCandidates);
+}
+
 FString ResultDigest(const TArray<FPaletteCandidate>& Candidates)
 {
     TArray<TSharedPtr<FJsonValue>> Keys;
@@ -1272,6 +1291,9 @@ FPaletteContext MakeContext(
     Context.AssetPath = Blueprint->GetPathName();
     Context.GraphId = Request.GraphId;
     Context.GraphSchemaPath = Graph->GetSchema()->GetClass()->GetPathName();
+    Context.Kind = SourcePinId.IsEmpty()
+        ? EPaletteContextKind::Graph
+        : EPaletteContextKind::Pin;
     Context.SourcePinId = SourcePinId;
     Context.RequestDigest = RequestDigest(Request);
     Context.ResultDigest = Digest;
@@ -1357,6 +1379,172 @@ TSharedRef<FJsonObject> SerializeCard(
     return Card;
 }
 
+struct FConnectionBindingSuggestion
+{
+    FString BindingId;
+    FString PinName;
+    FString Direction;
+    FString TypeJson;
+    TSharedRef<FJsonObject> Type = MakeShared<FJsonObject>();
+    FString ResponseKind;
+    FString ResponseMessage;
+    bool bRequiresConversion = false;
+    int32 Occurrence = 0;
+};
+
+bool ClassifyConnectionResponse(
+    const FPinConnectionResponse& Response,
+    FString& OutKind,
+    bool& bOutRequiresConversion)
+{
+    bOutRequiresConversion = false;
+    switch (Response.Response)
+    {
+    case CONNECT_RESPONSE_MAKE:
+        OutKind = TEXT("direct");
+        return true;
+    case CONNECT_RESPONSE_BREAK_OTHERS_A:
+        OutKind = TEXT("break_planned_source_link");
+        return true;
+    case CONNECT_RESPONSE_BREAK_OTHERS_B:
+        OutKind = TEXT("break_planned_target_link");
+        return true;
+    case CONNECT_RESPONSE_BREAK_OTHERS_AB:
+        OutKind = TEXT("break_planned_both_links");
+        return true;
+    case CONNECT_RESPONSE_MAKE_WITH_CONVERSION_NODE:
+        OutKind = TEXT("conversion_node");
+        bOutRequiresConversion = true;
+        return true;
+    case CONNECT_RESPONSE_MAKE_WITH_PROMOTION:
+        OutKind = TEXT("promotion");
+        bOutRequiresConversion = true;
+        return true;
+    default:
+        return false;
+    }
+}
+
+void BuildConnectionBindingSuggestions(
+    const FPaletteCandidate& Candidate,
+    UEdGraph* Graph,
+    UEdGraphPin* SourcePin,
+    TArray<FConnectionBindingSuggestion>& OutSuggestions)
+{
+    OutSuggestions.Reset();
+    UEdGraphNode* TemplateNode = GetBoundTemplateNode(
+        Candidate, Graph, Candidate.Bindings);
+    const UEdGraphSchema* Schema = Graph ? Graph->GetSchema() : nullptr;
+    TMap<FString, int32> Occurrences;
+    if (TemplateNode && SourcePin && Schema)
+    {
+        for (UEdGraphPin* TemplatePin : TemplateNode->Pins)
+        {
+            if (!TemplatePin || TemplatePin->bHidden ||
+                TemplatePin->Direction == SourcePin->Direction ||
+                OutSuggestions.Num() >= 256)
+            {
+                continue;
+            }
+            const FPinConnectionResponse Response =
+                Schema->CanCreateConnection(SourcePin, TemplatePin);
+            FString ResponseKind;
+            bool bRequiresConversion = false;
+            if (!ClassifyConnectionResponse(
+                    Response, ResponseKind, bRequiresConversion))
+            {
+                continue;
+            }
+
+            FConnectionBindingSuggestion Suggestion;
+            Suggestion.PinName = TemplatePin->PinName.ToString();
+            Suggestion.Direction = TemplatePin->Direction == EGPD_Input
+                ? TEXT("input")
+                : TEXT("output");
+            Suggestion.Type = SerializeTypeSpec(TemplatePin->PinType);
+            Suggestion.TypeJson = CanonicalJsonString(
+                MakeShared<FJsonValueObject>(Suggestion.Type));
+            Suggestion.ResponseKind = MoveTemp(ResponseKind);
+            Suggestion.ResponseMessage = Response.Message.ToString();
+            Suggestion.bRequiresConversion = bRequiresConversion;
+            const FString Signature = Suggestion.PinName + TEXT("\n") +
+                Suggestion.Direction + TEXT("\n") + Suggestion.TypeJson;
+            Suggestion.Occurrence = Occurrences.FindOrAdd(Signature)++;
+
+            OutSuggestions.Add(MoveTemp(Suggestion));
+        }
+    }
+}
+
+bool AddConnectionBindings(
+    const FString& ActionId,
+    TArray<FConnectionBindingSuggestion>& Suggestions,
+    const TSharedRef<FJsonObject>& Card)
+{
+    for (FConnectionBindingSuggestion& Suggestion : Suggestions)
+    {
+        FPaletteBindingRecord Binding;
+        Binding.Kind = EPaletteBindingKind::TemplatePin;
+        Binding.ActionId = ActionId;
+        Binding.PinName = Suggestion.PinName;
+        Binding.PinDirection = Suggestion.Direction;
+        Binding.PinTypeJson = Suggestion.TypeJson;
+        Binding.PinOccurrence = Suggestion.Occurrence;
+        Suggestion.BindingId = RegisterPaletteTemplatePinBinding(Binding);
+        if (Suggestion.BindingId.IsEmpty())
+        {
+            return false;
+        }
+    }
+
+    Suggestions.Sort([](
+        const FConnectionBindingSuggestion& Left,
+        const FConnectionBindingSuggestion& Right)
+    {
+        if (Left.bRequiresConversion != Right.bRequiresConversion)
+        {
+            return !Left.bRequiresConversion;
+        }
+        const FString LeftName = Normalize(Left.PinName);
+        const FString RightName = Normalize(Right.PinName);
+        if (LeftName != RightName)
+        {
+            return LeftName < RightName;
+        }
+        if (Left.TypeJson != Right.TypeJson)
+        {
+            return Left.TypeJson < Right.TypeJson;
+        }
+        if (Left.Occurrence != Right.Occurrence)
+        {
+            return Left.Occurrence < Right.Occurrence;
+        }
+        return Left.BindingId < Right.BindingId;
+    });
+
+    TArray<TSharedPtr<FJsonValue>> Values;
+    Values.Reserve(Suggestions.Num());
+    for (int32 Index = 0; Index < Suggestions.Num(); ++Index)
+    {
+        const FConnectionBindingSuggestion& Suggestion = Suggestions[Index];
+        const TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+        Response->SetStringField(TEXT("kind"), Suggestion.ResponseKind);
+        Response->SetStringField(TEXT("message"), Suggestion.ResponseMessage);
+        Response->SetBoolField(
+            TEXT("requires_conversion"), Suggestion.bRequiresConversion);
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("binding_id"), Suggestion.BindingId);
+        Value->SetStringField(TEXT("pin_name"), Suggestion.PinName);
+        Value->SetStringField(TEXT("direction"), Suggestion.Direction);
+        Value->SetObjectField(TEXT("type"), Suggestion.Type);
+        Value->SetObjectField(TEXT("response"), Response);
+        Value->SetNumberField(TEXT("rank"), Index);
+        Values.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    Card->SetArrayField(TEXT("connection_bindings"), MoveTemp(Values));
+    return true;
+}
+
 void SetSourcePinField(
     const TSharedRef<FJsonObject>& Object,
     const FString& SourcePinId)
@@ -1380,7 +1568,7 @@ TSharedRef<FJsonObject> SearchPalette(
     FError& OutError)
 {
     TArray<FPaletteCandidate> Candidates;
-    BuildCandidates(
+    BuildCandidatesForSourcePin(
         Blueprint, Graph, SourcePin, Request.Query, Request.Filters, Candidates);
     const FString Digest = ResultDigest(Candidates);
     const FPaletteContext Context = MakeContext(
@@ -1411,24 +1599,74 @@ TSharedRef<FJsonObject> SearchPalette(
         }
     }
 
-    const int32 EndIndex = FMath::Min(StartIndex + Request.Limit, Candidates.Num());
     TArray<TSharedPtr<FJsonValue>> Items;
-    Items.Reserve(EndIndex - StartIndex);
-    for (int32 Index = StartIndex; Index < EndIndex; ++Index)
+    Items.Reserve(FMath::Min(Request.Limit, Candidates.Num() - StartIndex));
+    static constexpr int32 MaximumReturnedBindings = 1024;
+    int32 ReturnedBindingCount = 0;
+    int32 NextCandidateIndex = StartIndex;
+    while (NextCandidateIndex < Candidates.Num() &&
+        Items.Num() < Request.Limit)
     {
-        Items.Add(MakeShared<FJsonValueObject>(SerializeCard(
+        const int32 Index = NextCandidateIndex;
+        TArray<FConnectionBindingSuggestion> ConnectionBindings;
+        if (SourcePin)
+        {
+            BuildConnectionBindingSuggestions(
+                Candidates[Index], Graph, SourcePin, ConnectionBindings);
+            if (ConnectionBindings.IsEmpty())
+            {
+                ++NextCandidateIndex;
+                continue;
+            }
+        }
+
+        const int32 CandidateBindingCount =
+            Candidates[Index].BindingDetails.Num() + ConnectionBindings.Num();
+        if (CandidateBindingCount > MaximumReturnedBindings)
+        {
+            ++NextCandidateIndex;
+            continue;
+        }
+        if (ReturnedBindingCount + CandidateBindingCount >
+            MaximumReturnedBindings)
+        {
+            break;
+        }
+
+        ++NextCandidateIndex;
+        const TSharedRef<FJsonObject> Card = SerializeCard(
             Candidates[Index],
             Context,
             Request.Query,
-            Request.FiltersJson)));
+            Request.FiltersJson);
+        if (SourcePin)
+        {
+            if (!AddConnectionBindings(
+                    Card->GetStringField(TEXT("action_id")),
+                    ConnectionBindings,
+                    Card))
+            {
+                OutError.Code = TEXT("OPERATION_FAILED");
+                OutError.Path = TEXT("data.items");
+                OutError.Message = TEXT(
+                    "Failed to register one compatible template-pin binding.");
+                OutError.Hint = TEXT(
+                    "Repeat pin suggestions in the current editor session.");
+                return MakeShared<FJsonObject>();
+            }
+        }
+        ReturnedBindingCount += CandidateBindingCount;
+        Items.Add(MakeShared<FJsonValueObject>(Card));
     }
 
     FString NextCursor;
-    if (EndIndex < Candidates.Num() && EndIndex > StartIndex)
+    if (NextCandidateIndex < Candidates.Num() &&
+        NextCandidateIndex > StartIndex)
     {
         FPaletteCursorRecord CursorRecord;
         CursorRecord.Context = Context;
-        CursorRecord.LastSortKey = Candidates[EndIndex - 1].SortKey;
+        CursorRecord.LastSortKey =
+            Candidates[NextCandidateIndex - 1].SortKey;
         NextCursor = RegisterPaletteCursor(CursorRecord);
     }
 
@@ -1436,9 +1674,10 @@ TSharedRef<FJsonObject> SearchPalette(
     Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
     Data->SetStringField(TEXT("graph_id"), Request.GraphId);
     SetSourcePinField(Data, SourcePinId);
+    const int32 ReturnedCount = Items.Num();
     Data->SetArrayField(TEXT("items"), MoveTemp(Items));
     Data->SetNumberField(TEXT("total_count"), Candidates.Num());
-    Data->SetNumberField(TEXT("returned_count"), EndIndex - StartIndex);
+    Data->SetNumberField(TEXT("returned_count"), ReturnedCount);
     Data->SetStringField(TEXT("next_cursor"), NextCursor);
     Data->SetStringField(TEXT("result_digest"), Digest);
     return Data;
@@ -1627,6 +1866,8 @@ UBlueprint* ResolveBlueprintAsset(const FString& AssetPath)
 }
 }
 
+using namespace UE::MCPython::Blueprint2::Palette;
+
 FString UMCPythonHelper::SearchBlueprintNodeActions(
     UBlueprint* Blueprint,
     const FString& RequestJson)
@@ -1704,8 +1945,7 @@ FString UMCPythonHelper::DescribeBlueprintNodeAction(
         return Failure(Error);
     }
 
-    FPaletteContext AnyContext;
-    AnyContext.Limit = 0;
+    FPaletteContextExpectation AnyContext;
     FPaletteActionRecord ActionRecord;
     if (!ResolvePaletteActionToken(
             ActionId, AnyContext, ActionRecord, Error))
@@ -1757,7 +1997,7 @@ FString UMCPythonHelper::DescribeBlueprintNodeAction(
         return Failure(Error);
     }
     TArray<FPaletteCandidate> Candidates;
-    BuildCandidates(
+    BuildCandidatesForSourcePin(
         Blueprint, Graph, SourcePin, ActionRecord.Query, Filters, Candidates);
     if (ResultDigest(Candidates) != ActionRecord.Context.ResultDigest)
     {
@@ -1847,10 +2087,9 @@ FString UMCPythonHelper::AddBlueprintActionNode(
         return Failure(Error);
     }
 
-    FPaletteContext ExpectedContext;
+    FPaletteContextExpectation ExpectedContext;
     ExpectedContext.AssetPath = Blueprint->GetPathName();
     ExpectedContext.GraphId = Request.GraphId;
-    ExpectedContext.Limit = 0;
     FPaletteActionRecord ActionRecord;
     if (!ResolvePaletteActionToken(
             Request.ActionId, ExpectedContext, ActionRecord, Error))
@@ -1894,7 +2133,7 @@ FString UMCPythonHelper::AddBlueprintActionNode(
             TEXT("Repeat palette search."));
     }
     TArray<FPaletteCandidate> Candidates;
-    BuildCandidates(
+    BuildCandidatesForSourcePin(
         Blueprint,
         Graph,
         SourcePin,
@@ -1921,10 +2160,12 @@ FString UMCPythonHelper::AddBlueprintActionNode(
     }
 
     TArray<FPaletteBindingRecord> BindingRecords;
-    if (!ResolvePaletteBindings(
+    IBlueprintNodeBinder::FBindingSet ResolvedBindings;
+    if (!ResolveDynamicBindingObjects(
             Request.ActionId,
             Request.BindingIds,
             BindingRecords,
+            ResolvedBindings,
             Error))
     {
         return Failure(Error);
@@ -1943,12 +2184,6 @@ FString UMCPythonHelper::AddBlueprintActionNode(
             TEXT("bindings must contain exactly the IDs returned for this action."),
             TEXT("Search again and pass the selected action's complete bindings array."));
     }
-    IBlueprintNodeBinder::FBindingSet ResolvedBindings;
-    if (!ResolveBindingObjects(BindingRecords, ResolvedBindings, Error))
-    {
-        return Failure(Error);
-    }
-
     TMap<UEdGraphNode*, FString> NodesBefore;
     for (UEdGraphNode* Node : Graph->Nodes)
     {

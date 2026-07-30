@@ -39,6 +39,52 @@ FPaletteContext MakeContext()
     return Context;
 }
 
+FPaletteContext MakeConnectionContext(const bool bAllowConversion)
+{
+    FPaletteContext Context = MakeContext();
+    Context.Kind = EPaletteContextKind::Connection;
+    Context.SourcePinId =
+        TEXT("pin:22222222-2222-4222-8222-222222222222");
+    Context.TargetPinId =
+        TEXT("pin:33333333-3333-4333-8333-333333333333");
+    Context.bAllowConversion = bAllowConversion;
+    return Context;
+}
+
+FPaletteContextExpectation ExpectContext(const FPaletteContext& Context)
+{
+    FPaletteContextExpectation Expected;
+    Expected.AssetPath = Context.AssetPath;
+    Expected.GraphId = Context.GraphId;
+    Expected.GraphSchemaPath = Context.GraphSchemaPath;
+    Expected.Kind = Context.Kind;
+    Expected.SourcePinId = Context.SourcePinId;
+    Expected.TargetPinId = Context.TargetPinId;
+    Expected.AllowConversion = Context.bAllowConversion;
+    Expected.RequestDigest = Context.RequestDigest;
+    Expected.ResultDigest = Context.ResultDigest;
+    Expected.Limit = Context.Limit;
+    return Expected;
+}
+
+FReplacementPlanRecord MakeReplacementPlan(const FString& Salt)
+{
+    FReplacementPlanRecord Record;
+    Record.AssetPath = TEXT("/Game/__MCPTests/BP_Palette.BP_Palette");
+    Record.GraphId =
+        TEXT("graph:11111111-1111-4111-8111-111111111111");
+    Record.GraphSchemaPath =
+        TEXT("/Script/BlueprintGraph.EdGraphSchema_K2");
+    Record.NodeId =
+        TEXT("node:44444444-4444-4444-8444-444444444444");
+    Record.NodeSnapshotDigest = TEXT("sha1:") + Sha1Hex(Salt);
+    Record.ActionId =
+        TEXT("action:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    Record.ActionResultDigest =
+        TEXT("sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    return Record;
+}
+
 FPaletteActionRecord MakeActionRecord()
 {
     FPaletteActionRecord Record;
@@ -227,7 +273,7 @@ bool FMCPythonBlueprintPaletteTokenTest::RunTest(const FString& Parameters)
     TestTrue(
         TEXT("original context resolves"),
         ResolvePaletteActionToken(
-            ActionId, MakeContext(), Resolved, Error));
+            ActionId, ExpectContext(MakeContext()), Resolved, Error));
     TestEqual(TEXT("resolved candidate key"), Resolved.CandidateKey, Record.CandidateKey);
 
     FPaletteContext OtherGraph = MakeContext();
@@ -235,7 +281,8 @@ bool FMCPythonBlueprintPaletteTokenTest::RunTest(const FString& Parameters)
         TEXT("graph:22222222-2222-4222-8222-222222222222");
     TestFalse(
         TEXT("cross-graph context rejected"),
-        ResolvePaletteActionToken(ActionId, OtherGraph, Resolved, Error));
+        ResolvePaletteActionToken(
+            ActionId, ExpectContext(OtherGraph), Resolved, Error));
     TestEqual(
         TEXT("cross-graph is a precondition"),
         Error.Code,
@@ -244,7 +291,10 @@ bool FMCPythonBlueprintPaletteTokenTest::RunTest(const FString& Parameters)
     TestFalse(
         TEXT("tampered token rejected"),
         ResolvePaletteActionToken(
-            TamperToken(ActionId), MakeContext(), Resolved, Error));
+            TamperToken(ActionId),
+            ExpectContext(MakeContext()),
+            Resolved,
+            Error));
     TestEqual(
         TEXT("tampering is invalid input"),
         Error.Code,
@@ -284,6 +334,270 @@ bool FMCPythonBlueprintPaletteTokenTest::RunTest(const FString& Parameters)
 
     SetPaletteTokenClockForTests(TOptional<FDateTime>());
     ResetPaletteTokenStateForTests();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprintSemanticCapabilityTest,
+    "UnrealMCP.Blueprint2.Palette.SemanticCapabilities",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprintSemanticCapabilityTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+    using namespace UE::MCPython::Blueprint2;
+
+    ResetPaletteTokenStateForTests();
+    ResetSemanticTokenStateForTests();
+    const FDateTime Start(2026, 7, 30, 12, 0);
+    SetPaletteTokenClockForTests(Start);
+    SetSemanticTokenClockForTests(Start);
+
+    FPaletteActionRecord GraphRecord = MakeActionRecord();
+    GraphRecord.Context.Kind = EPaletteContextKind::Graph;
+    const FString GraphActionId = RegisterPaletteActionToken(GraphRecord);
+
+    FPaletteActionRecord PinRecord = MakeActionRecord();
+    PinRecord.Context.Kind = EPaletteContextKind::Pin;
+    PinRecord.Context.SourcePinId =
+        TEXT("pin:22222222-2222-4222-8222-222222222222");
+    const FString PinActionId = RegisterPaletteActionToken(PinRecord);
+
+    FPaletteActionRecord ConnectionRecord = MakeActionRecord();
+    ConnectionRecord.Context = MakeConnectionContext(false);
+    const FString ConnectionActionId =
+        RegisterPaletteActionToken(ConnectionRecord);
+
+    FPaletteActionRecord ConversionRecord = ConnectionRecord;
+    ConversionRecord.Context = MakeConnectionContext(true);
+    const FString ConversionActionId =
+        RegisterPaletteActionToken(ConversionRecord);
+
+    TestNotEqual(TEXT("graph and pin actions differ"), GraphActionId, PinActionId);
+    TestNotEqual(
+        TEXT("pin and connection actions differ"),
+        PinActionId,
+        ConnectionActionId);
+    TestNotEqual(
+        TEXT("conversion policy changes action identity"),
+        ConnectionActionId,
+        ConversionActionId);
+
+    FPaletteActionRecord ResolvedAction;
+    FError Error;
+    TestFalse(
+        TEXT("connection action rejects pin expectation"),
+        ResolvePaletteActionToken(
+            ConnectionActionId,
+            ExpectContext(PinRecord.Context),
+            ResolvedAction,
+            Error));
+    TestEqual(
+        TEXT("wrong context kind is stale"),
+        Error.Code,
+        FString(TEXT("PRECONDITION_FAILED")));
+
+    FPaletteContext ChangedTarget = ConnectionRecord.Context;
+    ChangedTarget.TargetPinId =
+        TEXT("pin:55555555-5555-4555-8555-555555555555");
+    TestFalse(
+        TEXT("connection action rejects another target pin"),
+        ResolvePaletteActionToken(
+            ConnectionActionId,
+            ExpectContext(ChangedTarget),
+            ResolvedAction,
+            Error));
+
+    FPaletteContext ChangedPolicy = ConnectionRecord.Context;
+    ChangedPolicy.bAllowConversion = true;
+    TestFalse(
+        TEXT("connection action rejects widened conversion policy"),
+        ResolvePaletteActionToken(
+            ConnectionActionId,
+            ExpectContext(ChangedPolicy),
+            ResolvedAction,
+            Error));
+
+    FPaletteBindingRecord ObjectBinding;
+    ObjectBinding.Kind = EPaletteBindingKind::Object;
+    ObjectBinding.ActionId = GraphActionId;
+    ObjectBinding.ObjectPath =
+        TEXT("/Script/Engine.Actor:CustomTimeDilation");
+    ObjectBinding.ExpectedClassPath =
+        TEXT("/Script/CoreUObject.FloatProperty");
+    const FString ObjectBindingId =
+        RegisterPaletteBinding(ObjectBinding);
+
+    FPaletteBindingRecord PinBinding;
+    PinBinding.Kind = EPaletteBindingKind::TemplatePin;
+    PinBinding.ActionId = GraphActionId;
+    PinBinding.PinName = TEXT("Value");
+    PinBinding.PinDirection = TEXT("input");
+    PinBinding.PinTypeJson = TEXT("{\"kind\":\"int\"}");
+    PinBinding.PinOccurrence = 0;
+    const FString PinBindingId =
+        RegisterPaletteTemplatePinBinding(PinBinding);
+
+    TArray<FPaletteBindingRecord> ObjectBindings;
+    TestFalse(
+        TEXT("template pin cannot resolve as object binding"),
+        ResolvePaletteBindings(
+            GraphActionId,
+            {PinBindingId},
+            ObjectBindings,
+            Error));
+
+    FPaletteBindingRecord ResolvedPin;
+    TestFalse(
+        TEXT("object binding cannot resolve as template pin"),
+        ResolvePaletteTemplatePinBinding(
+            GraphActionId,
+            ObjectBindingId,
+            ResolvedPin,
+            Error));
+    TestTrue(
+        TEXT("template pin resolves for its action"),
+        ResolvePaletteTemplatePinBinding(
+            GraphActionId,
+            PinBindingId,
+            ResolvedPin,
+            Error));
+    TestEqual(
+        TEXT("template pin name round trips"),
+        ResolvedPin.PinName,
+        FString(TEXT("Value")));
+
+    TestTrue(
+        TEXT("resolving the object binding refreshes shared binding LRU"),
+        ResolvePaletteBindings(
+            GraphActionId,
+            {ObjectBindingId},
+            ObjectBindings,
+            Error));
+    for (int32 Index = 1; Index <= 1023; ++Index)
+    {
+        FPaletteBindingRecord PagePinBinding = PinBinding;
+        PagePinBinding.BindingId.Reset();
+        PagePinBinding.PinOccurrence = Index;
+        TestFalse(
+            TEXT("page template binding registers"),
+            RegisterPaletteTemplatePinBinding(PagePinBinding).IsEmpty());
+    }
+    TestTrue(
+        TEXT("shared binding LRU retains the recently resolved object binding"),
+        ResolvePaletteBindings(
+            GraphActionId,
+            {ObjectBindingId},
+            ObjectBindings,
+            Error));
+    TestFalse(
+        TEXT("shared 1024-record binding LRU evicts the untouched oldest template binding"),
+        ResolvePaletteTemplatePinBinding(
+            GraphActionId,
+            PinBindingId,
+            ResolvedPin,
+            Error));
+
+    FString FirstPlanId;
+    FString SecondPlanId;
+    for (int32 Index = 0; Index < 1024; ++Index)
+    {
+        FReplacementPlanRecord Plan = MakeReplacementPlan(
+            FString::Printf(TEXT("plan-%04d"), Index));
+        const FString PlanId = RegisterReplacementPlan(Plan);
+        if (Index == 0)
+        {
+            FirstPlanId = PlanId;
+        }
+        else if (Index == 1)
+        {
+            SecondPlanId = PlanId;
+        }
+    }
+
+    FReplacementPlanRecord ResolvedPlan;
+    TestFalse(
+        TEXT("malformed replacement plan token is invalid"),
+        ResolveReplacementPlan(
+            TEXT("replacement-plan:not-a-sha1"),
+            GraphRecord.Context.AssetPath,
+            GraphRecord.Context.GraphId,
+            ResolvedPlan,
+            Error));
+    TestEqual(
+        TEXT("malformed replacement plan reports invalid input"),
+        Error.Code,
+        FString(TEXT("INVALID_INPUT")));
+    TestTrue(
+        TEXT("oldest plan resolves and becomes most recently used"),
+        ResolveReplacementPlan(
+            FirstPlanId,
+            GraphRecord.Context.AssetPath,
+            GraphRecord.Context.GraphId,
+            ResolvedPlan,
+            Error));
+    FReplacementPlanRecord Overflow = MakeReplacementPlan(TEXT("overflow"));
+    RegisterReplacementPlan(Overflow);
+    TestFalse(
+        TEXT("least recently used plan is evicted"),
+        ResolveReplacementPlan(
+            SecondPlanId,
+            GraphRecord.Context.AssetPath,
+            GraphRecord.Context.GraphId,
+            ResolvedPlan,
+            Error));
+    TestTrue(
+        TEXT("touched oldest plan survives eviction"),
+        ResolveReplacementPlan(
+            FirstPlanId,
+            GraphRecord.Context.AssetPath,
+            GraphRecord.Context.GraphId,
+            ResolvedPlan,
+            Error));
+
+    ResetSemanticTokenStateForTests();
+    FReplacementPlanRecord Expiring = MakeReplacementPlan(TEXT("expires"));
+    const FString ExpiringId = RegisterReplacementPlan(Expiring);
+    SetSemanticTokenClockForTests(Start + FTimespan::FromMinutes(31.0));
+    TestFalse(
+        TEXT("replacement plan expires after thirty idle minutes"),
+        ResolveReplacementPlan(
+            ExpiringId,
+            GraphRecord.Context.AssetPath,
+            GraphRecord.Context.GraphId,
+            ResolvedPlan,
+            Error));
+    TestEqual(
+        TEXT("expired plan is invalid input"),
+        Error.Code,
+        FString(TEXT("INVALID_INPUT")));
+
+    SetSemanticTokenClockForTests(Start);
+    FReplacementPlanRecord TamperedPlan = MakeReplacementPlan(TEXT("tamper"));
+    const FString TamperedPlanId = RegisterReplacementPlan(TamperedPlan);
+    TestFalse(
+        TEXT("tampered replacement plan is invalid"),
+        ResolveReplacementPlan(
+            TamperToken(TamperedPlanId),
+            GraphRecord.Context.AssetPath,
+            GraphRecord.Context.GraphId,
+            ResolvedPlan,
+            Error));
+    ResetSemanticTokenStateForTests();
+    TestFalse(
+        TEXT("reset clears replacement plans"),
+        ResolveReplacementPlan(
+            TamperedPlanId,
+            GraphRecord.Context.AssetPath,
+            GraphRecord.Context.GraphId,
+            ResolvedPlan,
+            Error));
+
+    SetPaletteTokenClockForTests(TOptional<FDateTime>());
+    SetSemanticTokenClockForTests(TOptional<FDateTime>());
+    ResetPaletteTokenStateForTests();
+    ResetSemanticTokenStateForTests();
     return true;
 }
 
@@ -1026,7 +1340,18 @@ bool FMCPythonBlueprintPalettePinSuggestionsTest::RunTest(
             Context.Value);
         for (const TSharedPtr<FJsonValue>& Item : Data->GetArrayField(TEXT("items")))
         {
-            FPaletteContext Expected;
+            const TSharedPtr<FJsonObject> Card = Item->AsObject();
+            TestTrue(
+                TEXT("suggestion card exposes explicit connection bindings"),
+                Card->HasTypedField<EJson::Array>(TEXT("connection_bindings")));
+            const TArray<TSharedPtr<FJsonValue>>& ConnectionBindings =
+                Card->GetArrayField(TEXT("connection_bindings"));
+            TestFalse(
+                TEXT("every returned suggestion has a compatible template pin"),
+                ConnectionBindings.IsEmpty());
+
+            FPaletteContextExpectation Expected;
+            Expected.Kind = EPaletteContextKind::Pin;
             Expected.SourcePinId = Context.Value;
             Expected.Limit = 0;
             FPaletteActionRecord Record;
@@ -1034,7 +1359,7 @@ bool FMCPythonBlueprintPalettePinSuggestionsTest::RunTest(
             TestTrue(
                 TEXT("suggestion action token preserves source pin ownership"),
                 ResolvePaletteActionToken(
-                    Item->AsObject()->GetStringField(TEXT("action_id")),
+                    Card->GetStringField(TEXT("action_id")),
                     Expected,
                     Record,
                     Error));
@@ -1042,6 +1367,44 @@ bool FMCPythonBlueprintPalettePinSuggestionsTest::RunTest(
                 TEXT("suggestion record contains the exact source pin"),
                 Record.Context.SourcePinId,
                 Context.Value);
+
+            bool bSeenConversion = false;
+            for (int32 BindingIndex = 0;
+                 BindingIndex < ConnectionBindings.Num();
+                 ++BindingIndex)
+            {
+                const TSharedPtr<FJsonObject> Binding =
+                    ConnectionBindings[BindingIndex]->AsObject();
+                TestEqual(
+                    TEXT("connection binding rank is contiguous"),
+                    Binding->GetIntegerField(TEXT("rank")),
+                    BindingIndex);
+                TestEqual(
+                    TEXT("output source suggests input template pins"),
+                    Binding->GetStringField(TEXT("direction")),
+                    FString(TEXT("input")));
+
+                FPaletteBindingRecord ResolvedBinding;
+                TestTrue(
+                    TEXT("connection binding resolves for its action"),
+                    ResolvePaletteTemplatePinBinding(
+                        Card->GetStringField(TEXT("action_id")),
+                        Binding->GetStringField(TEXT("binding_id")),
+                        ResolvedBinding,
+                        Error));
+                TestEqual(
+                    TEXT("resolved binding keeps the pin direction"),
+                    ResolvedBinding.PinDirection,
+                    Binding->GetStringField(TEXT("direction")));
+
+                const bool bRequiresConversion =
+                    Binding->GetObjectField(TEXT("response"))
+                        ->GetBoolField(TEXT("requires_conversion"));
+                TestFalse(
+                    TEXT("direct bindings precede conversion bindings"),
+                    bSeenConversion && !bRequiresConversion);
+                bSeenConversion |= bRequiresConversion;
+            }
         }
     }
 
@@ -1098,37 +1461,37 @@ bool FMCPythonBlueprintPalettePinSuggestionsTest::RunTest(
         OtherGraph->Nodes.Num(),
         OtherCountBeforeCrossGraph);
 
-    const TSharedPtr<FJsonObject> AddSuggestions = Suggest(
-        IntegerPinId, TEXT("Add"), TEXT(""), 200);
+    const TSharedPtr<FJsonObject> FlowSuggestions = Suggest(
+        ExecPinId, TEXT("Sequence"), TEXT(""), 200);
     TestTrue(
-        TEXT("integer Add suggestions succeed"),
-        AddSuggestions.IsValid() &&
-            AddSuggestions->GetBoolField(TEXT("success")));
-    TSharedPtr<FJsonObject> AddAction;
-    if (AddSuggestions && AddSuggestions->GetBoolField(TEXT("success")))
+        TEXT("execution Sequence suggestions succeed"),
+        FlowSuggestions.IsValid() &&
+            FlowSuggestions->GetBoolField(TEXT("success")));
+    TSharedPtr<FJsonObject> FlowAction;
+    if (FlowSuggestions && FlowSuggestions->GetBoolField(TEXT("success")))
     {
-        const TSharedPtr<FJsonObject> AddData =
-            AddSuggestions->GetObjectField(TEXT("data"));
-        for (const TSharedPtr<FJsonValue>& Item : AddData->GetArrayField(TEXT("items")))
+        const TSharedPtr<FJsonObject> FlowData =
+            FlowSuggestions->GetObjectField(TEXT("data"));
+        for (const TSharedPtr<FJsonValue>& Item : FlowData->GetArrayField(TEXT("items")))
         {
             const TSharedPtr<FJsonObject> Candidate = Item->AsObject();
-            if (Candidate->GetStringField(TEXT("title")) == TEXT("Add") &&
-                Candidate->GetStringField(TEXT("node_class_path")).EndsWith(
-                    TEXT("K2Node_PromotableOperator")) &&
-                Candidate->GetStringField(TEXT("action_kind")) == TEXT("operator") &&
+            if (Candidate->GetStringField(TEXT("title")).Contains(
+                    TEXT("Sequence")) &&
+                Candidate->GetStringField(TEXT("action_kind")) ==
+                    TEXT("flow_control") &&
                 !Candidate->GetBoolField(TEXT("requires_binding")))
             {
-                AddAction = Candidate;
+                FlowAction = Candidate;
                 break;
             }
         }
     }
     TestTrue(
-        TEXT("promotable Add is suggested for an integer output"),
-        AddAction.IsValid());
-    if (AddAction)
+        TEXT("Sequence is suggested with an explicit exec input binding"),
+        FlowAction.IsValid());
+    if (FlowAction)
     {
-        const FString ActionId = AddAction->GetStringField(TEXT("action_id"));
+        const FString ActionId = FlowAction->GetStringField(TEXT("action_id"));
         const TSharedRef<FJsonObject> DescribeRequest = MakeShared<FJsonObject>();
         DescribeRequest->SetStringField(TEXT("action_id"), ActionId);
         const TSharedPtr<FJsonObject> Description = ParseJsonObject(
@@ -1143,7 +1506,7 @@ bool FMCPythonBlueprintPalettePinSuggestionsTest::RunTest(
                 TEXT("description preserves suggestion source pin"),
                 Description->GetObjectField(TEXT("data"))->GetStringField(
                     TEXT("source_pin_id")),
-                IntegerPinId);
+                ExecPinId);
         }
 
         const int32 CountBeforeSpawn = Fixture.Graph->Nodes.Num();
@@ -1160,13 +1523,13 @@ bool FMCPythonBlueprintPalettePinSuggestionsTest::RunTest(
             Fixture.Graph->Nodes.Num(),
             CountBeforeSpawn + 1);
         FTargetRef PinTarget;
-        PinTarget.Id = IntegerPinId;
+        PinTarget.Id = ExecPinId;
         FString ResolveError;
         const FResolvedTarget ResolvedPin = ResolveTarget(
             Fixture.Blueprint, ETargetKind::Pin, PinTarget, ResolveError);
         TestTrue(
             TEXT("source pin remains valid after suggestion spawn"),
-            ResolvedPin.bStable && ResolvedPin.Pin == IntegerPin);
+            ResolvedPin.bStable && ResolvedPin.Pin == ExecPin);
     }
     return true;
 }
