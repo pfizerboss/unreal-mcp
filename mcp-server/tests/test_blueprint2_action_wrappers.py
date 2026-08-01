@@ -157,6 +157,34 @@ def test_semantic_suggestion_is_read_only_and_connected_spawn_is_transactional()
         assert forbidden not in source
 
 
+def test_replacement_preview_is_strictly_read_only():
+    source = SEMANTIC_SOURCE.read_text(encoding="utf-8")
+    body = source[source.index(
+        "FString UMCPythonHelper::PreviewBlueprintActionReplacement"
+    ):]
+
+    for required in (
+        "ResolvePaletteActionToken",
+        "BuildCandidates",
+        "GetBoundTemplateNode",
+        "RegisterReplacementPlan",
+        "NodeSnapshotDigest",
+    ):
+        assert required in body
+    for forbidden in (
+        "FMutationScope",
+        "->Invoke(",
+        "TryCreateConnection",
+        "BreakSinglePinLink",
+        "DestroyNode",
+        "MarkBlueprintAsModified",
+        "CompileBlueprint",
+        "SavePackage(",
+        "PlayInEditor",
+    ):
+        assert forbidden not in body
+
+
 def _load_blueprint_actions(monkeypatch, helper):
     monkeypatch.setitem(
         sys.modules, "unreal", SimpleNamespace(MCPythonHelper=helper)

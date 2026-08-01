@@ -7,6 +7,7 @@
 
 #include "Dom/JsonObject.h"
 #include "Editor.h"
+#include "Editor/Transactor.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNodeUtils.h"
 #include "EdGraph/EdGraphPin.h"
@@ -14,8 +15,10 @@
 #include "Engine/Blueprint.h"
 #include "GameFramework/Actor.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_IfThenElse.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/PackageName.h"
 #include "Misc/ScopeExit.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -27,6 +30,8 @@ namespace UE::MCPython::Blueprint2
 int32 ClassifySemanticPageCandidateBudget(
     int32 ReturnedBindingCount,
     int32 CandidateBindingCount);
+int32 SelectUniqueBestReplacementCandidateForTests(
+    TConstArrayView<int32> FlattenedSemanticCosts);
 bool CorruptPaletteTemplatePinBindingForTests(const FString& BindingId);
 FString InjectStaleDynamicBindingForTests(const FString& ActionId);
 }
@@ -266,6 +271,40 @@ TSharedRef<FJsonObject> MakeInsertionRequest(
     Request->SetArrayField(TEXT("bindings"), {});
     return Request;
 }
+
+TSharedRef<FJsonObject> MakeReplacementPreviewRequest(
+    const FSemanticFixture& Fixture,
+    UEdGraphNode* Node,
+    const FString& ActionId,
+    const bool bAllowConversion = false,
+    const bool bAllowLoss = false)
+{
+    using namespace UE::MCPython::Blueprint2;
+
+    const TSharedRef<FJsonObject> Request = MakeShared<FJsonObject>();
+    Request->SetStringField(TEXT("graph_id"), Fixture.GraphId);
+    Request->SetStringField(
+        TEXT("node_id"), DescribeNodeTarget(Fixture.Blueprint, Node).Id);
+    Request->SetStringField(TEXT("action_id"), ActionId);
+    Request->SetArrayField(TEXT("bindings"), {});
+    Request->SetArrayField(TEXT("pin_mapping"), {});
+    Request->SetBoolField(TEXT("allow_conversion"), bAllowConversion);
+    Request->SetBoolField(TEXT("allow_loss"), bAllowLoss);
+    return Request;
+}
+
+TSharedRef<FJsonObject> MakeGraphSearchRequest(
+    const FSemanticFixture& Fixture,
+    const FString& Query)
+{
+    const TSharedRef<FJsonObject> Request = MakeShared<FJsonObject>();
+    Request->SetStringField(TEXT("graph_id"), Fixture.GraphId);
+    Request->SetStringField(TEXT("query"), Query);
+    Request->SetObjectField(TEXT("filters"), MakeShared<FJsonObject>());
+    Request->SetStringField(TEXT("cursor"), TEXT(""));
+    Request->SetNumberField(TEXT("limit"), 50);
+    return Request;
+}
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -297,6 +336,13 @@ bool FMCPythonBlueprintSemanticEntryPointsTest::RunTest(const FString& Parameter
     TestFalse(
         TEXT("insertion rejects a null Blueprint"),
         Insert.IsValid() && Insert->GetBoolField(TEXT("success")));
+
+    const TSharedPtr<FJsonObject> Preview = ParseSemanticResult(
+        UMCPythonHelper::PreviewBlueprintActionReplacement(nullptr, TEXT("{}")));
+    TestTrue(TEXT("replacement preview returns structured JSON"), Preview.IsValid());
+    TestFalse(
+        TEXT("replacement preview rejects a null Blueprint"),
+        Preview.IsValid() && Preview->GetBoolField(TEXT("success")));
     return true;
 }
 
@@ -416,6 +462,61 @@ bool FMCPythonBlueprintSemanticStrictParsingTest::RunTest(
     BadPosition->SetNumberField(TEXT("y"), 80.0);
     ExpectInsertionFieldError(
         TEXT("position"), MakeShared<FJsonValueObject>(BadPosition));
+
+    const FString FakeNode = UE::MCPython::Blueprint2::DescribeNodeTarget(
+        Fixture.Blueprint, Fixture.TargetNode).Id;
+    auto ExpectPreviewFieldError = [&](const FString& Field,
+                                        const TSharedPtr<FJsonValue>& Value)
+    {
+        const TSharedRef<FJsonObject> Request = MakeReplacementPreviewRequest(
+            Fixture, Fixture.TargetNode, FakeAction);
+        Request->SetField(Field, Value);
+        const TSharedPtr<FJsonObject> Result = ParseSemanticResult(
+            UMCPythonHelper::PreviewBlueprintActionReplacement(
+                Fixture.Blueprint, SerializeSemanticRequest(Request)));
+        TestEqual(
+            *FString::Printf(TEXT("preview %s is invalid input"), *Field),
+            SemanticErrorCode(Result),
+            FString(TEXT("INVALID_INPUT")));
+        TestEqual(
+            *FString::Printf(TEXT("preview %s reports its exact path"), *Field),
+            SemanticErrorPath(Result),
+            FString(TEXT("params.")) + Field);
+    };
+    ExpectPreviewFieldError(
+        TEXT("bindings"), MakeShared<FJsonValueObject>(MakeShared<FJsonObject>()));
+    ExpectPreviewFieldError(
+        TEXT("pin_mapping"), MakeShared<FJsonValueString>(TEXT("[]")));
+    ExpectPreviewFieldError(
+        TEXT("allow_conversion"), MakeShared<FJsonValueString>(TEXT("false")));
+    ExpectPreviewFieldError(
+        TEXT("allow_loss"), MakeShared<FJsonValueNumber>(0.0));
+    ExpectPreviewFieldError(
+        TEXT("unknown"), MakeShared<FJsonValueString>(FakeNode));
+    const TSharedRef<FJsonObject> DuplicateMappingRequest =
+        MakeReplacementPreviewRequest(Fixture, Fixture.TargetNode, FakeAction);
+    const TSharedRef<FJsonObject> FirstDuplicate = MakeShared<FJsonObject>();
+    FirstDuplicate->SetStringField(
+        TEXT("old_pin_id"),
+        UE::MCPython::Blueprint2::DescribePinTarget(
+            Fixture.Blueprint, Fixture.ExecInput).Id);
+    FirstDuplicate->SetStringField(TEXT("new_binding_id"), FakeInput);
+    const TSharedRef<FJsonObject> SecondDuplicate = MakeShared<FJsonObject>();
+    SecondDuplicate->SetStringField(
+        TEXT("old_pin_id"),
+        UE::MCPython::Blueprint2::DescribePinTarget(
+            Fixture.Blueprint, Fixture.ExecInput).Id);
+    SecondDuplicate->SetStringField(TEXT("new_binding_id"), FakeOutput);
+    DuplicateMappingRequest->SetArrayField(
+        TEXT("pin_mapping"),
+        {MakeShared<FJsonValueObject>(FirstDuplicate),
+         MakeShared<FJsonValueObject>(SecondDuplicate)});
+    const TSharedPtr<FJsonObject> DuplicateMapping = ParseSemanticResult(
+        UMCPythonHelper::PreviewBlueprintActionReplacement(
+            Fixture.Blueprint,
+            SerializeSemanticRequest(DuplicateMappingRequest)));
+    TestEqual(TEXT("duplicate old replacement pin is invalid input"),
+        SemanticErrorCode(DuplicateMapping), FString(TEXT("INVALID_INPUT")));
     return true;
 }
 
@@ -2506,6 +2607,678 @@ bool FMCPythonBlueprintSemanticInsertTest::RunTest(const FString& Parameters)
         TEXT("evicted insertion action capability is invalid input"),
         SemanticErrorCode(EvictedAction),
         FString(TEXT("INVALID_INPUT")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMCPythonBlueprintSemanticReplacementPreviewTest,
+    "UnrealMCP.Blueprint2.Semantic.ReplacementPreview",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMCPythonBlueprintSemanticReplacementPreviewTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+    using namespace UE::MCPython::Blueprint2;
+
+    TestEqual(
+        TEXT("exact type beats a direct-compatible type"),
+        SelectUniqueBestReplacementCandidateForTests(
+            {0, 1, 0, 0, 1, 0, 0, 0}),
+        0);
+    TestEqual(
+        TEXT("direct compatibility beats conversion compatibility"),
+        SelectUniqueBestReplacementCandidateForTests(
+            {1, 1, 0, 0, 2, 0, 0, 0}),
+        0);
+    TestEqual(
+        TEXT("exact container qualifiers beat compatible mismatches"),
+        SelectUniqueBestReplacementCandidateForTests(
+            {0, 0, 0, 0, 0, 0, 1, 0}),
+        0);
+    TestEqual(
+        TEXT("exact reference and const qualifiers beat mismatches"),
+        SelectUniqueBestReplacementCandidateForTests(
+            {0, 0, 0, 0, 0, 0, 0, 1}),
+        0);
+    TestEqual(
+        TEXT("equal semantic tuples remain unmapped in forward order"),
+        SelectUniqueBestReplacementCandidateForTests(
+            {0, 0, 0, 0, 0, 0, 0, 0}),
+        INDEX_NONE);
+    TestEqual(
+        TEXT("equal semantic tuples remain unmapped in reverse lexical order"),
+        SelectUniqueBestReplacementCandidateForTests(
+            {1, 1, 1, 1, 1, 1, 1, 1}),
+        INDEX_NONE);
+
+    FSemanticFixture Fixture = MakeSemanticFixture(
+        TEXT("MCPythonBlueprintSemanticReplacementPreviewTest"));
+    ON_SCOPE_EXIT
+    {
+        CleanupSemanticPackage(Fixture.Package);
+    };
+    if (!Fixture.Blueprint || !Fixture.Graph)
+    {
+        AddError(TEXT("Replacement preview fixture could not be created."));
+        return false;
+    }
+    FReplacementPlanRecord IdentityBase;
+    IdentityBase.AssetPath = Fixture.Blueprint->GetPathName();
+    IdentityBase.GraphId = Fixture.GraphId;
+    IdentityBase.GraphSchemaPath =
+        Fixture.Graph->GetSchema()->GetClass()->GetPathName();
+    IdentityBase.NodeId = DescribeNodeTarget(
+        Fixture.Blueprint, Fixture.TargetNode).Id;
+    IdentityBase.NodeSnapshotDigest = TEXT("sha1:") + Sha1Hex(TEXT("node-a"));
+    IdentityBase.ActionId =
+        TEXT("action:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    IdentityBase.ActionResultDigest =
+        TEXT("sha1:") + Sha1Hex(TEXT("action-result-a"));
+    const FString IdentityBaseId = RegisterReplacementPlan(IdentityBase);
+    TestFalse(TEXT("replacement identity baseline registers"),
+        IdentityBaseId.IsEmpty());
+    auto TestIdentityChange = [&](const TCHAR* What,
+                                  FReplacementPlanRecord Changed)
+    {
+        const FString ChangedId = RegisterReplacementPlan(Changed);
+        TestFalse(*FString::Printf(TEXT("%s registers"), What),
+            ChangedId.IsEmpty());
+        TestNotEqual(What, ChangedId, IdentityBaseId);
+    };
+    FReplacementPlanRecord NodeDigestChanged = IdentityBase;
+    NodeDigestChanged.NodeSnapshotDigest =
+        TEXT("sha1:") + Sha1Hex(TEXT("node-b"));
+    TestIdentityChange(
+        TEXT("node snapshot changes replacement plan identity"),
+        NodeDigestChanged);
+    FReplacementPlanRecord ActionDigestChanged = IdentityBase;
+    ActionDigestChanged.ActionResultDigest =
+        TEXT("sha1:") + Sha1Hex(TEXT("action-result-b"));
+    TestIdentityChange(
+        TEXT("action result changes replacement plan identity"),
+        ActionDigestChanged);
+    FReplacementPlanRecord BindingsChanged = IdentityBase;
+    BindingsChanged.DynamicBindingIds.Add(
+        TEXT("binding:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+    TestIdentityChange(
+        TEXT("dynamic bindings change replacement plan identity"),
+        BindingsChanged);
+    FReplacementPlanRecord MappingChanged = IdentityBase;
+    MappingChanged.Mappings.Add({
+        DescribePinTarget(Fixture.Blueprint, Fixture.ExecInput).Id,
+        TEXT("binding:cccccccccccccccccccccccccccccccccccccccc"),
+        TEXT("explicit"),
+        TEXT("explicit_mapping")});
+    TestIdentityChange(
+        TEXT("mapping changes replacement plan identity"), MappingChanged);
+    FReplacementPlanRecord ConversionPolicyChanged = IdentityBase;
+    ConversionPolicyChanged.bAllowConversion = true;
+    TestIdentityChange(
+        TEXT("conversion policy changes replacement plan identity directly"),
+        ConversionPolicyChanged);
+    FReplacementPlanRecord LossPolicyChanged = IdentityBase;
+    LossPolicyChanged.bAllowLoss = true;
+    TestIdentityChange(
+        TEXT("loss policy changes replacement plan identity directly"),
+        LossPolicyChanged);
+    const TSharedPtr<FJsonObject> Search = ParseSemanticResult(
+        UMCPythonHelper::SearchBlueprintNodeActions(
+            Fixture.Blueprint,
+            SerializeSemanticRequest(MakeGraphSearchRequest(
+                Fixture, TEXT("Print String")))));
+    FString ActionId;
+    if (Search && Search->GetBoolField(TEXT("success")))
+    {
+        for (const TSharedPtr<FJsonValue>& ItemValue :
+            Search->GetObjectField(TEXT("data"))->GetArrayField(TEXT("items")))
+        {
+            const TSharedPtr<FJsonObject> Item = ItemValue->AsObject();
+            if (!Item->GetArrayField(TEXT("bindings")).IsEmpty())
+            {
+                continue;
+            }
+            ActionId = Item->GetStringField(TEXT("action_id"));
+            break;
+        }
+    }
+    TestFalse(TEXT("graph-context replacement action is available"),
+        ActionId.IsEmpty());
+    if (ActionId.IsEmpty())
+    {
+        return false;
+    }
+    const TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
+    Position->SetNumberField(TEXT("x"), 240.0);
+    Position->SetNumberField(TEXT("y"), 80.0);
+    const TSharedRef<FJsonObject> SpawnRequest = MakeShared<FJsonObject>();
+    SpawnRequest->SetStringField(TEXT("graph_id"), Fixture.GraphId);
+    SpawnRequest->SetStringField(TEXT("action_id"), ActionId);
+    SpawnRequest->SetObjectField(TEXT("position"), Position);
+    SpawnRequest->SetArrayField(TEXT("bindings"), {});
+    const TSharedPtr<FJsonObject> Spawn = ParseSemanticResult(
+        UMCPythonHelper::AddBlueprintActionNode(
+            Fixture.Blueprint, SerializeSemanticRequest(SpawnRequest)));
+    TestTrue(TEXT("replacement setup spawns a native action node"),
+        Spawn.IsValid() && Spawn->GetBoolField(TEXT("success")));
+    UEdGraphNode* TargetNode = nullptr;
+    if (Spawn && Spawn->GetBoolField(TEXT("success")))
+    {
+        FGuid SpawnedGuid;
+        ParseTargetId(
+            Spawn->GetObjectField(TEXT("data"))->GetStringField(TEXT("node_id")),
+            ETargetKind::Node,
+            SpawnedGuid);
+        for (UEdGraphNode* Node : Fixture.Graph->Nodes)
+        {
+            if (Node && Node->NodeGuid == SpawnedGuid)
+            {
+                TargetNode = Node;
+                break;
+            }
+        }
+    }
+    if (!TargetNode)
+    {
+        AddError(TEXT("Spawned replacement target could not be resolved."));
+        return false;
+    }
+    TestFalse(TEXT("replacement action exposes template pins"),
+        TargetNode->Pins.IsEmpty());
+    TargetNode->NodePosX = 240;
+    TargetNode->NodePosY = 80;
+    TargetNode->NodeComment = TEXT("preview must preserve this metadata");
+    TargetNode->bCommentBubbleVisible = true;
+
+    const TSharedPtr<FJsonObject> ConnectionSuggestions = ParseSemanticResult(
+        UMCPythonHelper::SuggestBlueprintNodesForConnection(
+            Fixture.Blueprint,
+            SerializeSemanticRequest(MakeConnectionSuggestionRequest(
+                Fixture,
+                Fixture.ExecOutput,
+                Fixture.ExecInput,
+                TEXT("Sequence")))));
+    FString ConnectionActionId;
+    FString ForeignTemplateBindingId;
+    if (ConnectionSuggestions &&
+        ConnectionSuggestions->GetBoolField(TEXT("success")))
+    {
+        const TArray<TSharedPtr<FJsonValue>>& Items =
+            ConnectionSuggestions->GetObjectField(TEXT("data"))
+                ->GetArrayField(TEXT("items"));
+        if (!Items.IsEmpty())
+        {
+            ConnectionActionId = Items[0]->AsObject()->GetStringField(
+                TEXT("action_id"));
+            const TArray<TSharedPtr<FJsonValue>>& BindingPairs =
+                Items[0]->AsObject()->GetArrayField(TEXT("binding_pairs"));
+            if (!BindingPairs.IsEmpty())
+            {
+                ForeignTemplateBindingId = BindingPairs[0]->AsObject()
+                    ->GetStringField(TEXT("input_binding_id"));
+            }
+        }
+    }
+    TestFalse(TEXT("connection-context action is available for rejection test"),
+        ConnectionActionId.IsEmpty());
+    if (!ConnectionActionId.IsEmpty())
+    {
+        const TSharedPtr<FJsonObject> WrongContext = ParseSemanticResult(
+            UMCPythonHelper::PreviewBlueprintActionReplacement(
+                Fixture.Blueprint,
+                SerializeSemanticRequest(MakeReplacementPreviewRequest(
+                    Fixture, TargetNode, ConnectionActionId))));
+        TestEqual(TEXT("replacement requires a graph-context action"),
+            SemanticErrorCode(WrongContext),
+            FString(TEXT("PRECONDITION_FAILED")));
+    }
+
+    FError SnapshotError;
+    TSharedPtr<FJsonObject> BeforeSnapshot;
+    TestTrue(
+        TEXT("pre-preview graph snapshot succeeds"),
+        BuildBlueprintGraphSnapshot(
+            Fixture.Blueprint, {Fixture.GraphId}, BeforeSnapshot, SnapshotError));
+    const FString BeforeJson = BeforeSnapshot
+        ? CanonicalJsonString(
+            MakeShared<FJsonValueObject>(BeforeSnapshot.ToSharedRef()))
+        : FString();
+    const bool bWasDirty = Fixture.Package->IsDirty();
+    const EBlueprintStatus StatusBefore = Fixture.Blueprint->Status;
+    const int32 NodeCountBefore = Fixture.Graph->Nodes.Num();
+    const int32 TransactionCountBefore = GEditor && GEditor->Trans
+        ? GEditor->Trans->GetQueueLength()
+        : INDEX_NONE;
+    const FString FixturePackageName = Fixture.Package->GetName();
+    FString StringInputBindingId;
+    FString RealInputBindingId;
+    UEdGraphPin* RealInputPin = nullptr;
+    TestFalse(
+        TEXT("replacement fixture has not been saved before preview"),
+        FPackageName::DoesPackageExist(FixturePackageName));
+
+    const TSharedPtr<FJsonObject> Preview = ParseSemanticResult(
+        UMCPythonHelper::PreviewBlueprintActionReplacement(
+            Fixture.Blueprint,
+            SerializeSemanticRequest(MakeReplacementPreviewRequest(
+                Fixture, TargetNode, ActionId))));
+    TestTrue(
+        TEXT("strict replacement preview succeeds"),
+        Preview.IsValid() && Preview->GetBoolField(TEXT("success")));
+    if (Preview && Preview->GetBoolField(TEXT("success")))
+    {
+        const TSharedPtr<FJsonObject> Data = Preview->GetObjectField(TEXT("data"));
+        TestTrue(
+            TEXT("preview returns an opaque replacement plan"),
+            Data->GetStringField(TEXT("replacement_plan_id"))
+                .StartsWith(TEXT("replacement-plan:")));
+        TestTrue(
+            TEXT("preview returns a focused node digest"),
+            Data->GetStringField(TEXT("node_snapshot_digest"))
+                .StartsWith(TEXT("sha1:")));
+        TestTrue(
+            TEXT("same-class replacement is applicable without loss"),
+            Data->GetBoolField(TEXT("applicable")));
+        TestEqual(TEXT("same-class replacement has zero loss"),
+            Data->GetIntegerField(TEXT("loss_count")), 0);
+        TestFalse(TEXT("preview does not permit implicit conversion"),
+            Data->GetBoolField(TEXT("allow_conversion")));
+        TestFalse(TEXT("preview does not permit implicit loss"),
+            Data->GetBoolField(TEXT("allow_loss")));
+        const TSharedPtr<FJsonObject> SelectedAction =
+            Data->GetObjectField(TEXT("selected_action"));
+        const TSharedPtr<FJsonObject> TargetSummary =
+            Data->GetObjectField(TEXT("target_node"));
+        TestFalse(TEXT("replacement action title satisfies the wire schema"),
+            SelectedAction->GetStringField(TEXT("title")).IsEmpty());
+        TestFalse(TEXT("replacement target title satisfies the wire schema"),
+            TargetSummary->GetStringField(TEXT("title")).IsEmpty());
+        static const TArray<FString> RequiredPreviewFields = {
+            TEXT("replacement_plan_id"), TEXT("asset_path"), TEXT("graph_id"),
+            TEXT("node_snapshot_digest"), TEXT("action_result_digest"),
+            TEXT("selected_action"), TEXT("target_node"), TEXT("mappings"),
+            TEXT("retained_connections"), TEXT("retained_defaults"),
+            TEXT("unmapped_connections"), TEXT("unmapped_defaults"),
+            TEXT("unsupported_metadata"), TEXT("loss_count"), TEXT("warnings"),
+            TEXT("applicable"), TEXT("allow_conversion"), TEXT("allow_loss")};
+        for (const FString& Field : RequiredPreviewFields)
+        {
+            TestTrue(
+                *FString::Printf(
+                    TEXT("replacement preview wire contract contains %s"),
+                    *Field),
+                Data->Values.Contains(Field));
+        }
+        const TArray<TSharedPtr<FJsonValue>>& UnsupportedMetadata =
+            Data->GetArrayField(TEXT("unsupported_metadata"));
+        TestFalse(
+            TEXT("call-function class metadata is reported as unsupported"),
+            UnsupportedMetadata.IsEmpty());
+        for (const TSharedPtr<FJsonValue>& MetadataValue : UnsupportedMetadata)
+        {
+            const TSharedPtr<FJsonObject> Metadata = MetadataValue->AsObject();
+            TestEqual(
+                TEXT("unsupported metadata uses the stable reason contract"),
+                Metadata->GetStringField(TEXT("reason")),
+                FString(TEXT("node_class_specific_property_is_not_copied")));
+        }
+        const TArray<TSharedPtr<FJsonValue>>& Mappings =
+            Data->GetArrayField(TEXT("mappings"));
+        TestFalse(TEXT("same-class preview infers mappings"), Mappings.IsEmpty());
+        FString ExecInputPinId;
+        FString ExecInputBindingId;
+        FString DataInputBindingId;
+        FString OutputBindingId;
+        for (const TSharedPtr<FJsonValue>& MappingValue : Mappings)
+        {
+            const TSharedPtr<FJsonObject> Mapping = MappingValue->AsObject();
+            const FString OldPinId = Mapping->GetStringField(TEXT("old_pin_id"));
+            UEdGraphPin* OldPin = nullptr;
+            for (UEdGraphPin* Pin : TargetNode->Pins)
+            {
+                if (Pin && DescribePinTarget(Fixture.Blueprint, Pin).Id == OldPinId)
+                {
+                    OldPin = Pin;
+                    break;
+                }
+            }
+            if (!OldPin)
+            {
+                continue;
+            }
+            const FString BindingId =
+                Mapping->GetStringField(TEXT("new_binding_id"));
+            if (OldPin->Direction == EGPD_Output && OutputBindingId.IsEmpty())
+            {
+                OutputBindingId = BindingId;
+            }
+            else if (OldPin->Direction == EGPD_Input &&
+                OldPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec)
+            {
+                ExecInputPinId = OldPinId;
+                ExecInputBindingId = BindingId;
+            }
+            else if (OldPin->Direction == EGPD_Input &&
+                DataInputBindingId.IsEmpty())
+            {
+                DataInputBindingId = BindingId;
+            }
+            if (OldPin->Direction == EGPD_Input &&
+                OldPin->PinType.PinCategory == UEdGraphSchema_K2::PC_String)
+            {
+                StringInputBindingId = BindingId;
+            }
+            if (OldPin->Direction == EGPD_Input &&
+                OldPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real)
+            {
+                RealInputBindingId = BindingId;
+                RealInputPin = OldPin;
+            }
+        }
+        auto PreviewExplicitMapping = [&](const FString& OldPinId,
+                                           const FString& NewBindingId)
+        {
+            const TSharedRef<FJsonObject> Mapping = MakeShared<FJsonObject>();
+            Mapping->SetStringField(TEXT("old_pin_id"), OldPinId);
+            Mapping->SetStringField(TEXT("new_binding_id"), NewBindingId);
+            const TSharedRef<FJsonObject> Request =
+                MakeReplacementPreviewRequest(Fixture, TargetNode, ActionId);
+            Request->SetArrayField(
+                TEXT("pin_mapping"),
+                {MakeShared<FJsonValueObject>(Mapping)});
+            return ParseSemanticResult(
+                UMCPythonHelper::PreviewBlueprintActionReplacement(
+                    Fixture.Blueprint,
+                    SerializeSemanticRequest(Request)));
+        };
+        if (!ExecInputPinId.IsEmpty() && !ForeignTemplateBindingId.IsEmpty())
+        {
+            TestEqual(
+                TEXT("template binding owned by another action is invalid"),
+                SemanticErrorCode(PreviewExplicitMapping(
+                    ExecInputPinId, ForeignTemplateBindingId)),
+                FString(TEXT("INVALID_INPUT")));
+        }
+        if (!ExecInputPinId.IsEmpty() && !OutputBindingId.IsEmpty())
+        {
+            TestEqual(
+                TEXT("explicit mapping with the wrong direction is invalid"),
+                SemanticErrorCode(PreviewExplicitMapping(
+                    ExecInputPinId, OutputBindingId)),
+                FString(TEXT("INVALID_INPUT")));
+        }
+        if (!ExecInputPinId.IsEmpty() && !DataInputBindingId.IsEmpty())
+        {
+            TestEqual(
+                TEXT("explicit exec-to-data mapping is invalid"),
+                SemanticErrorCode(PreviewExplicitMapping(
+                    ExecInputPinId, DataInputBindingId)),
+                FString(TEXT("INVALID_INPUT")));
+        }
+        if (!Mappings.IsEmpty())
+        {
+            const TSharedPtr<FJsonObject> FirstMapping = Mappings[0]->AsObject();
+            const TSharedRef<FJsonObject> ExplicitMapping = MakeShared<FJsonObject>();
+            ExplicitMapping->SetStringField(
+                TEXT("old_pin_id"),
+                FirstMapping->GetStringField(TEXT("old_pin_id")));
+            ExplicitMapping->SetStringField(
+                TEXT("new_binding_id"),
+                FirstMapping->GetStringField(TEXT("new_binding_id")));
+            const TSharedRef<FJsonObject> ExplicitRequest =
+                MakeReplacementPreviewRequest(Fixture, TargetNode, ActionId);
+            ExplicitRequest->SetArrayField(
+                TEXT("pin_mapping"),
+                {MakeShared<FJsonValueObject>(ExplicitMapping)});
+            const TSharedPtr<FJsonObject> ExplicitPreview = ParseSemanticResult(
+                UMCPythonHelper::PreviewBlueprintActionReplacement(
+                    Fixture.Blueprint,
+                    SerializeSemanticRequest(ExplicitRequest)));
+            TestTrue(
+                TEXT("explicit replacement mapping preview succeeds"),
+                ExplicitPreview.IsValid() &&
+                    ExplicitPreview->GetBoolField(TEXT("success")));
+            if (ExplicitPreview &&
+                ExplicitPreview->GetBoolField(TEXT("success")))
+            {
+                const TSharedPtr<FJsonObject> ExplicitData =
+                    ExplicitPreview->GetObjectField(TEXT("data"));
+                bool bFoundExplicit = false;
+                for (const TSharedPtr<FJsonValue>& MappingValue :
+                    ExplicitData->GetArrayField(TEXT("mappings")))
+                {
+                    const TSharedPtr<FJsonObject> Mapping = MappingValue->AsObject();
+                    bFoundExplicit |= Mapping->GetStringField(TEXT("old_pin_id")) ==
+                            FirstMapping->GetStringField(TEXT("old_pin_id")) &&
+                        Mapping->GetStringField(TEXT("origin")) == TEXT("explicit");
+                }
+                TestTrue(TEXT("explicit mapping wins over inference"), bFoundExplicit);
+                TestNotEqual(
+                    TEXT("mapping origin changes replacement plan identity"),
+                    ExplicitData->GetStringField(TEXT("replacement_plan_id")),
+                    Data->GetStringField(TEXT("replacement_plan_id")));
+            }
+        }
+    }
+    TSharedPtr<FJsonObject> AfterSnapshot;
+    TestTrue(
+        TEXT("post-preview graph snapshot succeeds"),
+        BuildBlueprintGraphSnapshot(
+            Fixture.Blueprint, {Fixture.GraphId}, AfterSnapshot, SnapshotError));
+    TestEqual(
+        TEXT("replacement preview leaves graph snapshot byte-identical"),
+        AfterSnapshot
+            ? CanonicalJsonString(
+                MakeShared<FJsonValueObject>(AfterSnapshot.ToSharedRef()))
+            : FString(),
+        BeforeJson);
+    TestEqual(TEXT("replacement preview leaves node count unchanged"),
+        Fixture.Graph->Nodes.Num(), NodeCountBefore);
+    TestEqual(TEXT("replacement preview leaves package dirty state unchanged"),
+        Fixture.Package->IsDirty(), bWasDirty);
+    TestEqual(TEXT("replacement preview leaves compile status unchanged"),
+        Fixture.Blueprint->Status, StatusBefore);
+    if (TransactionCountBefore != INDEX_NONE)
+    {
+        TestEqual(TEXT("replacement preview leaves transaction queue unchanged"),
+            GEditor->Trans->GetQueueLength(), TransactionCountBefore);
+    }
+    TestFalse(TEXT("replacement preview does not save the package"),
+        FPackageName::DoesPackageExist(FixturePackageName));
+
+    if (!RealInputBindingId.IsEmpty() && RealInputPin)
+    {
+        const FString OriginalDefault = RealInputPin->DefaultValue;
+        RealInputPin->DefaultValue = TEXT("not-a-real-number");
+        const TSharedRef<FJsonObject> Mapping = MakeShared<FJsonObject>();
+        Mapping->SetStringField(
+            TEXT("old_pin_id"),
+            DescribePinTarget(Fixture.Blueprint, RealInputPin).Id);
+        Mapping->SetStringField(
+            TEXT("new_binding_id"), RealInputBindingId);
+        const TSharedRef<FJsonObject> Request =
+            MakeReplacementPreviewRequest(
+                Fixture, TargetNode, ActionId);
+        Request->SetArrayField(
+            TEXT("pin_mapping"),
+            {MakeShared<FJsonValueObject>(Mapping)});
+        TestEqual(TEXT("incompatible writable default is invalid input"),
+            SemanticErrorCode(ParseSemanticResult(
+                UMCPythonHelper::PreviewBlueprintActionReplacement(
+                    Fixture.Blueprint,
+                    SerializeSemanticRequest(Request)))),
+            FString(TEXT("INVALID_INPUT")));
+        RealInputPin->DefaultValue = OriginalDefault;
+    }
+
+    if (!StringInputBindingId.IsEmpty())
+    {
+        FGraphNodeCreator<UK2Node_IfThenElse> ConversionCreator(*Fixture.Graph);
+        UK2Node_IfThenElse* ConversionTarget =
+            ConversionCreator.CreateNode(false);
+        ConversionCreator.Finalize();
+        UEdGraphPin* ConversionInput = ConversionTarget->CreatePin(
+            EGPD_Input,
+            UEdGraphSchema_K2::PC_String,
+            TEXT("InString"));
+        Fixture.IntegerOutput->MakeLinkTo(ConversionInput);
+
+        const TSharedPtr<FJsonObject> ConversionForbidden = ParseSemanticResult(
+            UMCPythonHelper::PreviewBlueprintActionReplacement(
+                Fixture.Blueprint,
+                SerializeSemanticRequest(MakeReplacementPreviewRequest(
+                    Fixture, ConversionTarget, ActionId, false, true))));
+        const TSharedPtr<FJsonObject> ConversionAllowed = ParseSemanticResult(
+            UMCPythonHelper::PreviewBlueprintActionReplacement(
+                Fixture.Blueprint,
+                SerializeSemanticRequest(MakeReplacementPreviewRequest(
+                    Fixture, ConversionTarget, ActionId, true, true))));
+        TestTrue(TEXT("conversion-forbidden preview remains a valid proposal"),
+            ConversionForbidden.IsValid() &&
+                ConversionForbidden->GetBoolField(TEXT("success")));
+        TestTrue(TEXT("conversion-enabled preview remains a valid proposal"),
+            ConversionAllowed.IsValid() &&
+                ConversionAllowed->GetBoolField(TEXT("success")));
+        if (ConversionForbidden && ConversionAllowed &&
+            ConversionForbidden->GetBoolField(TEXT("success")) &&
+            ConversionAllowed->GetBoolField(TEXT("success")))
+        {
+            const TSharedPtr<FJsonObject> ForbiddenData =
+                ConversionForbidden->GetObjectField(TEXT("data"));
+            const TSharedPtr<FJsonObject> AllowedData =
+                ConversionAllowed->GetObjectField(TEXT("data"));
+            const FString ConversionPinId =
+                DescribePinTarget(Fixture.Blueprint, ConversionInput).Id;
+            bool bForbiddenLinkIsLost = false;
+            for (const TSharedPtr<FJsonValue>& LossValue :
+                 ForbiddenData->GetArrayField(TEXT("unmapped_connections")))
+            {
+                bForbiddenLinkIsLost |= LossValue->AsObject()
+                    ->GetStringField(TEXT("old_pin_id")) == ConversionPinId;
+            }
+            bool bAllowedLinkIsRetainedAsConversion = false;
+            for (const TSharedPtr<FJsonValue>& RetainedValue :
+                 AllowedData->GetArrayField(TEXT("retained_connections")))
+            {
+                const TSharedPtr<FJsonObject> Retained = RetainedValue->AsObject();
+                bAllowedLinkIsRetainedAsConversion |=
+                    Retained->GetStringField(TEXT("old_pin_id")) ==
+                        ConversionPinId &&
+                    Retained->GetObjectField(TEXT("response"))
+                        ->GetBoolField(TEXT("requires_conversion"));
+            }
+            TestTrue(TEXT("allow_conversion=false excludes conversion-only mapping"),
+                bForbiddenLinkIsLost);
+            TestTrue(TEXT("allow_conversion=true retains explicit conversion"),
+                bAllowedLinkIsRetainedAsConversion);
+            TestNotEqual(TEXT("conversion policy changes replacement plan identity"),
+                ForbiddenData->GetStringField(TEXT("replacement_plan_id")),
+                AllowedData->GetStringField(TEXT("replacement_plan_id")));
+        }
+        ConversionTarget->DestroyNode();
+    }
+
+    UEdGraphPin* MultiLinkOutput = TargetNode->CreatePin(
+        EGPD_Output, UEdGraphSchema_K2::PC_String, TEXT("UnmappedOutput"));
+    UEdGraphPin* MultiLinkInputA = Fixture.TargetNode->CreatePin(
+        EGPD_Input, UEdGraphSchema_K2::PC_String, TEXT("LossInputA"));
+    UEdGraphPin* MultiLinkInputB = Fixture.TargetNode->CreatePin(
+        EGPD_Input, UEdGraphSchema_K2::PC_String, TEXT("LossInputB"));
+    MultiLinkOutput->MakeLinkTo(MultiLinkInputA);
+    MultiLinkOutput->MakeLinkTo(MultiLinkInputB);
+    const TSharedPtr<FJsonObject> MultiLinkLossPreview = ParseSemanticResult(
+        UMCPythonHelper::PreviewBlueprintActionReplacement(
+            Fixture.Blueprint,
+            SerializeSemanticRequest(MakeReplacementPreviewRequest(
+                Fixture, TargetNode, ActionId, false, false))));
+    TestTrue(TEXT("individual-link loss preview succeeds"),
+        MultiLinkLossPreview.IsValid() &&
+            MultiLinkLossPreview->GetBoolField(TEXT("success")));
+    if (MultiLinkLossPreview &&
+        MultiLinkLossPreview->GetBoolField(TEXT("success")))
+    {
+        const TSharedPtr<FJsonObject> Data =
+            MultiLinkLossPreview->GetObjectField(TEXT("data"));
+        TestEqual(TEXT("each individual unmapped link increments loss_count"),
+            Data->GetIntegerField(TEXT("loss_count")), 2);
+        TestEqual(TEXT("each individual unmapped link has its own record"),
+            Data->GetArrayField(TEXT("unmapped_connections")).Num(), 2);
+    }
+    MultiLinkOutput->BreakAllPinLinks();
+    TargetNode->RemovePin(MultiLinkOutput);
+    Fixture.TargetNode->RemovePin(MultiLinkInputA);
+    Fixture.TargetNode->RemovePin(MultiLinkInputB);
+
+    UEdGraphPin* UnmappedDefaultPin = TargetNode->CreatePin(
+        EGPD_Input, UEdGraphSchema_K2::PC_String, TEXT("UnmappedValue"));
+    UnmappedDefaultPin->DefaultValue = TEXT("valuable");
+    TSharedPtr<FJsonObject> BeforeLossSnapshot;
+    TestTrue(
+        TEXT("pre-loss preview snapshot succeeds"),
+        BuildBlueprintGraphSnapshot(
+            Fixture.Blueprint,
+            {Fixture.GraphId},
+            BeforeLossSnapshot,
+            SnapshotError));
+    const FString BeforeLossJson = BeforeLossSnapshot
+        ? CanonicalJsonString(
+            MakeShared<FJsonValueObject>(BeforeLossSnapshot.ToSharedRef()))
+        : FString();
+    const TSharedPtr<FJsonObject> StrictLossPreview = ParseSemanticResult(
+        UMCPythonHelper::PreviewBlueprintActionReplacement(
+            Fixture.Blueprint,
+            SerializeSemanticRequest(MakeReplacementPreviewRequest(
+                Fixture, TargetNode, ActionId, false, false))));
+    const TSharedPtr<FJsonObject> AllowedLossPreview = ParseSemanticResult(
+        UMCPythonHelper::PreviewBlueprintActionReplacement(
+            Fixture.Blueprint,
+            SerializeSemanticRequest(MakeReplacementPreviewRequest(
+                Fixture, TargetNode, ActionId, false, true))));
+    TestTrue(TEXT("strict lossy proposal still returns success"),
+        StrictLossPreview.IsValid() &&
+            StrictLossPreview->GetBoolField(TEXT("success")));
+    TestTrue(TEXT("explicit lossy proposal returns success"),
+        AllowedLossPreview.IsValid() &&
+            AllowedLossPreview->GetBoolField(TEXT("success")));
+    if (StrictLossPreview && AllowedLossPreview &&
+        StrictLossPreview->GetBoolField(TEXT("success")) &&
+        AllowedLossPreview->GetBoolField(TEXT("success")))
+    {
+        const TSharedPtr<FJsonObject> StrictData =
+            StrictLossPreview->GetObjectField(TEXT("data"));
+        const TSharedPtr<FJsonObject> LossyData =
+            AllowedLossPreview->GetObjectField(TEXT("data"));
+        TestFalse(TEXT("strict proposal with loss is not applicable"),
+            StrictData->GetBoolField(TEXT("applicable")));
+        TestTrue(TEXT("explicit lossy proposal is applicable"),
+            LossyData->GetBoolField(TEXT("applicable")));
+        TestEqual(TEXT("one unmapped writable default is one loss"),
+            StrictData->GetIntegerField(TEXT("loss_count")), 1);
+        TestEqual(TEXT("strict proposal reports the unmapped default"),
+            StrictData->GetArrayField(TEXT("unmapped_defaults")).Num(), 1);
+        TestEqual(TEXT("loss policy preserves the complete loss list"),
+            CanonicalJsonString(MakeShared<FJsonValueArray>(
+                StrictData->GetArrayField(TEXT("unmapped_defaults")))),
+            CanonicalJsonString(MakeShared<FJsonValueArray>(
+                LossyData->GetArrayField(TEXT("unmapped_defaults")))));
+        TestNotEqual(TEXT("loss policy changes replacement plan identity"),
+            StrictData->GetStringField(TEXT("replacement_plan_id")),
+            LossyData->GetStringField(TEXT("replacement_plan_id")));
+    }
+    TSharedPtr<FJsonObject> AfterLossSnapshot;
+    TestTrue(
+        TEXT("post-loss preview snapshot succeeds"),
+        BuildBlueprintGraphSnapshot(
+            Fixture.Blueprint,
+            {Fixture.GraphId},
+            AfterLossSnapshot,
+            SnapshotError));
+    TestEqual(TEXT("loss previews remain byte-identical read-only"),
+        AfterLossSnapshot
+            ? CanonicalJsonString(
+                MakeShared<FJsonValueObject>(AfterLossSnapshot.ToSharedRef()))
+            : FString(),
+        BeforeLossJson);
     return true;
 }
 

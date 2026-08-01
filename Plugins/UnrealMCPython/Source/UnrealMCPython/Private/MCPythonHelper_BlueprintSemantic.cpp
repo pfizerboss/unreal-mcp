@@ -5,6 +5,7 @@
 #include "MCPythonBlueprint2Internal.h"
 #include "MCPythonBlueprintPaletteInternal.h"
 
+#include "Algo/Unique.h"
 #include "BlueprintNodeSpawner.h"
 #include "Dom/JsonObject.h"
 #include "EdGraph/EdGraph.h"
@@ -12,6 +13,11 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_Event.h"
+#include "K2Node_InputKey.h"
+#include "K2Node_Variable.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/EngineVersionComparison.h"
 #include "Serialization/JsonReader.h"
@@ -56,6 +62,71 @@ int32 ClassifySemanticPageCandidateBudget(
         ? 0
         : 1;
 }
+
+int32 SelectUniqueBestReplacementCandidate(
+    const TConstArrayView<int32> FlattenedSemanticCosts)
+{
+    static constexpr int32 CostWidth = 4;
+    if (FlattenedSemanticCosts.IsEmpty() ||
+        FlattenedSemanticCosts.Num() % CostWidth != 0)
+    {
+        return INDEX_NONE;
+    }
+    auto IsLess = [&](const int32 LeftIndex, const int32 RightIndex)
+    {
+        for (int32 Component = 0; Component < CostWidth; ++Component)
+        {
+            const int32 Left = FlattenedSemanticCosts[
+                LeftIndex * CostWidth + Component];
+            const int32 Right = FlattenedSemanticCosts[
+                RightIndex * CostWidth + Component];
+            if (Left != Right)
+            {
+                return Left < Right;
+            }
+        }
+        return false;
+    };
+    auto IsEqual = [&](const int32 LeftIndex, const int32 RightIndex)
+    {
+        for (int32 Component = 0; Component < CostWidth; ++Component)
+        {
+            if (FlattenedSemanticCosts[LeftIndex * CostWidth + Component] !=
+                FlattenedSemanticCosts[RightIndex * CostWidth + Component])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    int32 BestIndex = 0;
+    bool bBestIsUnique = true;
+    const int32 CandidateCount = FlattenedSemanticCosts.Num() / CostWidth;
+    for (int32 CandidateIndex = 1;
+         CandidateIndex < CandidateCount;
+         ++CandidateIndex)
+    {
+        if (IsLess(CandidateIndex, BestIndex))
+        {
+            BestIndex = CandidateIndex;
+            bBestIsUnique = true;
+        }
+        else if (IsEqual(CandidateIndex, BestIndex))
+        {
+            bBestIsUnique = false;
+        }
+    }
+    return bBestIsUnique ? BestIndex : INDEX_NONE;
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+int32 SelectUniqueBestReplacementCandidateForTests(
+    const TConstArrayView<int32> FlattenedSemanticCosts)
+{
+    return SelectUniqueBestReplacementCandidate(FlattenedSemanticCosts);
+}
+#endif
 }
 
 namespace
@@ -137,6 +208,23 @@ struct FInsertionRequest
     TArray<FString> BindingIds;
 };
 
+struct FReplacementPinMappingInput
+{
+    FString OldPinId;
+    FString NewBindingId;
+};
+
+struct FReplacementPreviewRequest
+{
+    FString GraphId;
+    FString NodeId;
+    FString ActionId;
+    TArray<FString> BindingIds;
+    TArray<FReplacementPinMappingInput> PinMappings;
+    bool bAllowConversion = false;
+    bool bAllowLoss = false;
+};
+
 FString SemanticFailure(
     const FString& Code,
     const FString& Path,
@@ -165,6 +253,54 @@ FString MissingBlueprint()
         TEXT("params.asset_path"),
         TEXT("A loaded Blueprint asset is required."),
         TEXT("Pass a valid Blueprint asset path."));
+}
+
+TArray<TSharedPtr<FJsonValue>> UnsupportedReplacementMetadata(
+    const UEdGraphNode* Node)
+{
+    TArray<FString> Fields;
+    if (Cast<UK2Node_CallFunction>(Node))
+    {
+        Fields.Append({
+            TEXT("defaults_to_pure"),
+            TEXT("enum_exec_expansion"),
+            TEXT("function_reference")});
+    }
+    if (Cast<UK2Node_Variable>(Node))
+    {
+        Fields.Add(TEXT("variable_reference"));
+    }
+    if (Cast<UK2Node_Event>(Node))
+    {
+        Fields.Append({
+            TEXT("custom_function_name"),
+            TEXT("event_reference"),
+            TEXT("function_flags"),
+            TEXT("internal_event"),
+            TEXT("override_function")});
+    }
+    if (Cast<UK2Node_CustomEvent>(Node))
+    {
+        Fields.Append({TEXT("call_in_editor"), TEXT("deprecated")});
+    }
+    if (Cast<UK2Node_InputKey>(Node))
+    {
+        Fields.Add(TEXT("input_key"));
+    }
+    Fields.Sort();
+    Fields.SetNum(Algo::Unique(Fields));
+
+    TArray<TSharedPtr<FJsonValue>> Result;
+    for (const FString& Field : Fields)
+    {
+        const TSharedRef<FJsonObject> Item = MakeShared<FJsonObject>();
+        Item->SetStringField(TEXT("field"), Field);
+        Item->SetStringField(
+            TEXT("reason"),
+            TEXT("node_class_specific_property_is_not_copied"));
+        Result.Add(MakeShared<FJsonValueObject>(Item));
+    }
+    return Result;
 }
 
 bool SetSemanticError(
@@ -637,6 +773,170 @@ bool ParseInsertionRequest(
             }
             Unique.Add(Binding->AsString());
             OutRequest.BindingIds.Add(Binding->AsString());
+        }
+    }
+    return true;
+}
+
+bool ParseReplacementPreviewRequest(
+    const FString& Json,
+    FReplacementPreviewRequest& OutRequest,
+    FError& OutError)
+{
+    TSharedPtr<FJsonObject> Object;
+    if (!ParseJsonObject(Json, Object, OutError))
+    {
+        return false;
+    }
+    static const TSet<FString> Allowed = {
+        TEXT("graph_id"), TEXT("node_id"), TEXT("action_id"),
+        TEXT("bindings"), TEXT("pin_mapping"),
+        TEXT("allow_conversion"), TEXT("allow_loss")};
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+    {
+        if (!Allowed.Contains(Field.Key))
+        {
+            return SetSemanticError(
+                OutError, TEXT("INVALID_INPUT"), TEXT("params.") + Field.Key,
+                TEXT("Unknown field in closed replacement preview request."),
+                TEXT("Remove fields not present in the published action schema."));
+        }
+    }
+    if (!Object->TryGetStringField(TEXT("graph_id"), OutRequest.GraphId) ||
+        !Object->TryGetStringField(TEXT("node_id"), OutRequest.NodeId) ||
+        !Object->TryGetStringField(TEXT("action_id"), OutRequest.ActionId))
+    {
+        return SetSemanticError(
+            OutError, TEXT("INVALID_INPUT"), TEXT("params"),
+            TEXT("graph_id, node_id, and action_id are required strings."),
+            TEXT("Inspect the graph and use one current graph palette action."));
+    }
+    FGuid GraphGuid;
+    FGuid NodeGuid;
+    if (!ParseTargetId(OutRequest.GraphId, ETargetKind::Graph, GraphGuid) ||
+        !ParseTargetId(OutRequest.NodeId, ETargetKind::Node, NodeGuid) ||
+        !IsOpaqueSemanticToken(OutRequest.ActionId, TEXT("action:")))
+    {
+        return SetSemanticError(
+            OutError, TEXT("INVALID_INPUT"), TEXT("params"),
+            TEXT("Replacement preview IDs must be canonical stable or opaque IDs."),
+            TEXT("Inspect the graph and repeat palette search."));
+    }
+    auto ReadBoolean = [&](const FString& Field, bool& OutValue)
+    {
+        if (!Object->Values.Contains(Field))
+        {
+            return true;
+        }
+        if (!Object->HasTypedField<EJson::Boolean>(Field) ||
+            !Object->TryGetBoolField(Field, OutValue))
+        {
+            return SetSemanticError(
+                OutError, TEXT("INVALID_INPUT"), TEXT("params.") + Field,
+                Field + TEXT(" must be a Boolean when present."),
+                TEXT("Pass true or false, not a string or number."));
+        }
+        return true;
+    };
+    if (!ReadBoolean(TEXT("allow_conversion"), OutRequest.bAllowConversion) ||
+        !ReadBoolean(TEXT("allow_loss"), OutRequest.bAllowLoss))
+    {
+        return false;
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* Bindings = nullptr;
+    if (Object->Values.Contains(TEXT("bindings")) &&
+        (!Object->HasTypedField<EJson::Array>(TEXT("bindings")) ||
+            !Object->TryGetArrayField(TEXT("bindings"), Bindings)))
+    {
+        return SetSemanticError(
+            OutError, TEXT("INVALID_INPUT"), TEXT("params.bindings"),
+            TEXT("bindings must be an array when present."),
+            TEXT("Pass the action-owned binding ID array or omit bindings."));
+    }
+    TSet<FString> UniqueBindings;
+    if (Bindings)
+    {
+        if (Bindings->Num() > 32)
+        {
+            return SetSemanticError(
+                OutError, TEXT("INVALID_INPUT"), TEXT("params.bindings"),
+                TEXT("At most 32 dynamic binding IDs are accepted."),
+                TEXT("Pass exactly the binding IDs returned with the action."));
+        }
+        for (const TSharedPtr<FJsonValue>& Binding : *Bindings)
+        {
+            if (!Binding.IsValid() || Binding->Type != EJson::String ||
+                !IsOpaqueSemanticToken(Binding->AsString(), TEXT("binding:")) ||
+                UniqueBindings.Contains(Binding->AsString()))
+            {
+                return SetSemanticError(
+                    OutError, TEXT("INVALID_INPUT"), TEXT("params.bindings"),
+                    TEXT("Dynamic binding IDs must be unique opaque strings."),
+                    TEXT("Use each returned action binding exactly once."));
+            }
+            UniqueBindings.Add(Binding->AsString());
+            OutRequest.BindingIds.Add(Binding->AsString());
+        }
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* PinMappings = nullptr;
+    if (Object->Values.Contains(TEXT("pin_mapping")) &&
+        (!Object->HasTypedField<EJson::Array>(TEXT("pin_mapping")) ||
+            !Object->TryGetArrayField(TEXT("pin_mapping"), PinMappings)))
+    {
+        return SetSemanticError(
+            OutError, TEXT("INVALID_INPUT"), TEXT("params.pin_mapping"),
+            TEXT("pin_mapping must be an array when present."),
+            TEXT("Pass closed old_pin_id/new_binding_id objects."));
+    }
+    TSet<FString> UniqueOldPins;
+    TSet<FString> UniqueNewBindings;
+    if (PinMappings)
+    {
+        if (PinMappings->Num() > 256)
+        {
+            return SetSemanticError(
+                OutError, TEXT("INVALID_INPUT"), TEXT("params.pin_mapping"),
+                TEXT("pin_mapping accepts at most 256 entries."),
+                TEXT("Map each visible old pin at most once."));
+        }
+        for (int32 Index = 0; Index < PinMappings->Num(); ++Index)
+        {
+            const TSharedPtr<FJsonValue>& Value = (*PinMappings)[Index];
+            const TSharedPtr<FJsonObject> Mapping = Value.IsValid() &&
+                    Value->Type == EJson::Object
+                ? Value->AsObject()
+                : nullptr;
+            const FString Path = FString::Printf(
+                TEXT("params.pin_mapping[%d]"), Index);
+            FString OldPinId;
+            FString NewBindingId;
+            if (!Mapping || Mapping->Values.Num() != 2 ||
+                !Mapping->Values.Contains(TEXT("old_pin_id")) ||
+                !Mapping->Values.Contains(TEXT("new_binding_id")) ||
+                !Mapping->TryGetStringField(TEXT("old_pin_id"), OldPinId) ||
+                !Mapping->TryGetStringField(TEXT("new_binding_id"), NewBindingId))
+            {
+                return SetSemanticError(
+                    OutError, TEXT("INVALID_INPUT"), Path,
+                    TEXT("Each pin_mapping entry must contain only old_pin_id and new_binding_id strings."),
+                    TEXT("Use the published closed mapping object."));
+            }
+            FGuid OldPinGuid;
+            if (!ParseTargetId(OldPinId, ETargetKind::Pin, OldPinGuid) ||
+                !IsOpaqueSemanticToken(NewBindingId, TEXT("binding:")) ||
+                UniqueOldPins.Contains(OldPinId) ||
+                UniqueNewBindings.Contains(NewBindingId))
+            {
+                return SetSemanticError(
+                    OutError, TEXT("INVALID_INPUT"), Path,
+                    TEXT("Mapping IDs must be canonical and unique on both sides."),
+                    TEXT("Use each old pin and new binding at most once."));
+            }
+            UniqueOldPins.Add(OldPinId);
+            UniqueNewBindings.Add(NewBindingId);
+            OutRequest.PinMappings.Add({OldPinId, NewBindingId});
         }
     }
     return true;
@@ -3152,5 +3452,710 @@ FString UMCPythonHelper::InsertBlueprintActionNode(
         ActualSource,
         ActualTarget,
         AuxiliaryNodes);
+#endif
+}
+
+FString UMCPythonHelper::PreviewBlueprintActionReplacement(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+#if UE_VERSION_NEWER_THAN(5, 7, 99) || UE_VERSION_OLDER_THAN(5, 7, 0)
+    return UnsupportedSemanticVersion(TEXT("Blueprint action replacement preview"));
+#else
+    if (!Blueprint)
+    {
+        return MissingBlueprint();
+    }
+    FReplacementPreviewRequest Request;
+    FError Error;
+    if (!ParseReplacementPreviewRequest(RequestJson, Request, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    UEdGraph* Graph = nullptr;
+    if (!ResolveStableGraph(Blueprint, Request.GraphId, Graph, Error, true))
+    {
+        return SemanticFailure(Error);
+    }
+    FGuid NodeGuid;
+    ParseTargetId(Request.NodeId, ETargetKind::Node, NodeGuid);
+    UEdGraphNode* TargetNode = nullptr;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node && Node->NodeGuid == NodeGuid)
+        {
+            if (TargetNode)
+            {
+                return SemanticFailure(
+                    TEXT("PRECONDITION_FAILED"), TEXT("params.node_id"),
+                    TEXT("The stable node ID is no longer unique in the graph."),
+                    TEXT("Inspect the graph again before retrying."));
+            }
+            TargetNode = Node;
+        }
+    }
+    if (!TargetNode)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"), TEXT("params.node_id"),
+            TEXT("The stable node no longer exists in graph_id."),
+            TEXT("Inspect the graph again and use a current node ID."));
+    }
+    for (UEdGraphPin* Pin : TargetNode->Pins)
+    {
+        if (Pin && !Pin->bHidden &&
+            !DescribePinTarget(Blueprint, Pin).Id.StartsWith(TEXT("pin:")))
+        {
+            return SemanticFailure(
+                TEXT("PRECONDITION_FAILED"), TEXT("params.node_id"),
+                TEXT("Every considered target-node pin requires a persisted stable ID."),
+                TEXT("Wait for the graph to finish loading and inspect it again."));
+        }
+    }
+
+    FPaletteContextExpectation Expected;
+    Expected.AssetPath = Blueprint->GetPathName();
+    Expected.GraphId = Request.GraphId;
+    Expected.GraphSchemaPath = Graph->GetSchema()->GetClass()->GetPathName();
+    Expected.Kind = EPaletteContextKind::Graph;
+    FPaletteActionRecord Action;
+    if (!ResolvePaletteActionToken(Request.ActionId, Expected, Action, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    FPaletteFilters Filters;
+    if (!ParseStoredFilters(Action.FiltersJson, Filters, Error))
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"), TEXT("params.action_id"),
+            TEXT("The action's stored graph search context is no longer valid."),
+            TEXT("Repeat palette search and use a current graph action."));
+    }
+    TArray<FPaletteCandidate> Candidates;
+    BuildCandidates(
+        Blueprint, Graph, TConstArrayView<UEdGraphPin*>(),
+        Action.Query, Filters, Candidates);
+    const FString ActionResultDigest = ResultDigest(Candidates);
+    if (ActionResultDigest != Action.Context.ResultDigest)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"), TEXT("params.action_id"),
+            TEXT("The native graph action result set has changed."),
+            TEXT("Repeat palette search and use a current action."));
+    }
+    const FPaletteCandidate* Candidate = FindExactCandidate(Candidates, Action);
+    if (!Candidate)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"), TEXT("params.action_id"),
+            TEXT("The selected native graph action is no longer available."),
+            TEXT("Repeat palette search and choose a current action."));
+    }
+    TArray<FPaletteBindingRecord> DynamicRecords;
+    IBlueprintNodeBinder::FBindingSet DynamicBindings;
+    if (!ResolveDynamicBindingObjects(
+            Request.ActionId, Request.BindingIds, DynamicRecords,
+            DynamicBindings, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    TArray<FString> DynamicPaths;
+    for (const FPaletteBindingRecord& Record : DynamicRecords)
+    {
+        DynamicPaths.Add(Record.ObjectPath);
+    }
+    DynamicPaths.Sort();
+    if (DynamicPaths != Action.BindingPaths)
+    {
+        return SemanticFailure(
+            TEXT("INVALID_INPUT"), TEXT("params.bindings"),
+            TEXT("bindings must exactly match the selected graph action."),
+            TEXT("Pass the complete bindings array returned with the action."));
+    }
+    Candidate->Spawner->PrimeDefaultUiSpec(Graph);
+    UEdGraphNode* TemplateNode = GetBoundTemplateNode(
+        *Candidate, Graph, DynamicBindings);
+    if (!TemplateNode)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"), TEXT("params.action_id"),
+            TEXT("The selected action no longer exposes a bound template node."),
+            TEXT("Repeat palette search and choose a current action."));
+    }
+    if (TemplateNode->Pins.IsEmpty())
+    {
+        TemplateNode->AllocateDefaultPins();
+    }
+    TArray<FSemanticTemplatePin> TemplateInputs;
+    TArray<FSemanticTemplatePin> TemplateOutputs;
+    CollectTemplatePins(TemplateNode, TemplateInputs, TemplateOutputs);
+    TArray<FSemanticTemplatePin> TemplatePins = TemplateInputs;
+    TemplatePins.Append(TemplateOutputs);
+    struct FRegisteredTemplatePin
+    {
+        FSemanticTemplatePin Descriptor;
+        FString BindingId;
+    };
+    TArray<FRegisteredTemplatePin> RegisteredPins;
+    for (const FSemanticTemplatePin& Pin : TemplatePins)
+    {
+        FPaletteBindingRecord Record;
+        Record.Kind = EPaletteBindingKind::TemplatePin;
+        Record.ActionId = Request.ActionId;
+        Record.PinName = Pin.Name;
+        Record.PinDirection = Pin.Direction;
+        Record.PinTypeJson = Pin.TypeJson;
+        Record.PinOccurrence = Pin.Occurrence;
+        const FString BindingId = RegisterPaletteTemplatePinBinding(Record);
+        if (BindingId.IsEmpty())
+        {
+            return SemanticFailure(
+                TEXT("INTERNAL_ERROR"), TEXT("result.mappings"),
+                TEXT("Failed to register one replacement template pin."),
+                TEXT("Repeat palette search in the current editor session."));
+        }
+        RegisteredPins.Add({Pin, BindingId});
+    }
+
+    TArray<UEdGraphPin*> OldPins;
+    for (UEdGraphPin* Pin : TargetNode->Pins)
+    {
+        if (Pin && !Pin->bHidden)
+        {
+            OldPins.Add(Pin);
+        }
+    }
+    OldPins.Sort([&](const UEdGraphPin& Left, const UEdGraphPin& Right)
+    {
+        return DescribePinTarget(Blueprint, &Left).Id <
+            DescribePinTarget(Blueprint, &Right).Id;
+    });
+
+    auto NormalizedPinName = [](const FString& Value)
+    {
+        FString Result = Value;
+        Result.TrimStartAndEndInline();
+        Result.ToLowerInline();
+        Result.ReplaceInline(TEXT(" "), TEXT(""));
+        Result.ReplaceInline(TEXT("_"), TEXT(""));
+        return Result;
+    };
+    auto IsExecPin = [](const UEdGraphPin* Pin)
+    {
+        return Pin && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec;
+    };
+    auto HasWritableDefault = [](const UEdGraphPin* Pin)
+    {
+        return Pin && Pin->Direction == EGPD_Input && Pin->LinkedTo.IsEmpty() &&
+            !Pin->bDefaultValueIsIgnored &&
+            (!Pin->DefaultValue.IsEmpty() || Pin->DefaultObject ||
+                !Pin->DefaultTextValue.IsEmpty());
+    };
+    auto FindOldPin = [&](const FString& PinId) -> UEdGraphPin*
+    {
+        for (UEdGraphPin* Pin : OldPins)
+        {
+            if (DescribePinTarget(Blueprint, Pin).Id == PinId)
+            {
+                return Pin;
+            }
+        }
+        return nullptr;
+    };
+    auto FindRegisteredPin = [&](const FString& BindingId)
+        -> const FRegisteredTemplatePin*
+    {
+        return RegisteredPins.FindByPredicate(
+            [&](const FRegisteredTemplatePin& Item)
+            {
+                return Item.BindingId == BindingId;
+            });
+    };
+    auto SortedExternalLinks = [&](const UEdGraphPin* Pin)
+    {
+        TArray<UEdGraphPin*> Links = Pin ? Pin->LinkedTo : TArray<UEdGraphPin*>();
+        Links.Sort([&](const UEdGraphPin& Left, const UEdGraphPin& Right)
+        {
+            return DescribePinTarget(Blueprint, &Left).Id <
+                DescribePinTarget(Blueprint, &Right).Id;
+        });
+        return Links;
+    };
+    auto ValidatePair = [&](UEdGraphPin* OldPin,
+                            const FRegisteredTemplatePin& NewPin,
+                            TArray<FSemanticResponse>& OutResponses,
+                            FString& OutReason)
+    {
+        OutResponses.Reset();
+        if (!OldPin || !NewPin.Descriptor.Pin ||
+            (OldPin->Direction == EGPD_Input ? TEXT("input") : TEXT("output")) !=
+                NewPin.Descriptor.Direction ||
+            IsExecPin(OldPin) != IsExecPin(NewPin.Descriptor.Pin))
+        {
+            OutReason = TEXT("direction_or_exec_category_mismatch");
+            return false;
+        }
+        const FString OldTypeJson = CanonicalJsonString(
+            MakeShared<FJsonValueObject>(SerializeTypeSpec(OldPin->PinType)));
+        const UEdGraphSchema_K2* K2Schema = Cast<UEdGraphSchema_K2>(
+            Graph->GetSchema());
+        const bool bDirectTypeCompatible = OldPin->Direction == EGPD_Input
+            ? K2Schema && K2Schema->ArePinTypesCompatible(
+                OldPin->PinType,
+                NewPin.Descriptor.Pin->PinType,
+                Blueprint->GeneratedClass)
+            : K2Schema && K2Schema->ArePinTypesCompatible(
+                NewPin.Descriptor.Pin->PinType,
+                OldPin->PinType,
+                Blueprint->GeneratedClass);
+        if (OldTypeJson != NewPin.Descriptor.TypeJson &&
+            OldPin->LinkedTo.IsEmpty() && !bDirectTypeCompatible)
+        {
+            OutReason = TEXT("unlinked_pin_type_is_not_exact");
+            return false;
+        }
+        for (UEdGraphPin* LinkedPin : SortedExternalLinks(OldPin))
+        {
+            if (!LinkedPin ||
+                !DescribePinTarget(Blueprint, LinkedPin).Id.StartsWith(TEXT("pin:")))
+            {
+                OutReason = TEXT("external_link_is_not_stable");
+                return false;
+            }
+            FSemanticResponse Response;
+            if (!ClassifySemanticResponse(
+                    Graph->GetSchema()->CanCreateConnection(
+                        NewPin.Descriptor.Pin, LinkedPin),
+                    Request.bAllowConversion,
+                    Response))
+            {
+                OutReason = TEXT("external_link_is_incompatible");
+                return false;
+            }
+            OutResponses.Add(Response);
+        }
+        if (HasWritableDefault(OldPin))
+        {
+            FString ValidationMessage;
+            if (!K2Schema || !K2Schema->DefaultValueSimpleValidation(
+                    OldPin->PinType,
+                    OldPin->PinName,
+                    OldPin->DefaultValue,
+                    OldPin->DefaultObject,
+                    OldPin->DefaultTextValue,
+                    &ValidationMessage))
+            {
+                OutReason = TEXT("source_default_is_invalid");
+                return false;
+            }
+            const TSharedPtr<FJsonValue> Value = SerializeDefaultValue(
+                OldPin->PinType, OldPin->DefaultValue, OldPin->DefaultObject,
+                OldPin->DefaultTextValue);
+            FNormalizedDefault Normalized;
+            FError DefaultError;
+            if (!Value.IsValid() || !NormalizeDefaultValue(
+                    NewPin.Descriptor.Pin->PinType,
+                    Value,
+                    Blueprint,
+                    Normalized,
+                    DefaultError,
+                    TEXT("params.pin_mapping")))
+            {
+                OutReason = TEXT("default_is_incompatible");
+                return false;
+            }
+        }
+        OutReason = OldTypeJson == NewPin.Descriptor.TypeJson
+            ? TEXT("exact_type")
+            : TEXT("native_compatible_type");
+        return true;
+    };
+
+    struct FSelectedMapping
+    {
+        UEdGraphPin* OldPin = nullptr;
+        const FRegisteredTemplatePin* NewPin = nullptr;
+        FString Origin;
+        FString Reason;
+        TArray<FSemanticResponse> Responses;
+    };
+    TArray<FSelectedMapping> SelectedMappings;
+    TSet<FString> ConsumedOldPins;
+    TSet<FString> ConsumedNewBindings;
+    for (const FReplacementPinMappingInput& Explicit : Request.PinMappings)
+    {
+        UEdGraphPin* OldPin = FindOldPin(Explicit.OldPinId);
+        const FRegisteredTemplatePin* NewPin =
+            FindRegisteredPin(Explicit.NewBindingId);
+        TArray<FSemanticResponse> Responses;
+        FString Reason;
+        if (!OldPin || !NewPin ||
+            !ValidatePair(OldPin, *NewPin, Responses, Reason))
+        {
+            return SemanticFailure(
+                TEXT("INVALID_INPUT"), TEXT("params.pin_mapping"),
+                TEXT("One explicit replacement mapping is not valid for the current node and action."),
+                TEXT("Use current old pin IDs and template bindings with compatible directions, links, and defaults."));
+        }
+        SelectedMappings.Add(
+            {OldPin, NewPin, TEXT("explicit"), TEXT("explicit_mapping"), Responses});
+        ConsumedOldPins.Add(Explicit.OldPinId);
+        ConsumedNewBindings.Add(Explicit.NewBindingId);
+    }
+
+    for (UEdGraphPin* OldPin : OldPins)
+    {
+        const FString OldPinId = DescribePinTarget(Blueprint, OldPin).Id;
+        if (ConsumedOldPins.Contains(OldPinId))
+        {
+            continue;
+        }
+        const FString OldTypeJson = CanonicalJsonString(
+            MakeShared<FJsonValueObject>(SerializeTypeSpec(OldPin->PinType)));
+        struct FSemanticCost
+        {
+            int32 Type = MAX_int32;
+            int32 Name = MAX_int32;
+            int32 Container = MAX_int32;
+            int32 Qualifier = MAX_int32;
+            bool operator==(const FSemanticCost& Other) const
+            {
+                return Type == Other.Type && Name == Other.Name &&
+                    Container == Other.Container && Qualifier == Other.Qualifier;
+            }
+            bool operator<(const FSemanticCost& Other) const
+            {
+                if (Type != Other.Type) return Type < Other.Type;
+                if (Name != Other.Name) return Name < Other.Name;
+                if (Container != Other.Container)
+                    return Container < Other.Container;
+                return Qualifier < Other.Qualifier;
+            }
+        };
+        TArray<const FRegisteredTemplatePin*> EligiblePins;
+        TArray<FSemanticCost> EligibleCosts;
+        TArray<int32> FlattenedCosts;
+        TMap<FString, TArray<FSemanticResponse>> ResponsesByBinding;
+        for (const FRegisteredTemplatePin& NewPin : RegisteredPins)
+        {
+            if (ConsumedNewBindings.Contains(NewPin.BindingId))
+            {
+                continue;
+            }
+            TArray<FSemanticResponse> Responses;
+            FString Reason;
+            if (!ValidatePair(OldPin, NewPin, Responses, Reason))
+            {
+                continue;
+            }
+            int32 TypeCost = NewPin.Descriptor.TypeJson == OldTypeJson ? 0 : 1;
+            for (const FSemanticResponse& Response : Responses)
+            {
+                if (Response.bRequiresConversion)
+                {
+                    TypeCost = 2;
+                    break;
+                }
+            }
+            if (TypeCost == 2 && !Request.bAllowConversion)
+            {
+                continue;
+            }
+            FSemanticCost Cost;
+            Cost.Type = TypeCost;
+            Cost.Name =
+                NormalizedPinName(OldPin->PinName.ToString()) ==
+                    NormalizedPinName(NewPin.Descriptor.Name)
+                ? 0
+                : 1;
+            Cost.Container = OldPin->PinType.ContainerType ==
+                    NewPin.Descriptor.Pin->PinType.ContainerType
+                ? 0
+                : 1;
+            Cost.Qualifier =
+                OldPin->PinType.bIsReference ==
+                        NewPin.Descriptor.Pin->PinType.bIsReference &&
+                    OldPin->PinType.bIsConst ==
+                        NewPin.Descriptor.Pin->PinType.bIsConst
+                ? 0
+                : 1;
+            EligiblePins.Add(&NewPin);
+            EligibleCosts.Add(Cost);
+            FlattenedCosts.Append(
+                {Cost.Type, Cost.Name, Cost.Container, Cost.Qualifier});
+            ResponsesByBinding.Add(NewPin.BindingId, MoveTemp(Responses));
+        }
+        const int32 BestIndex = SelectUniqueBestReplacementCandidate(
+            FlattenedCosts);
+        if (BestIndex != INDEX_NONE)
+        {
+            const FRegisteredTemplatePin* NewPin = EligiblePins[BestIndex];
+            const FSemanticCost& BestCost = EligibleCosts[BestIndex];
+            SelectedMappings.Add({
+                OldPin,
+                NewPin,
+                TEXT("inferred"),
+                BestCost.Type == 0 && BestCost.Name == 0
+                    ? TEXT("unique_exact_type_and_normalized_name")
+                    : BestCost.Type == 0
+                        ? TEXT("unique_exact_type")
+                        : BestCost.Type == 1
+                            ? TEXT("unique_direct_compatible_type")
+                            : TEXT("unique_conversion_compatible_type"),
+                ResponsesByBinding.FindChecked(NewPin->BindingId)});
+            ConsumedOldPins.Add(OldPinId);
+            ConsumedNewBindings.Add(NewPin->BindingId);
+        }
+    }
+    SelectedMappings.Sort([&](const FSelectedMapping& Left,
+                              const FSelectedMapping& Right)
+    {
+        return DescribePinTarget(Blueprint, Left.OldPin).Id <
+            DescribePinTarget(Blueprint, Right.OldPin).Id;
+    });
+
+    TArray<TSharedPtr<FJsonValue>> MappingValues;
+    TArray<TSharedPtr<FJsonValue>> RetainedConnections;
+    TArray<TSharedPtr<FJsonValue>> RetainedDefaults;
+    TArray<TSharedPtr<FJsonValue>> LostConnections;
+    TArray<TSharedPtr<FJsonValue>> LostDefaults;
+    FReplacementPlanRecord Plan;
+    Plan.AssetPath = Blueprint->GetPathName();
+    Plan.GraphId = Request.GraphId;
+    Plan.GraphSchemaPath = Graph->GetSchema()->GetClass()->GetPathName();
+    Plan.NodeId = Request.NodeId;
+    Plan.ActionId = Request.ActionId;
+    Plan.ActionResultDigest = ActionResultDigest;
+    Plan.DynamicBindingIds = Request.BindingIds;
+    Plan.PositionX = TargetNode->NodePosX;
+    Plan.PositionY = TargetNode->NodePosY;
+    Plan.Comment = TargetNode->NodeComment;
+    Plan.bCommentBubbleVisible = TargetNode->bCommentBubbleVisible;
+    Plan.EnabledState = static_cast<uint8>(TargetNode->GetDesiredEnabledState());
+    Plan.bAllowConversion = Request.bAllowConversion;
+    Plan.bAllowLoss = Request.bAllowLoss;
+
+    TSet<FString> MappedOldIds;
+    for (const FSelectedMapping& Mapping : SelectedMappings)
+    {
+        const FString OldPinId = DescribePinTarget(Blueprint, Mapping.OldPin).Id;
+        MappedOldIds.Add(OldPinId);
+        FReplacementMappingRecord MappingRecord;
+        MappingRecord.OldPinId = OldPinId;
+        MappingRecord.NewBindingId = Mapping.NewPin->BindingId;
+        MappingRecord.Origin = Mapping.Origin;
+        MappingRecord.Reason = Mapping.Reason;
+        Plan.Mappings.Add(MappingRecord);
+        const TSharedRef<FJsonObject> MappingJson = MakeShared<FJsonObject>();
+        MappingJson->SetStringField(TEXT("old_pin_id"), OldPinId);
+        MappingJson->SetStringField(
+            TEXT("new_binding_id"), Mapping.NewPin->BindingId);
+        MappingJson->SetStringField(
+            TEXT("new_pin_name"), Mapping.NewPin->Descriptor.Name);
+        MappingJson->SetStringField(TEXT("origin"), Mapping.Origin);
+        MappingJson->SetStringField(TEXT("reason"), Mapping.Reason);
+        MappingValues.Add(MakeShared<FJsonValueObject>(MappingJson));
+
+        const TArray<UEdGraphPin*> SortedLinks =
+            SortedExternalLinks(Mapping.OldPin);
+        for (int32 LinkIndex = 0;
+             LinkIndex < SortedLinks.Num(); ++LinkIndex)
+        {
+            UEdGraphPin* LinkedPin = SortedLinks[LinkIndex];
+            const FString LinkedPinId = DescribePinTarget(Blueprint, LinkedPin).Id;
+            const FSemanticResponse& Response = Mapping.Responses[LinkIndex];
+            FReplacementConnectionRecord Record;
+            Record.OldPinId = OldPinId;
+            Record.NewBindingId = Mapping.NewPin->BindingId;
+            Record.LinkedPinId = LinkedPinId;
+            Record.ResponseKind = Response.Kind;
+            Record.ResponseMessage = Response.Message;
+            Plan.Connections.Add(Record);
+            const TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+            Json->SetStringField(TEXT("old_pin_id"), OldPinId);
+            Json->SetStringField(
+                TEXT("new_binding_id"), Mapping.NewPin->BindingId);
+            Json->SetStringField(TEXT("linked_pin_id"), LinkedPinId);
+            Json->SetObjectField(
+                TEXT("response"), SerializeSemanticResponse(Response));
+            RetainedConnections.Add(MakeShared<FJsonValueObject>(Json));
+        }
+        if (HasWritableDefault(Mapping.OldPin))
+        {
+            const TSharedPtr<FJsonValue> Value = SerializeDefaultValue(
+                Mapping.OldPin->PinType,
+                Mapping.OldPin->DefaultValue,
+                Mapping.OldPin->DefaultObject,
+                Mapping.OldPin->DefaultTextValue);
+            const FString CanonicalValue = CanonicalJsonString(Value);
+            Plan.Defaults.Add(
+                {OldPinId, Mapping.NewPin->BindingId, CanonicalValue});
+            const TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+            Json->SetStringField(TEXT("old_pin_id"), OldPinId);
+            Json->SetStringField(
+                TEXT("new_binding_id"), Mapping.NewPin->BindingId);
+            Json->SetField(TEXT("value"), Value);
+            RetainedDefaults.Add(MakeShared<FJsonValueObject>(Json));
+        }
+    }
+    for (UEdGraphPin* OldPin : OldPins)
+    {
+        const FString OldPinId = DescribePinTarget(Blueprint, OldPin).Id;
+        if (MappedOldIds.Contains(OldPinId))
+        {
+            continue;
+        }
+        for (UEdGraphPin* LinkedPin : SortedExternalLinks(OldPin))
+        {
+            const FString LinkedPinId = DescribePinTarget(Blueprint, LinkedPin).Id;
+            const FString Reason = TEXT("no_unique_compatible_mapping");
+            Plan.LostConnections.Add({OldPinId, LinkedPinId, Reason});
+            const TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+            Json->SetStringField(TEXT("old_pin_id"), OldPinId);
+            Json->SetStringField(TEXT("linked_pin_id"), LinkedPinId);
+            Json->SetStringField(TEXT("reason"), Reason);
+            LostConnections.Add(MakeShared<FJsonValueObject>(Json));
+        }
+        if (HasWritableDefault(OldPin))
+        {
+            const TSharedPtr<FJsonValue> Value = SerializeDefaultValue(
+                OldPin->PinType, OldPin->DefaultValue,
+                OldPin->DefaultObject, OldPin->DefaultTextValue);
+            const FString Reason = TEXT("no_unique_compatible_mapping");
+            Plan.LostDefaults.Add(
+                {OldPinId, CanonicalJsonString(Value), Reason});
+            const TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+            Json->SetStringField(TEXT("old_pin_id"), OldPinId);
+            Json->SetField(TEXT("value"), Value);
+            Json->SetStringField(TEXT("reason"), Reason);
+            LostDefaults.Add(MakeShared<FJsonValueObject>(Json));
+        }
+    }
+    Plan.LossCount = Plan.LostConnections.Num() + Plan.LostDefaults.Num();
+
+    const TSharedRef<FJsonObject> FocusedSnapshot = MakeShared<FJsonObject>();
+    FocusedSnapshot->SetStringField(TEXT("node_id"), Request.NodeId);
+    FocusedSnapshot->SetStringField(
+        TEXT("class_path"), TargetNode->GetClass()->GetPathName());
+    const TSharedRef<FJsonObject> SnapshotPosition = MakeShared<FJsonObject>();
+    SnapshotPosition->SetNumberField(TEXT("x"), TargetNode->NodePosX);
+    SnapshotPosition->SetNumberField(TEXT("y"), TargetNode->NodePosY);
+    FocusedSnapshot->SetObjectField(TEXT("position"), SnapshotPosition);
+    FocusedSnapshot->SetStringField(TEXT("comment"), TargetNode->NodeComment);
+    FocusedSnapshot->SetBoolField(
+        TEXT("comment_bubble_visible"), TargetNode->bCommentBubbleVisible);
+    auto EnabledStateString = [](const ENodeEnabledState State)
+    {
+        switch (State)
+        {
+        case ENodeEnabledState::Disabled: return FString(TEXT("disabled"));
+        case ENodeEnabledState::DevelopmentOnly:
+            return FString(TEXT("development_only"));
+        default: return FString(TEXT("enabled"));
+        }
+    };
+    FocusedSnapshot->SetStringField(
+        TEXT("enabled_state"),
+        EnabledStateString(TargetNode->GetDesiredEnabledState()));
+    TArray<TSharedPtr<FJsonValue>> SnapshotPins;
+    for (UEdGraphPin* Pin : OldPins)
+    {
+        const TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
+        Json->SetStringField(
+            TEXT("pin_id"), DescribePinTarget(Blueprint, Pin).Id);
+        Json->SetStringField(TEXT("name"), Pin->PinName.ToString());
+        Json->SetStringField(
+            TEXT("direction"),
+            Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+        Json->SetObjectField(TEXT("type"), SerializeTypeSpec(Pin->PinType));
+        TSharedPtr<FJsonValue> Default = SerializeDefaultValue(
+            Pin->PinType, Pin->DefaultValue, Pin->DefaultObject,
+            Pin->DefaultTextValue);
+        Json->SetField(
+            TEXT("default"), Default.IsValid() ? Default : MakeShared<FJsonValueNull>());
+        TArray<FString> LinkedIds;
+        for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+        {
+            LinkedIds.Add(DescribePinTarget(Blueprint, LinkedPin).Id);
+        }
+        LinkedIds.Sort();
+        TArray<TSharedPtr<FJsonValue>> LinkedValues;
+        for (const FString& Id : LinkedIds)
+        {
+            LinkedValues.Add(MakeShared<FJsonValueString>(Id));
+        }
+        Json->SetArrayField(TEXT("linked_pin_ids"), MoveTemp(LinkedValues));
+        SnapshotPins.Add(MakeShared<FJsonValueObject>(Json));
+    }
+    FocusedSnapshot->SetArrayField(TEXT("pins"), MoveTemp(SnapshotPins));
+    Plan.NodeSnapshotDigest = TEXT("sha1:") + Sha1Hex(CanonicalJsonString(
+        MakeShared<FJsonValueObject>(FocusedSnapshot)));
+    const FString PlanId = RegisterReplacementPlan(Plan);
+    if (PlanId.IsEmpty())
+    {
+        return SemanticFailure(
+            TEXT("INTERNAL_ERROR"), TEXT("result.replacement_plan_id"),
+            TEXT("Failed to register the deterministic replacement plan."),
+            TEXT("Inspect stable IDs and repeat preview."));
+    }
+
+    const TSharedRef<FJsonObject> SelectedAction = MakeShared<FJsonObject>();
+    SelectedAction->SetStringField(TEXT("action_id"), Request.ActionId);
+    SelectedAction->SetStringField(TEXT("title"), Candidate->Title);
+    SelectedAction->SetStringField(
+        TEXT("node_class_path"), Candidate->NodeClassPath);
+    SelectedAction->SetStringField(TEXT("owner_path"), Candidate->OwnerPath);
+    SelectedAction->SetStringField(TEXT("member_path"), Candidate->MemberPath);
+    const TSharedRef<FJsonObject> TargetSummary = MakeShared<FJsonObject>();
+    TargetSummary->SetStringField(TEXT("node_id"), Request.NodeId);
+    TargetSummary->SetStringField(
+        TEXT("class_path"), TargetNode->GetClass()->GetPathName());
+    TargetSummary->SetStringField(
+        TEXT("title"),
+        TargetNode->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+    TargetSummary->SetObjectField(TEXT("position"), SnapshotPosition);
+    TargetSummary->SetStringField(TEXT("comment"), TargetNode->NodeComment);
+    TargetSummary->SetBoolField(
+        TEXT("comment_bubble_visible"), TargetNode->bCommentBubbleVisible);
+    TargetSummary->SetStringField(
+        TEXT("enabled_state"),
+        EnabledStateString(TargetNode->GetDesiredEnabledState()));
+
+    TArray<TSharedPtr<FJsonValue>> Warnings;
+    if (Plan.LossCount > 0)
+    {
+        Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+            TEXT("Replacement would lose %d connection/default item(s)."),
+            Plan.LossCount)));
+    }
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("replacement_plan_id"), PlanId);
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Data->SetStringField(TEXT("graph_id"), Request.GraphId);
+    Data->SetStringField(
+        TEXT("node_snapshot_digest"), Plan.NodeSnapshotDigest);
+    Data->SetStringField(
+        TEXT("action_result_digest"), ActionResultDigest);
+    Data->SetObjectField(TEXT("selected_action"), SelectedAction);
+    Data->SetObjectField(TEXT("target_node"), TargetSummary);
+    Data->SetArrayField(TEXT("mappings"), MoveTemp(MappingValues));
+    Data->SetArrayField(
+        TEXT("retained_connections"), MoveTemp(RetainedConnections));
+    Data->SetArrayField(TEXT("retained_defaults"), MoveTemp(RetainedDefaults));
+    Data->SetArrayField(
+        TEXT("unmapped_connections"), MoveTemp(LostConnections));
+    Data->SetArrayField(TEXT("unmapped_defaults"), MoveTemp(LostDefaults));
+    Data->SetArrayField(
+        TEXT("unsupported_metadata"),
+        UnsupportedReplacementMetadata(TargetNode));
+    Data->SetNumberField(TEXT("loss_count"), Plan.LossCount);
+    Data->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
+    Data->SetBoolField(
+        TEXT("applicable"), Request.bAllowLoss || Plan.LossCount == 0);
+    Data->SetBoolField(TEXT("allow_conversion"), Request.bAllowConversion);
+    Data->SetBoolField(TEXT("allow_loss"), Request.bAllowLoss);
+    return SerializeResult(MakeSuccess(
+        TEXT("Built a read-only snapshot-bound Blueprint replacement preview."),
+        Data));
 #endif
 }
