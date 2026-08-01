@@ -338,6 +338,10 @@ class WorkflowExecutor:
                         cancelled=True,
                     )
 
+                # A write can mutate Unreal before returning a failed response
+                # or losing the transport reply. From dispatch onward recovery
+                # must undo the transaction rather than merely cancel its log.
+                has_successful_write |= step.effect is not Effect.READ
                 try:
                     response, task_cancelled = (
                         await self._execute_atomic_step(
@@ -389,7 +393,6 @@ class WorkflowExecutor:
                         failure_code=ErrorCode.INTERNAL_ERROR,
                     )
 
-                has_successful_write |= step.effect is not Effect.READ
                 completed_steps.append(step)
                 step_result = {
                     "step_id": step.id,

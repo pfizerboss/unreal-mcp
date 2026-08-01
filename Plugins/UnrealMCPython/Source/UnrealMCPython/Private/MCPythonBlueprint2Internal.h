@@ -292,12 +292,30 @@ enum class ESemanticConnectedSpawnFailurePoint : uint8
     AfterRollbackResidual
 };
 
+enum class ESemanticInsertionFailurePoint : uint8
+{
+    None,
+    AfterInvoke,
+    OutOfGraphResult,
+    MissingActualInput,
+    MissingActualOutput,
+    BeforeBreak,
+    AfterBreak,
+    BeforeFirstConnect,
+    BeforeSecondConnect,
+    AfterConnectionsBreakTopology,
+    ZeroVisiblePinGuid,
+    AfterRollbackResidual
+};
+
 void ResetPaletteTokenStateForTests();
 void SetPaletteTokenClockForTests(const TOptional<FDateTime>& Now);
 void ResetSemanticTokenStateForTests();
 void SetSemanticTokenClockForTests(const TOptional<FDateTime>& Now);
 void SetSemanticConnectedSpawnFailurePointForTests(
     ESemanticConnectedSpawnFailurePoint Point);
+void SetSemanticInsertionFailurePointForTests(
+    ESemanticInsertionFailurePoint Point);
 bool CorruptPaletteTemplatePinBindingForTests(const FString& BindingId);
 FString InjectStaleDynamicBindingForTests(const FString& ActionId);
 #endif

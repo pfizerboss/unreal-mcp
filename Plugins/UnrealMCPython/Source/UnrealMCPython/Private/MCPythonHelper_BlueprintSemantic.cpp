@@ -22,11 +22,19 @@ namespace UE::MCPython::Blueprint2
 {
 ESemanticConnectedSpawnFailurePoint GSemanticConnectedSpawnFailurePoint =
     ESemanticConnectedSpawnFailurePoint::None;
+ESemanticInsertionFailurePoint GSemanticInsertionFailurePoint =
+    ESemanticInsertionFailurePoint::None;
 
 void SetSemanticConnectedSpawnFailurePointForTests(
     const ESemanticConnectedSpawnFailurePoint Point)
 {
     GSemanticConnectedSpawnFailurePoint = Point;
+}
+
+void SetSemanticInsertionFailurePointForTests(
+    const ESemanticInsertionFailurePoint Point)
+{
+    GSemanticInsertionFailurePoint = Point;
 }
 }
 #endif
@@ -113,6 +121,19 @@ struct FConnectedSpawnRequest
     double PositionX = 0.0;
     double PositionY = 0.0;
     bool bAllowConversion = false;
+    TArray<FString> BindingIds;
+};
+
+struct FInsertionRequest
+{
+    FString GraphId;
+    FString SourcePinId;
+    FString TargetPinId;
+    FString ActionId;
+    FString InputBindingId;
+    FString OutputBindingId;
+    double PositionX = 0.0;
+    double PositionY = 0.0;
     TArray<FString> BindingIds;
 };
 
@@ -489,6 +510,138 @@ bool ParseConnectedSpawnRequest(
     return true;
 }
 
+bool ParseInsertionRequest(
+    const FString& Json,
+    FInsertionRequest& OutRequest,
+    FError& OutError)
+{
+    TSharedPtr<FJsonObject> Object;
+    if (!ParseJsonObject(Json, Object, OutError))
+    {
+        return false;
+    }
+    static const TSet<FString> Allowed = {
+        TEXT("graph_id"), TEXT("source_pin_id"), TEXT("target_pin_id"),
+        TEXT("action_id"), TEXT("input_binding_id"),
+        TEXT("output_binding_id"), TEXT("position"), TEXT("bindings")};
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+    {
+        if (!Allowed.Contains(Field.Key))
+        {
+            return SetSemanticError(
+                OutError,
+                TEXT("INVALID_INPUT"),
+                TEXT("params.") + Field.Key,
+                TEXT("Unknown field in closed insertion request."),
+                TEXT("Remove fields not present in the published action schema."));
+        }
+    }
+    if (!Object->TryGetStringField(TEXT("graph_id"), OutRequest.GraphId) ||
+        !Object->TryGetStringField(
+            TEXT("source_pin_id"), OutRequest.SourcePinId) ||
+        !Object->TryGetStringField(
+            TEXT("target_pin_id"), OutRequest.TargetPinId) ||
+        !Object->TryGetStringField(TEXT("action_id"), OutRequest.ActionId) ||
+        !Object->TryGetStringField(
+            TEXT("input_binding_id"), OutRequest.InputBindingId) ||
+        !Object->TryGetStringField(
+            TEXT("output_binding_id"), OutRequest.OutputBindingId))
+    {
+        return SetSemanticError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params"),
+            TEXT("graph_id, source_pin_id, target_pin_id, action_id, input_binding_id, and output_binding_id are required strings."),
+            TEXT("Use one current action and binding pair returned by connection suggestions."));
+    }
+    FGuid GraphGuid;
+    FGuid SourceGuid;
+    FGuid TargetGuid;
+    if (!ParseTargetId(OutRequest.GraphId, ETargetKind::Graph, GraphGuid) ||
+        !ParseTargetId(
+            OutRequest.SourcePinId, ETargetKind::Pin, SourceGuid) ||
+        !ParseTargetId(
+            OutRequest.TargetPinId, ETargetKind::Pin, TargetGuid) ||
+        SourceGuid == TargetGuid ||
+        !IsOpaqueSemanticToken(OutRequest.ActionId, TEXT("action:")) ||
+        !IsOpaqueSemanticToken(
+            OutRequest.InputBindingId, TEXT("binding:")) ||
+        !IsOpaqueSemanticToken(
+            OutRequest.OutputBindingId, TEXT("binding:")) ||
+        OutRequest.InputBindingId == OutRequest.OutputBindingId)
+    {
+        return SetSemanticError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params"),
+            TEXT("Insertion IDs must be distinct canonical stable or opaque IDs."),
+            TEXT("Inspect the graph and use one returned binding pair unchanged."));
+    }
+    const TSharedPtr<FJsonObject>* Position = nullptr;
+    if (!Object->HasTypedField<EJson::Object>(TEXT("position")) ||
+        !Object->TryGetObjectField(TEXT("position"), Position) ||
+        !Position || !Position->IsValid() ||
+        (*Position)->Values.Num() != 2 ||
+        !(*Position)->HasTypedField<EJson::Number>(TEXT("x")) ||
+        !(*Position)->HasTypedField<EJson::Number>(TEXT("y")) ||
+        !(*Position)->TryGetNumberField(TEXT("x"), OutRequest.PositionX) ||
+        !(*Position)->TryGetNumberField(TEXT("y"), OutRequest.PositionY) ||
+        !FMath::IsFinite(OutRequest.PositionX) ||
+        !FMath::IsFinite(OutRequest.PositionY) ||
+        FMath::Abs(OutRequest.PositionX) > 1000000000.0 ||
+        FMath::Abs(OutRequest.PositionY) > 1000000000.0)
+    {
+        return SetSemanticError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.position"),
+            TEXT("position must contain only finite bounded numeric x and y coordinates."),
+            TEXT("Use coordinates within plus or minus 1,000,000,000."));
+    }
+    const TArray<TSharedPtr<FJsonValue>>* Bindings = nullptr;
+    if (Object->Values.Contains(TEXT("bindings")) &&
+        (!Object->HasTypedField<EJson::Array>(TEXT("bindings")) ||
+            !Object->TryGetArrayField(TEXT("bindings"), Bindings)))
+    {
+        return SetSemanticError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.bindings"),
+            TEXT("bindings must be an array when present."),
+            TEXT("Pass the action-owned binding ID array or omit bindings."));
+    }
+    if (Bindings)
+    {
+        if (Bindings->Num() > 32)
+        {
+            return SetSemanticError(
+                OutError,
+                TEXT("INVALID_INPUT"),
+                TEXT("params.bindings"),
+                TEXT("At most 32 dynamic binding IDs are accepted."),
+                TEXT("Pass exactly the binding IDs returned with the action."));
+        }
+        TSet<FString> Unique;
+        for (const TSharedPtr<FJsonValue>& Binding : *Bindings)
+        {
+            if (!Binding.IsValid() || Binding->Type != EJson::String ||
+                !IsOpaqueSemanticToken(Binding->AsString(), TEXT("binding:")) ||
+                Unique.Contains(Binding->AsString()))
+            {
+                return SetSemanticError(
+                    OutError,
+                    TEXT("INVALID_INPUT"),
+                    TEXT("params.bindings"),
+                    TEXT("Dynamic binding IDs must be unique opaque strings."),
+                    TEXT("Use each returned action binding exactly once."));
+            }
+            Unique.Add(Binding->AsString());
+            OutRequest.BindingIds.Add(Binding->AsString());
+        }
+    }
+    return true;
+}
+
 UEdGraphPin* ResolveSemanticPin(
     UEdGraph* Graph,
     const FString& PinId,
@@ -594,6 +747,78 @@ bool ClassifySemanticResponse(
     }
 }
 
+bool ClassifyInsertionResponse(
+    const FPinConnectionResponse& Response,
+    UEdGraphPin* PinA,
+    UEdGraphPin* PinB,
+    UEdGraphPin* OldSourcePin,
+    UEdGraphPin* OldTargetPin,
+    const bool bAllowConversion,
+    FSemanticResponse& OutResponse)
+{
+    if (ClassifySemanticResponse(Response, bAllowConversion, OutResponse))
+    {
+        return true;
+    }
+    const bool bBreakA =
+        Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_A ||
+        Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_AB;
+    const bool bBreakB =
+        Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_B ||
+        Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_AB;
+    if (!bBreakA && !bBreakB)
+    {
+        return false;
+    }
+
+    bool bBreaksPlannedSource = false;
+    bool bBreaksPlannedTarget = false;
+    auto ValidateBrokenPin = [&](UEdGraphPin* Pin)
+    {
+        if (!Pin)
+        {
+            return false;
+        }
+        for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+        {
+            if (Pin == OldSourcePin && LinkedPin == OldTargetPin)
+            {
+                bBreaksPlannedSource = true;
+            }
+            else if (Pin == OldTargetPin && LinkedPin == OldSourcePin)
+            {
+                bBreaksPlannedTarget = true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    if ((bBreakA && !ValidateBrokenPin(PinA)) ||
+        (bBreakB && !ValidateBrokenPin(PinB)) ||
+        (!bBreaksPlannedSource && !bBreaksPlannedTarget))
+    {
+        return false;
+    }
+    OutResponse = FSemanticResponse{};
+    OutResponse.Message = Response.Message.ToString();
+    if (bBreaksPlannedSource && bBreaksPlannedTarget)
+    {
+        OutResponse.Kind = TEXT("break_planned_both_links");
+    }
+    else if (bBreaksPlannedSource)
+    {
+        OutResponse.Kind = TEXT("break_planned_source_link");
+    }
+    else
+    {
+        OutResponse.Kind = TEXT("break_planned_target_link");
+    }
+    return true;
+}
+
 void CollectTemplatePins(
     UEdGraphNode* TemplateNode,
     TArray<FSemanticTemplatePin>& OutInputs,
@@ -660,8 +885,12 @@ TArray<FSemanticCandidate> BuildSemanticCandidates(
         for (const FSemanticTemplatePin& Input : Inputs)
         {
             FSemanticResponse SourceResponse;
-            if (!ClassifySemanticResponse(
+            if (!ClassifyInsertionResponse(
                     Schema->CanCreateConnection(SourcePin, Input.Pin),
+                    SourcePin,
+                    Input.Pin,
+                    SourcePin,
+                    TargetPin,
                     Request.bAllowConversion,
                     SourceResponse))
             {
@@ -670,8 +899,12 @@ TArray<FSemanticCandidate> BuildSemanticCandidates(
             for (const FSemanticTemplatePin& Output : Outputs)
             {
                 FSemanticResponse TargetResponse;
-                if (!ClassifySemanticResponse(
+                if (!ClassifyInsertionResponse(
                         Schema->CanCreateConnection(Output.Pin, TargetPin),
+                        Output.Pin,
+                        TargetPin,
+                        SourcePin,
+                        TargetPin,
                         Request.bAllowConversion,
                         TargetResponse))
                 {
@@ -1179,6 +1412,129 @@ bool VerifyConnectedSpawnTopology(
     return false;
 }
 
+TArray<UEdGraphNode*> CollectAuxiliaryPathNodes(
+    UEdGraphPin* OutputPin,
+    UEdGraphPin* InputPin,
+    const TArray<UEdGraphNode*>& AuxiliaryNodes)
+{
+    TArray<UEdGraphNode*> Result;
+    if (!OutputPin || !InputPin || OutputPin->Direction != EGPD_Output ||
+        InputPin->Direction != EGPD_Input)
+    {
+        return Result;
+    }
+
+    TSet<UEdGraphNode*> AuxiliarySet;
+    for (UEdGraphNode* Node : AuxiliaryNodes)
+    {
+        if (Node)
+        {
+            AuxiliarySet.Add(Node);
+        }
+    }
+    if (AuxiliarySet.IsEmpty())
+    {
+        return Result;
+    }
+
+    TSet<UEdGraphNode*> ForwardReachable;
+    TArray<UEdGraphNode*> Pending;
+    for (UEdGraphPin* LinkedPin : OutputPin->LinkedTo)
+    {
+        UEdGraphNode* Owner = LinkedPin
+            ? LinkedPin->GetOwningNodeUnchecked()
+            : nullptr;
+        if (Owner && LinkedPin->Direction == EGPD_Input &&
+            AuxiliarySet.Contains(Owner))
+        {
+            Pending.Add(Owner);
+        }
+    }
+    while (!Pending.IsEmpty())
+    {
+        UEdGraphNode* Node = Pending.Pop(EAllowShrinking::No);
+        if (!Node || ForwardReachable.Contains(Node))
+        {
+            continue;
+        }
+        ForwardReachable.Add(Node);
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin || Pin->Direction != EGPD_Output)
+            {
+                continue;
+            }
+            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+            {
+                UEdGraphNode* Next = LinkedPin
+                    ? LinkedPin->GetOwningNodeUnchecked()
+                    : nullptr;
+                if (Next && LinkedPin->Direction == EGPD_Input &&
+                    AuxiliarySet.Contains(Next) &&
+                    !ForwardReachable.Contains(Next))
+                {
+                    Pending.Add(Next);
+                }
+            }
+        }
+    }
+
+    TSet<UEdGraphNode*> ReverseReachable;
+    Pending.Reset();
+    for (UEdGraphPin* LinkedPin : InputPin->LinkedTo)
+    {
+        UEdGraphNode* Owner = LinkedPin
+            ? LinkedPin->GetOwningNodeUnchecked()
+            : nullptr;
+        if (Owner && LinkedPin->Direction == EGPD_Output &&
+            AuxiliarySet.Contains(Owner))
+        {
+            Pending.Add(Owner);
+        }
+    }
+    while (!Pending.IsEmpty())
+    {
+        UEdGraphNode* Node = Pending.Pop(EAllowShrinking::No);
+        if (!Node || ReverseReachable.Contains(Node))
+        {
+            continue;
+        }
+        ReverseReachable.Add(Node);
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin || Pin->Direction != EGPD_Input)
+            {
+                continue;
+            }
+            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+            {
+                UEdGraphNode* Previous = LinkedPin
+                    ? LinkedPin->GetOwningNodeUnchecked()
+                    : nullptr;
+                if (Previous && LinkedPin->Direction == EGPD_Output &&
+                    AuxiliarySet.Contains(Previous) &&
+                    !ReverseReachable.Contains(Previous))
+                {
+                    Pending.Add(Previous);
+                }
+            }
+        }
+    }
+
+    for (UEdGraphNode* Node : ForwardReachable)
+    {
+        if (ReverseReachable.Contains(Node))
+        {
+            Result.Add(Node);
+        }
+    }
+    Result.Sort([](const UEdGraphNode& Left, const UEdGraphNode& Right)
+    {
+        return Left.NodeGuid < Right.NodeGuid;
+    });
+    return Result;
+}
+
 bool ValidateStableConnectedSpawnResult(
     UBlueprint* Blueprint,
     UEdGraphPin* SourcePin,
@@ -1235,7 +1591,7 @@ bool ValidateStableConnectedSpawnResult(
     return true;
 }
 
-FString RollbackConnectedFailure(
+FString RollbackSemanticFailure(
     FMutationScope& Scope,
     UBlueprint* Blueprint,
     const FString& GraphId,
@@ -1244,12 +1600,13 @@ FString RollbackConnectedFailure(
     const FString& Path,
     const FString& Message,
     const FString& Hint,
-    const TArray<FString>& AffectedIds)
+    const TArray<FString>& AffectedIds,
+    const FString& RollbackMessage,
+    const bool bInjectResidual)
 {
     const FRollbackResult Rollback = Scope.Rollback();
 #if WITH_DEV_AUTOMATION_TESTS
-    if (GSemanticConnectedSpawnFailurePoint ==
-        ESemanticConnectedSpawnFailurePoint::AfterRollbackResidual)
+    if (bInjectResidual)
     {
         UEdGraph* Graph = nullptr;
         FError InjectionError;
@@ -1311,12 +1668,43 @@ FString RollbackConnectedFailure(
         return SemanticFailure(
             TEXT("ROLLBACK_FAILED"),
             TEXT("transaction"),
-            TEXT("Connected Blueprint spawn rollback left a graph delta."),
+            RollbackMessage,
             TEXT("Inspect and resnapshot the graph before another mutation."),
             false,
             Details);
     }
     return SemanticFailure(Code, Path, Message, Hint);
+}
+
+FString RollbackConnectedFailure(
+    FMutationScope& Scope,
+    UBlueprint* Blueprint,
+    const FString& GraphId,
+    const TSharedPtr<FJsonObject>& BeforeSnapshot,
+    const FString& Code,
+    const FString& Path,
+    const FString& Message,
+    const FString& Hint,
+    const TArray<FString>& AffectedIds)
+{
+    return RollbackSemanticFailure(
+        Scope,
+        Blueprint,
+        GraphId,
+        BeforeSnapshot,
+        Code,
+        Path,
+        Message,
+        Hint,
+        AffectedIds,
+        TEXT("Connected Blueprint spawn rollback left a graph delta."),
+#if WITH_DEV_AUTOMATION_TESTS
+        GSemanticConnectedSpawnFailurePoint ==
+            ESemanticConnectedSpawnFailurePoint::AfterRollbackResidual
+#else
+        false
+#endif
+    );
 }
 
 TArray<TSharedPtr<FJsonValue>> SerializeFinalTopologyEdges(
@@ -1420,6 +1808,306 @@ TArray<TSharedPtr<FJsonValue>> SerializeFinalTopologyEdges(
         Values.Add(MakeShared<FJsonValueObject>(Edge.Value.ToSharedRef()));
     }
     return Values;
+}
+
+const FSemanticCandidate* FindExactSemanticCandidate(
+    const TArray<FSemanticCandidate>& Candidates,
+    const FPaletteActionRecord& Record)
+{
+    return Candidates.FindByPredicate(
+        [&Record](const FSemanticCandidate& Item)
+        {
+            TArray<FString> BindingPaths;
+            for (const FPaletteBindingCandidate& Binding :
+                Item.Candidate.BindingDetails)
+            {
+                BindingPaths.Add(Binding.ObjectPath);
+            }
+            return Item.Candidate.CandidateKey == Record.CandidateKey &&
+                Item.Candidate.SpawnerSignature == Record.SpawnerSignature &&
+                Item.Candidate.OwnerPath == Record.OwnerPath &&
+                BindingPaths == Record.BindingPaths;
+        });
+}
+
+bool SemanticPinMatchesBinding(
+    const FSemanticTemplatePin& Pin,
+    const FPaletteBindingRecord& Binding)
+{
+    return Pin.Name == Binding.PinName &&
+        Pin.Direction == Binding.PinDirection &&
+        Pin.TypeJson == Binding.PinTypeJson &&
+        Pin.Occurrence == Binding.PinOccurrence;
+}
+
+const FSemanticPair* FindExactSemanticPairByBindingIds(
+    const FString& ActionId,
+    const FSemanticCandidate& Candidate,
+    const FString& InputBindingId,
+    const FString& OutputBindingId)
+{
+    return Candidate.Pairs.FindByPredicate(
+        [&](const FSemanticPair& Pair)
+        {
+            auto BindingIdForPin = [&](const FSemanticTemplatePin& Pin)
+            {
+                FPaletteBindingRecord Record;
+                Record.Kind = EPaletteBindingKind::TemplatePin;
+                Record.ActionId = ActionId;
+                Record.PinName = Pin.Name;
+                Record.PinDirection = Pin.Direction;
+                Record.PinTypeJson = Pin.TypeJson;
+                Record.PinOccurrence = Pin.Occurrence;
+                return RegisterPaletteTemplatePinBinding(Record);
+            };
+            return BindingIdForPin(Pair.Input) == InputBindingId &&
+                BindingIdForPin(Pair.Output) == OutputBindingId;
+        });
+}
+
+TSet<FString> CollectStableGraphEdgeKeys(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph)
+{
+    TSet<FString> Result;
+    if (!Blueprint || !Graph)
+    {
+        return Result;
+    }
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (!Node)
+        {
+            continue;
+        }
+        for (UEdGraphPin* Pin : Node->Pins)
+        {
+            if (!Pin || Pin->Direction != EGPD_Output)
+            {
+                continue;
+            }
+            for (UEdGraphPin* LinkedPin : Pin->LinkedTo)
+            {
+                if (LinkedPin && LinkedPin->Direction == EGPD_Input)
+                {
+                    Result.Add(
+                        DescribePinTarget(Blueprint, Pin).Id + TEXT("\n") +
+                        DescribePinTarget(Blueprint, LinkedPin).Id);
+                }
+            }
+        }
+    }
+    return Result;
+}
+
+bool VerifyInsertionTopology(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    UEdGraphPin* SourcePin,
+    UEdGraphPin* TargetPin,
+    UEdGraphPin* ActualInput,
+    UEdGraphPin* ActualOutput,
+    const FSemanticResponse& SourceResponse,
+    const FSemanticResponse& TargetResponse,
+    const TArray<UEdGraphNode*>& AuxiliaryNodes,
+    const TSet<FString>& EdgesBefore)
+{
+    if (!Blueprint || !Graph || !SourcePin || !TargetPin ||
+        !ActualInput || !ActualOutput ||
+        SourcePin->LinkedTo.Contains(TargetPin) ||
+        TargetPin->LinkedTo.Contains(SourcePin) ||
+        !VerifyConnectedSpawnTopology(
+            SourcePin, ActualInput, SourceResponse, AuxiliaryNodes) ||
+        !VerifyConnectedSpawnTopology(
+            ActualOutput, TargetPin, TargetResponse, AuxiliaryNodes))
+    {
+        return false;
+    }
+    const FString OldEdgeKey =
+        DescribePinTarget(Blueprint, SourcePin).Id + TEXT("\n") +
+        DescribePinTarget(Blueprint, TargetPin).Id;
+    const TSet<FString> EdgesAfter = CollectStableGraphEdgeKeys(Blueprint, Graph);
+    for (const FString& Edge : EdgesBefore)
+    {
+        if (Edge != OldEdgeKey && !EdgesAfter.Contains(Edge))
+        {
+            return false;
+        }
+    }
+    return !EdgesAfter.Contains(OldEdgeKey);
+}
+
+FString InsertionSuccess(
+    UBlueprint* Blueprint,
+    UEdGraph* Graph,
+    const FInsertionRequest& Request,
+    UEdGraphPin* SourcePin,
+    UEdGraphPin* TargetPin,
+    UEdGraphNode* NewNode,
+    UEdGraphPin* ActualInput,
+    UEdGraphPin* ActualOutput,
+    const FSemanticResponse& SourceResponse,
+    const FSemanticResponse& TargetResponse,
+    const TArray<UEdGraphNode*>& AuxiliaryNodes)
+{
+    TArray<TSharedPtr<FJsonValue>> PinIds;
+    TArray<TSharedPtr<FJsonValue>> Pins;
+    for (const UEdGraphPin* Pin : NewNode->Pins)
+    {
+        if (!Pin || Pin->bHidden)
+        {
+            continue;
+        }
+        const TSharedRef<FJsonObject> PinValue = SerializeSpawnPin(Blueprint, Pin);
+        PinIds.Add(MakeShared<FJsonValueString>(
+            PinValue->GetStringField(TEXT("id"))));
+        Pins.Add(MakeShared<FJsonValueObject>(PinValue));
+    }
+    TArray<FString> AuxiliaryIds;
+    for (UEdGraphNode* Node : AuxiliaryNodes)
+    {
+        AuxiliaryIds.Add(DescribeNodeTarget(Blueprint, Node).Id);
+    }
+    AuxiliaryIds.Sort();
+    TArray<TSharedPtr<FJsonValue>> AuxiliaryValues;
+    for (const FString& Id : AuxiliaryIds)
+    {
+        AuxiliaryValues.Add(MakeShared<FJsonValueString>(Id));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> Connections;
+    TSet<FString> ConnectionKeys;
+    auto AddConnection = [&](UEdGraphPin* OutputPin,
+                             UEdGraphPin* InputPin,
+                             const FSemanticResponse& Response)
+    {
+        const FString SourceId = DescribePinTarget(Blueprint, OutputPin).Id;
+        const FString TargetId = DescribePinTarget(Blueprint, InputPin).Id;
+        const FString Key = SourceId + TEXT("\n") + TargetId;
+        if (ConnectionKeys.Contains(Key))
+        {
+            return;
+        }
+        ConnectionKeys.Add(Key);
+        const TSharedRef<FJsonObject> Edge = MakeShared<FJsonObject>();
+        Edge->SetStringField(TEXT("source_pin_id"), SourceId);
+        Edge->SetStringField(TEXT("target_pin_id"), TargetId);
+        Edge->SetObjectField(
+            TEXT("response"), SerializeSemanticResponse(Response));
+        TArray<FString> PathAuxiliaryIds;
+        for (UEdGraphNode* AuxiliaryNode : CollectAuxiliaryPathNodes(
+                OutputPin, InputPin, AuxiliaryNodes))
+        {
+            PathAuxiliaryIds.Add(
+                DescribeNodeTarget(Blueprint, AuxiliaryNode).Id);
+        }
+        PathAuxiliaryIds.Sort();
+        TArray<TSharedPtr<FJsonValue>> PathAuxiliaryValues;
+        for (const FString& Id : PathAuxiliaryIds)
+        {
+            PathAuxiliaryValues.Add(MakeShared<FJsonValueString>(Id));
+        }
+        Edge->SetArrayField(
+            TEXT("auxiliary_node_ids"), MoveTemp(PathAuxiliaryValues));
+        Connections.Add(MakeShared<FJsonValueObject>(Edge));
+    };
+    AddConnection(SourcePin, ActualInput, SourceResponse);
+    AddConnection(ActualOutput, TargetPin, TargetResponse);
+    for (const TSharedPtr<FJsonValue>& EdgeValue : SerializeFinalTopologyEdges(
+            Blueprint, NewNode, AuxiliaryNodes, FString()))
+    {
+        const TSharedPtr<FJsonObject> Edge = EdgeValue->AsObject();
+        const FString Key = Edge->GetStringField(TEXT("source_pin_id")) +
+            TEXT("\n") + Edge->GetStringField(TEXT("target_pin_id"));
+        if (!ConnectionKeys.Contains(Key))
+        {
+            ConnectionKeys.Add(Key);
+            Connections.Add(EdgeValue);
+        }
+    }
+
+    const TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
+    Position->SetNumberField(TEXT("x"), NewNode->NodePosX);
+    Position->SetNumberField(TEXT("y"), NewNode->NodePosY);
+    const TSharedRef<FJsonObject> ReplacedConnection = MakeShared<FJsonObject>();
+    ReplacedConnection->SetStringField(
+        TEXT("source_pin_id"), DescribePinTarget(Blueprint, SourcePin).Id);
+    ReplacedConnection->SetStringField(
+        TEXT("target_pin_id"), DescribePinTarget(Blueprint, TargetPin).Id);
+
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Data->SetStringField(TEXT("graph_id"), Request.GraphId);
+    Data->SetStringField(TEXT("action_id"), Request.ActionId);
+    Data->SetStringField(TEXT("input_binding_id"), Request.InputBindingId);
+    Data->SetStringField(TEXT("output_binding_id"), Request.OutputBindingId);
+    Data->SetStringField(
+        TEXT("node_id"), DescribeNodeTarget(Blueprint, NewNode).Id);
+    Data->SetStringField(TEXT("class_path"), NewNode->GetClass()->GetPathName());
+    Data->SetObjectField(TEXT("position"), Position);
+    Data->SetArrayField(TEXT("pin_ids"), MoveTemp(PinIds));
+    Data->SetArrayField(TEXT("pins"), MoveTemp(Pins));
+    Data->SetArrayField(TEXT("auxiliary_node_ids"), MoveTemp(AuxiliaryValues));
+    Data->SetObjectField(TEXT("replaced_connection"), ReplacedConnection);
+    Data->SetArrayField(TEXT("connections"), MoveTemp(Connections));
+    Data->SetBoolField(TEXT("transaction_recorded"), true);
+    Data->SetBoolField(TEXT("saved"), false);
+    const FString NodeId = DescribeNodeTarget(Blueprint, NewNode).Id;
+    auto MakeChange = [](const FString& Kind,
+                         const FString& TargetId,
+                         const TSharedRef<FJsonObject>& Details)
+    {
+        const TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
+        Change->SetStringField(TEXT("kind"), Kind);
+        Change->SetStringField(TEXT("target_id"), TargetId);
+        Change->SetObjectField(TEXT("details"), Details);
+        return MakeShared<FJsonValueObject>(Change);
+    };
+    auto MakeConnectionChange = [&](const FString& Kind,
+                                    UEdGraphPin* OutputPin,
+                                    UEdGraphPin* InputPin)
+    {
+        const FString SourceId = DescribePinTarget(Blueprint, OutputPin).Id;
+        const FString TargetId = DescribePinTarget(Blueprint, InputPin).Id;
+        const TSharedRef<FJsonObject> Details = MakeShared<FJsonObject>();
+        Details->SetStringField(TEXT("source_pin_id"), SourceId);
+        Details->SetStringField(TEXT("target_pin_id"), TargetId);
+        return MakeChange(
+            Kind,
+            TargetId,
+            Details);
+    };
+    const TSharedRef<FJsonObject> CreateDetails = MakeShared<FJsonObject>();
+    CreateDetails->SetStringField(TEXT("graph_id"), Request.GraphId);
+    CreateDetails->SetStringField(
+        TEXT("class_path"), NewNode->GetClass()->GetPathName());
+    CreateDetails->SetStringField(TEXT("action_id"), Request.ActionId);
+    TArray<TSharedPtr<FJsonValue>> Changes = {
+        MakeChange(TEXT("create"), NodeId, CreateDetails),
+        MakeConnectionChange(TEXT("delete"), SourcePin, TargetPin),
+        MakeConnectionChange(TEXT("create"), SourcePin, ActualInput),
+        MakeConnectionChange(TEXT("create"), ActualOutput, TargetPin)};
+
+    auto MakeNextAction = [&](const FString& Action)
+    {
+        const TSharedRef<FJsonObject> Params = MakeShared<FJsonObject>();
+        Params->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+        const TSharedRef<FJsonObject> Next = MakeShared<FJsonObject>();
+        Next->SetStringField(TEXT("domain"), TEXT("blueprint"));
+        Next->SetStringField(TEXT("action"), Action);
+        Next->SetObjectField(TEXT("params"), Params);
+        return MakeShared<FJsonValueObject>(Next);
+    };
+    const TSharedRef<FJsonObject> Result = MakeSuccess(
+        TEXT("Inserted one native Blueprint palette action into an existing edge."),
+        Data);
+    Result->SetArrayField(TEXT("changes"), MoveTemp(Changes));
+    Result->SetArrayField(
+        TEXT("next_actions"),
+        {MakeNextAction(TEXT("snapshot_blueprint_graph")),
+         MakeNextAction(TEXT("compile_blueprint")),
+         MakeNextAction(TEXT("get_blueprint_health"))});
+    return SerializeResult(Result);
 }
 
 FString ConnectedSpawnSuccess(
@@ -1915,6 +2603,554 @@ FString UMCPythonHelper::AddBlueprintConnectedActionNode(
         NewNode,
         ActualPin,
         ActualResponse,
+        AuxiliaryNodes);
+#endif
+}
+
+FString UMCPythonHelper::InsertBlueprintActionNode(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+#if UE_VERSION_NEWER_THAN(5, 7, 99) || UE_VERSION_OLDER_THAN(5, 7, 0)
+    return UnsupportedSemanticVersion(TEXT("Blueprint action insertion"));
+#else
+    if (!Blueprint)
+    {
+        return MissingBlueprint();
+    }
+    FInsertionRequest Request;
+    FError Error;
+    if (!ParseInsertionRequest(RequestJson, Request, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    UEdGraph* Graph = nullptr;
+    if (!ResolveStableGraph(Blueprint, Request.GraphId, Graph, Error, true))
+    {
+        return SemanticFailure(Error);
+    }
+    UEdGraphPin* SourcePin = ResolveSemanticPin(
+        Graph, Request.SourcePinId, Error, TEXT("params.source_pin_id"));
+    UEdGraphPin* TargetPin = ResolveSemanticPin(
+        Graph, Request.TargetPinId, Error, TEXT("params.target_pin_id"));
+    if (!SourcePin || !TargetPin)
+    {
+        return SemanticFailure(Error);
+    }
+    if (SourcePin->Direction != EGPD_Output ||
+        TargetPin->Direction != EGPD_Input)
+    {
+        return SemanticFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.source_pin_id"),
+            TEXT("source_pin_id must be output and target_pin_id must be input."),
+            TEXT("Inspect pin directions and retry with output-to-input order."));
+    }
+    if (!SourcePin->LinkedTo.Contains(TargetPin) ||
+        !TargetPin->LinkedTo.Contains(SourcePin))
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.target_pin_id"),
+            TEXT("The named pins no longer share the exact direct edge."),
+            TEXT("Inspect the graph and request current connection suggestions."));
+    }
+
+    FPaletteContextExpectation Expected;
+    Expected.AssetPath = Blueprint->GetPathName();
+    Expected.GraphId = Request.GraphId;
+    Expected.GraphSchemaPath = Graph->GetSchema()->GetClass()->GetPathName();
+    Expected.Kind = EPaletteContextKind::Connection;
+    Expected.SourcePinId = Request.SourcePinId;
+    Expected.TargetPinId = Request.TargetPinId;
+    FPaletteActionRecord Action;
+    if (!ResolvePaletteActionToken(Request.ActionId, Expected, Action, Error))
+    {
+        return SemanticFailure(Error);
+    }
+
+    FConnectionSuggestionRequest SuggestionRequest;
+    SuggestionRequest.GraphId = Request.GraphId;
+    SuggestionRequest.SourcePinId = Request.SourcePinId;
+    SuggestionRequest.TargetPinId = Request.TargetPinId;
+    SuggestionRequest.Query = Action.Query;
+    SuggestionRequest.FiltersJson = Action.FiltersJson;
+    SuggestionRequest.bAllowConversion = Action.Context.bAllowConversion;
+    SuggestionRequest.Limit = Action.Context.Limit;
+    if (!ParseStoredFilters(
+            Action.FiltersJson, SuggestionRequest.Filters, Error))
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The action's stored filter context is no longer valid."),
+            TEXT("Repeat connection suggestions and use a current action."));
+    }
+    const TArray<FSemanticCandidate> Candidates = BuildSemanticCandidates(
+        Blueprint, Graph, SourcePin, TargetPin, SuggestionRequest);
+    if (SemanticResultDigest(Candidates) != Action.Context.ResultDigest)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The native connection action result set has changed."),
+            TEXT("Repeat connection suggestions and use a current action."));
+    }
+    const FSemanticCandidate* Candidate = FindExactSemanticCandidate(
+        Candidates, Action);
+    if (!Candidate)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The selected native connection action is no longer available."),
+            TEXT("Repeat connection suggestions and choose a current action."));
+    }
+
+    TArray<FPaletteBindingRecord> DynamicRecords;
+    IBlueprintNodeBinder::FBindingSet DynamicBindings;
+    if (!ResolveDynamicBindingObjects(
+            Request.ActionId,
+            Request.BindingIds,
+            DynamicRecords,
+            DynamicBindings,
+            Error))
+    {
+        return SemanticFailure(Error);
+    }
+    TArray<FString> DynamicPaths;
+    for (const FPaletteBindingRecord& Record : DynamicRecords)
+    {
+        DynamicPaths.Add(Record.ObjectPath);
+    }
+    DynamicPaths.Sort();
+    if (DynamicPaths != Action.BindingPaths)
+    {
+        return SemanticFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.bindings"),
+            TEXT("bindings must exactly match the selected action."),
+            TEXT("Pass the complete bindings array returned with the action."));
+    }
+
+    FPaletteBindingRecord InputBinding;
+    if (!ResolvePaletteTemplatePinBinding(
+            Request.ActionId,
+            Request.InputBindingId,
+            InputBinding,
+            Error))
+    {
+        Error.Path = TEXT("params.input_binding_id");
+        return SemanticFailure(Error);
+    }
+    FPaletteBindingRecord OutputBinding;
+    if (!ResolvePaletteTemplatePinBinding(
+            Request.ActionId,
+            Request.OutputBindingId,
+            OutputBinding,
+            Error))
+    {
+        Error.Path = TEXT("params.output_binding_id");
+        return SemanticFailure(Error);
+    }
+    if (InputBinding.PinDirection != TEXT("input") ||
+        OutputBinding.PinDirection != TEXT("output"))
+    {
+        return SemanticFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.input_binding_id"),
+            TEXT("The selected binding IDs are not in input/output order."),
+            TEXT("Use one binding pair exactly as returned by connection suggestions."));
+    }
+    const FSemanticPair* Pair = FindExactSemanticPairByBindingIds(
+        Request.ActionId,
+        *Candidate,
+        Request.InputBindingId,
+        Request.OutputBindingId);
+    if (!Pair)
+    {
+        return SemanticFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.input_binding_id"),
+            TEXT("The selected input and output bindings are not one returned pair."),
+            TEXT("Use both binding IDs from the same current binding_pairs record."));
+    }
+    if (!SemanticPinMatchesBinding(Pair->Input, InputBinding) ||
+        !SemanticPinMatchesBinding(Pair->Output, OutputBinding))
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.input_binding_id"),
+            TEXT("The stored template-pin capability no longer matches its current pair."),
+            TEXT("Repeat connection suggestions and use a refreshed binding pair."));
+    }
+
+    UEdGraphNode* TemplateNode = GetBoundTemplateNode(
+        Candidate->Candidate, Graph, DynamicBindings);
+    UEdGraphPin* TemplateInput = FindSpawnedPin(TemplateNode, InputBinding);
+    UEdGraphPin* TemplateOutput = FindSpawnedPin(TemplateNode, OutputBinding);
+    if (!TemplateInput || !TemplateOutput)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.input_binding_id"),
+            TEXT("The selected template pin pair has changed."),
+            TEXT("Repeat connection suggestions and select a current pair."));
+    }
+    FSemanticResponse PreflightSource;
+    FSemanticResponse PreflightTarget;
+    if (!ClassifyInsertionResponse(
+            Graph->GetSchema()->CanCreateConnection(SourcePin, TemplateInput),
+            SourcePin,
+            TemplateInput,
+            SourcePin,
+            TargetPin,
+            Action.Context.bAllowConversion,
+            PreflightSource) ||
+        !ClassifyInsertionResponse(
+            Graph->GetSchema()->CanCreateConnection(TemplateOutput, TargetPin),
+            TemplateOutput,
+            TargetPin,
+            SourcePin,
+            TargetPin,
+            Action.Context.bAllowConversion,
+            PreflightTarget) ||
+        PreflightSource.Kind != Pair->SourceResponse.Kind ||
+        PreflightTarget.Kind != Pair->TargetResponse.Kind)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.input_binding_id"),
+            TEXT("The selected template pair no longer has its advertised schema responses."),
+            TEXT("Repeat connection suggestions against the current graph state."));
+    }
+
+    TSharedPtr<FJsonObject> BeforeSnapshot;
+    if (!BuildBlueprintGraphSnapshot(
+            Blueprint, {Request.GraphId}, BeforeSnapshot, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    const TSet<FString> EdgesBefore = CollectStableGraphEdgeKeys(
+        Blueprint, Graph);
+    TSet<UEdGraphNode*> NodesBefore;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node)
+        {
+            NodesBefore.Add(Node);
+        }
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "MCPython", "InsertBlueprintActionNode",
+        "Insert Blueprint palette node into connection"));
+    if (!Scope.IsValid())
+    {
+        return SemanticFailure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Could not begin a Blueprint insertion transaction."),
+            TEXT("Close any conflicting editor transaction and retry."));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    TSet<UEdGraphNode*> ModifiedNodes;
+    auto ModifyPinOwner = [&](UEdGraphPin* Pin)
+    {
+        UEdGraphNode* Owner = Pin ? Pin->GetOwningNodeUnchecked() : nullptr;
+        if (Owner && !ModifiedNodes.Contains(Owner))
+        {
+            ModifiedNodes.Add(Owner);
+            Scope.Modify(Owner);
+        }
+    };
+    ModifyPinOwner(SourcePin);
+    ModifyPinOwner(TargetPin);
+    for (UEdGraphPin* LinkedPin : SourcePin->LinkedTo)
+    {
+        ModifyPinOwner(LinkedPin);
+    }
+    for (UEdGraphPin* LinkedPin : TargetPin->LinkedTo)
+    {
+        ModifyPinOwner(LinkedPin);
+    }
+
+    UEdGraphNode* NewNode = Candidate->Candidate.Spawner->Invoke(
+        Graph,
+        DynamicBindings,
+        FVector2D(Request.PositionX, Request.PositionY));
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint ==
+            ESemanticInsertionFailurePoint::OutOfGraphResult &&
+        NewNode)
+    {
+        Graph->Nodes.Remove(NewNode);
+    }
+#endif
+    auto RollbackFailure = [&](const FString& Code,
+                               const FString& Path,
+                               const FString& Message,
+                               const FString& Hint)
+    {
+        TArray<FString> AffectedIds = {
+            Request.GraphId, Request.SourcePinId, Request.TargetPinId};
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node || (Node != NewNode && NodesBefore.Contains(Node)))
+            {
+                continue;
+            }
+            AffectedIds.Add(DescribeNodeTarget(Blueprint, Node).Id);
+            for (UEdGraphPin* Pin : Node->Pins)
+            {
+                if (Pin && !Pin->bHidden)
+                {
+                    AffectedIds.Add(DescribePinTarget(Blueprint, Pin).Id);
+                }
+            }
+        }
+        return RollbackSemanticFailure(
+            Scope,
+            Blueprint,
+            Request.GraphId,
+            BeforeSnapshot,
+            Code,
+            Path,
+            Message,
+            Hint,
+            AffectedIds,
+            TEXT("Blueprint insertion rollback left a graph delta."),
+#if WITH_DEV_AUTOMATION_TESTS
+            GSemanticInsertionFailurePoint ==
+                ESemanticInsertionFailurePoint::AfterRollbackResidual
+#else
+            false
+#endif
+        );
+    };
+    int32 AddedAfterInvoke = 0;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        AddedAfterInvoke += Node && !NodesBefore.Contains(Node) ? 1 : 0;
+    }
+    if (!NewNode || NodesBefore.Contains(NewNode) ||
+        NewNode->GetGraph() != Graph || !Graph->Nodes.Contains(NewNode) ||
+        AddedAfterInvoke != 1)
+    {
+        return RollbackFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The native action did not create exactly one requested node in graph_id."),
+            TEXT("Repeat connection suggestions or choose a non-singleton action."));
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint ==
+            ESemanticInsertionFailurePoint::AfterInvoke ||
+        GSemanticInsertionFailurePoint ==
+            ESemanticInsertionFailurePoint::AfterRollbackResidual)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected insertion failure after native invocation."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+    Scope.Modify(NewNode);
+    if (NewNode->GetClass()->GetPathName() !=
+        Candidate->Candidate.NodeClassPath)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.action_id"),
+            TEXT("The native spawner returned an unexpected node class."),
+            TEXT("Repeat connection suggestions and report the action signature."));
+    }
+    UEdGraphPin* ActualInput = FindSpawnedPin(NewNode, InputBinding);
+    UEdGraphPin* ActualOutput = FindSpawnedPin(NewNode, OutputBinding);
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint ==
+        ESemanticInsertionFailurePoint::MissingActualInput)
+    {
+        ActualInput = nullptr;
+    }
+    if (GSemanticInsertionFailurePoint ==
+        ESemanticInsertionFailurePoint::MissingActualOutput)
+    {
+        ActualOutput = nullptr;
+    }
+#endif
+    if (!ActualInput || !ActualOutput)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.input_binding_id"),
+            TEXT("The spawned node no longer has the selected pin pair."),
+            TEXT("Repeat connection suggestions and choose a current pair."));
+    }
+    FSemanticResponse ActualSource;
+    FSemanticResponse ActualTarget;
+    if (!ClassifyInsertionResponse(
+            Graph->GetSchema()->CanCreateConnection(SourcePin, ActualInput),
+            SourcePin,
+            ActualInput,
+            SourcePin,
+            TargetPin,
+            Action.Context.bAllowConversion,
+            ActualSource) ||
+        !ClassifyInsertionResponse(
+            Graph->GetSchema()->CanCreateConnection(ActualOutput, TargetPin),
+            ActualOutput,
+            TargetPin,
+            SourcePin,
+            TargetPin,
+            Action.Context.bAllowConversion,
+            ActualTarget) ||
+        ActualSource.Kind != Pair->SourceResponse.Kind ||
+        ActualTarget.Kind != Pair->TargetResponse.Kind)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.input_binding_id"),
+            TEXT("The spawned pin pair does not match its preflight schema responses."),
+            TEXT("Repeat connection suggestions against the current graph state."));
+    }
+
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint ==
+        ESemanticInsertionFailurePoint::BeforeBreak)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected insertion failure before removing the old edge."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+    Graph->GetSchema()->BreakSinglePinLink(SourcePin, TargetPin);
+    if (SourcePin->LinkedTo.Contains(TargetPin) ||
+        TargetPin->LinkedTo.Contains(SourcePin))
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.target_pin_id"),
+            TEXT("K2 schema failed to remove the named old edge."),
+            TEXT("Inspect the graph before retrying."));
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint ==
+        ESemanticInsertionFailurePoint::AfterBreak)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected insertion failure after removing the old edge."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+    bool bFirstConnectionCreated = false;
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint !=
+        ESemanticInsertionFailurePoint::BeforeFirstConnect)
+#endif
+    {
+        bFirstConnectionCreated = Graph->GetSchema()->TryCreateConnection(
+            SourcePin, ActualInput);
+    }
+    if (!bFirstConnectionCreated)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.input_binding_id"),
+            TEXT("K2 schema failed to create the source-to-input connection."),
+            TEXT("Repeat connection suggestions against the current graph state."));
+    }
+    bool bSecondConnectionCreated = false;
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint !=
+        ESemanticInsertionFailurePoint::BeforeSecondConnect)
+#endif
+    {
+        bSecondConnectionCreated = Graph->GetSchema()->TryCreateConnection(
+            ActualOutput, TargetPin);
+    }
+    if (!bSecondConnectionCreated)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.output_binding_id"),
+            TEXT("K2 schema failed to create the output-to-target connection."),
+            TEXT("Repeat connection suggestions against the current graph state."));
+    }
+
+    TArray<UEdGraphNode*> AuxiliaryNodes;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node && Node != NewNode && !NodesBefore.Contains(Node))
+        {
+            AuxiliaryNodes.Add(Node);
+        }
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint ==
+        ESemanticInsertionFailurePoint::AfterConnectionsBreakTopology)
+    {
+        SourcePin->BreakLinkTo(ActualInput);
+    }
+#endif
+    AuxiliaryNodes.Sort([](const UEdGraphNode& Left, const UEdGraphNode& Right)
+    {
+        return Left.NodeGuid < Right.NodeGuid;
+    });
+    if (!VerifyInsertionTopology(
+            Blueprint,
+            Graph,
+            SourcePin,
+            TargetPin,
+            ActualInput,
+            ActualOutput,
+            ActualSource,
+            ActualTarget,
+            AuxiliaryNodes,
+            EdgesBefore))
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("result.connections"),
+            TEXT("The insertion changed unrelated topology or did not create both replacement paths."),
+            TEXT("Inspect and resnapshot the graph before retrying."));
+    }
+    bool bStableResult = ValidateStableConnectedSpawnResult(
+            Blueprint, SourcePin, NewNode, AuxiliaryNodes) &&
+        DescribePinTarget(Blueprint, TargetPin).Id.StartsWith(TEXT("pin:"));
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticInsertionFailurePoint ==
+        ESemanticInsertionFailurePoint::ZeroVisiblePinGuid)
+    {
+        bStableResult = false;
+    }
+#endif
+    if (!bStableResult)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("result"),
+            TEXT("Inserted semantic targets or topology edges did not receive stable IDs."),
+            TEXT("Retry after the graph has finished loading."));
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+    return InsertionSuccess(
+        Blueprint,
+        Graph,
+        Request,
+        SourcePin,
+        TargetPin,
+        NewNode,
+        ActualInput,
+        ActualOutput,
+        ActualSource,
+        ActualTarget,
         AuxiliaryNodes);
 #endif
 }

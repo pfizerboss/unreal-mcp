@@ -700,6 +700,20 @@ async def test_cancel_transaction_is_used_before_first_successful_write():
 
 
 @pytest.mark.asyncio
+async def test_failed_first_write_rolls_back_transaction():
+    runtime = await make_runtime()
+    runtime.backend.fail_step = "create"
+    result = await runtime.executor.run(
+        runtime.plan.id, runtime.plan.confirmation_token
+    )
+    assert result.status is WorkflowStatus.FAILED_ROLLED_BACK
+    assert ("rollback_transaction", runtime.plan.id) in runtime.backend.calls
+    assert not any(
+        call[0] == "cancel_transaction" for call in runtime.backend.calls
+    )
+
+
+@pytest.mark.asyncio
 async def test_no_write_recovery_never_runs_explicit_inverse():
     first = PlanStep(
         invocation=ActionInvocation(
@@ -739,7 +753,10 @@ async def test_transport_exception_is_structured_and_recovers_transaction(runtim
     )
     assert result.status is WorkflowStatus.FAILED_ROLLED_BACK
     assert result.errors[0].code == "UE_UNAVAILABLE"
-    assert ("cancel_transaction", runtime.plan.id) in runtime.backend.calls
+    assert ("rollback_transaction", runtime.plan.id) in runtime.backend.calls
+    assert not any(
+        call[0] == "cancel_transaction" for call in runtime.backend.calls
+    )
 
 
 @pytest.mark.asyncio

@@ -231,6 +231,11 @@ public:
     static FString AddBlueprintConnectedActionNode(
         UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Insert a returned connection-context action into one existing edge. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString InsertBlueprintActionNode(
+        UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Create a user-authored function with a complete ordered signature. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString CreateBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);
