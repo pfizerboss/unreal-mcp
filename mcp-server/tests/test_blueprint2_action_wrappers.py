@@ -67,6 +67,20 @@ SELF_HOSTED_WORKFLOW = ROOT / ".github" / "workflows" / "e2e-selfhosted.yml"
 PLUGIN_PYTHON = ADAPTER_FILE.parents[1]
 
 
+def _cpp_function_body(source: str, signature: str) -> str:
+    start = source.index(signature)
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"Unbalanced C++ function body: {signature}")
+
+
 def test_palette_spawn_has_no_implicit_compile_save_or_python_escape():
     source = PALETTE_SOURCE.read_text(encoding="utf-8")
 
@@ -159,9 +173,10 @@ def test_semantic_suggestion_is_read_only_and_connected_spawn_is_transactional()
 
 def test_replacement_preview_is_strictly_read_only():
     source = SEMANTIC_SOURCE.read_text(encoding="utf-8")
-    body = source[source.index(
-        "FString UMCPythonHelper::PreviewBlueprintActionReplacement"
-    ):]
+    body = _cpp_function_body(
+        source,
+        "FString UMCPythonHelper::PreviewBlueprintActionReplacement",
+    )
 
     for required in (
         "ResolvePaletteActionToken",
@@ -183,6 +198,45 @@ def test_replacement_preview_is_strictly_read_only():
         "PlayInEditor",
     ):
         assert forbidden not in body
+
+
+def test_all_semantic_mutations_are_transactional_and_explicitly_unsaved():
+    source = SEMANTIC_SOURCE.read_text(encoding="utf-8")
+    bodies = {
+        signature: _cpp_function_body(source, signature)
+        for signature in (
+            "FString UMCPythonHelper::AddBlueprintConnectedActionNode",
+            "FString UMCPythonHelper::InsertBlueprintActionNode",
+            "FString UMCPythonHelper::ReplaceBlueprintNodeWithAction",
+        )
+    }
+
+    for signature, body in bodies.items():
+        assert "FMutationScope Scope" in body, signature
+        assert "BuildBlueprintGraphSnapshot" in body, signature
+        for forbidden in (
+            "CompileBlueprint",
+            "SavePackage(",
+            "execute_python",
+            "PlayInEditor",
+        ):
+            assert forbidden not in body, (signature, forbidden)
+
+    replacement = bodies[
+        "FString UMCPythonHelper::ReplaceBlueprintNodeWithAction"
+    ]
+    assert "DestroyNode" in replacement
+    assert "RemoveNode" not in replacement
+    assert 'TEXT("saved"), false' in source
+    assert replacement.index("BuildBlueprintGraphSnapshot") < replacement.index(
+        "FMutationScope Scope"
+    )
+    assert replacement.index("OldNode->DestroyNode()") < replacement.index(
+        "BeforeFinalVerification"
+    )
+    assert replacement.rindex("BuildBlueprintGraphSnapshot") < replacement.index(
+        "MarkBlueprintAsModified"
+    )
 
 
 def _load_blueprint_actions(monkeypatch, helper):

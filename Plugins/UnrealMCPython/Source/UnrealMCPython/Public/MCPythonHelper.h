@@ -241,6 +241,11 @@ public:
     static FString PreviewBlueprintActionReplacement(
         UBlueprint* Blueprint, const FString& RequestJson);
 
+    /** Apply one unchanged snapshot-bound replacement plan atomically. */
+    UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
+    static FString ReplaceBlueprintNodeWithAction(
+        UBlueprint* Blueprint, const FString& RequestJson);
+
     /** Create a user-authored function with a complete ordered signature. */
     UFUNCTION(BlueprintCallable, Category="Editor|MCPython")
     static FString CreateBlueprintFunction(UBlueprint* Blueprint, const FString& RequestJson);

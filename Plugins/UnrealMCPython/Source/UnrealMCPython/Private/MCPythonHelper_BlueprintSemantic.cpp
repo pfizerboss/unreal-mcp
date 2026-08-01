@@ -30,6 +30,7 @@ ESemanticConnectedSpawnFailurePoint GSemanticConnectedSpawnFailurePoint =
     ESemanticConnectedSpawnFailurePoint::None;
 ESemanticInsertionFailurePoint GSemanticInsertionFailurePoint =
     ESemanticInsertionFailurePoint::None;
+ESemanticFailurePoint GSemanticFailurePoint = ESemanticFailurePoint::None;
 
 void SetSemanticConnectedSpawnFailurePointForTests(
     const ESemanticConnectedSpawnFailurePoint Point)
@@ -41,6 +42,11 @@ void SetSemanticInsertionFailurePointForTests(
     const ESemanticInsertionFailurePoint Point)
 {
     GSemanticInsertionFailurePoint = Point;
+}
+
+void SetSemanticFailurePointForTests(const ESemanticFailurePoint Point)
+{
+    GSemanticFailurePoint = Point;
 }
 }
 #endif
@@ -225,6 +231,13 @@ struct FReplacementPreviewRequest
     bool bAllowLoss = false;
 };
 
+struct FReplacementApplyRequest
+{
+    FString GraphId;
+    FString ReplacementPlanId;
+    bool bAllowLoss = false;
+};
+
 FString SemanticFailure(
     const FString& Code,
     const FString& Path,
@@ -346,6 +359,21 @@ bool ParseJsonObject(
             TEXT("Use the published Blueprint semantic action schema."));
     }
     return true;
+}
+
+TSharedPtr<FJsonValue> ParseCanonicalJsonValue(const FString& Json)
+{
+    TSharedPtr<FJsonObject> Wrapper;
+    FError Ignored;
+    if (!ParseJsonObject(
+            FString::Printf(TEXT("{\"value\":%s}"), *Json),
+            Wrapper,
+            Ignored) ||
+        !Wrapper->Values.Contains(TEXT("value")))
+    {
+        return nullptr;
+    }
+    return Wrapper->Values.FindRef(TEXT("value"));
 }
 
 bool ParseConnectionSuggestionRequest(
@@ -942,6 +970,67 @@ bool ParseReplacementPreviewRequest(
     return true;
 }
 
+bool ParseReplacementApplyRequest(
+    const FString& Json,
+    FReplacementApplyRequest& OutRequest,
+    FError& OutError)
+{
+    TSharedPtr<FJsonObject> Object;
+    if (!ParseJsonObject(Json, Object, OutError))
+    {
+        return false;
+    }
+    static const TSet<FString> Allowed = {
+        TEXT("graph_id"), TEXT("replacement_plan_id"), TEXT("allow_loss")};
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Object->Values)
+    {
+        if (!Allowed.Contains(Field.Key))
+        {
+            return SetSemanticError(
+                OutError,
+                TEXT("INVALID_INPUT"),
+                TEXT("params.") + Field.Key,
+                TEXT("Unknown field in closed replacement apply request."),
+                TEXT("Remove fields not present in the published action schema."));
+        }
+    }
+    if (!Object->TryGetStringField(TEXT("graph_id"), OutRequest.GraphId) ||
+        !Object->TryGetStringField(
+            TEXT("replacement_plan_id"), OutRequest.ReplacementPlanId))
+    {
+        return SetSemanticError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params"),
+            TEXT("graph_id and replacement_plan_id are required strings."),
+            TEXT("Preview a replacement and pass its current plan token."));
+    }
+    FGuid GraphGuid;
+    if (!ParseTargetId(OutRequest.GraphId, ETargetKind::Graph, GraphGuid) ||
+        !IsOpaqueSemanticToken(
+            OutRequest.ReplacementPlanId, TEXT("replacement-plan:")))
+    {
+        return SetSemanticError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("Replacement apply IDs must be canonical stable or opaque IDs."),
+            TEXT("Preview the replacement again and use its plan token unchanged."));
+    }
+    if (Object->Values.Contains(TEXT("allow_loss")) &&
+        (!Object->HasTypedField<EJson::Boolean>(TEXT("allow_loss")) ||
+            !Object->TryGetBoolField(TEXT("allow_loss"), OutRequest.bAllowLoss)))
+    {
+        return SetSemanticError(
+            OutError,
+            TEXT("INVALID_INPUT"),
+            TEXT("params.allow_loss"),
+            TEXT("allow_loss must be a Boolean when present."),
+            TEXT("Pass true or false, not a string or number."));
+    }
+    return true;
+}
+
 UEdGraphPin* ResolveSemanticPin(
     UEdGraph* Graph,
     const FString& PinId,
@@ -1117,6 +1206,36 @@ bool ClassifyInsertionResponse(
         OutResponse.Kind = TEXT("break_planned_target_link");
     }
     return true;
+}
+
+bool ClassifyReplacementResponse(
+    const FPinConnectionResponse& Response,
+    UEdGraphPin* NewPin,
+    UEdGraphPin* LinkedPin,
+    UEdGraphPin* OldPin,
+    const bool bAllowConversion,
+    FSemanticResponse& OutResponse)
+{
+    if (!NewPin || !LinkedPin || !OldPin ||
+        OldPin->Direction != NewPin->Direction ||
+        OldPin->Direction == LinkedPin->Direction)
+    {
+        return false;
+    }
+    UEdGraphPin* OldSource = OldPin->Direction == EGPD_Output
+        ? OldPin
+        : LinkedPin;
+    UEdGraphPin* OldTarget = OldPin->Direction == EGPD_Input
+        ? OldPin
+        : LinkedPin;
+    return ClassifyInsertionResponse(
+        Response,
+        NewPin,
+        LinkedPin,
+        OldSource,
+        OldTarget,
+        bAllowConversion,
+        OutResponse);
 }
 
 void CollectTemplatePins(
@@ -2494,6 +2613,216 @@ FString ConnectedSpawnSuccess(
         TEXT("Spawned and connected one native Blueprint palette action."),
         Data));
 }
+
+FString ReplacementSuccess(
+    UBlueprint* Blueprint,
+    UEdGraphNode* NewNode,
+    const FReplacementApplyRequest& Request,
+    const FReplacementPlanRecord& Plan,
+    const TMap<FString, UEdGraphPin*>& ActualPinsByBinding,
+    const TArray<UEdGraphNode*>& AuxiliaryNodes)
+{
+    TArray<UEdGraphPin*> VisiblePins;
+    for (UEdGraphPin* Pin : NewNode->Pins)
+    {
+        if (Pin && !Pin->bHidden)
+        {
+            VisiblePins.Add(Pin);
+        }
+    }
+    VisiblePins.Sort([&](const UEdGraphPin& Left, const UEdGraphPin& Right)
+    {
+        return DescribePinTarget(Blueprint, &Left).Id <
+            DescribePinTarget(Blueprint, &Right).Id;
+    });
+    TArray<TSharedPtr<FJsonValue>> PinIds;
+    TArray<TSharedPtr<FJsonValue>> Pins;
+    for (const UEdGraphPin* Pin : VisiblePins)
+    {
+        const TSharedRef<FJsonObject> Serialized = SerializeSpawnPin(
+            Blueprint, Pin);
+        PinIds.Add(MakeShared<FJsonValueString>(
+            Serialized->GetStringField(TEXT("id"))));
+        Pins.Add(MakeShared<FJsonValueObject>(Serialized));
+    }
+
+    TArray<FString> AuxiliaryIds;
+    for (UEdGraphNode* Node : AuxiliaryNodes)
+    {
+        AuxiliaryIds.Add(DescribeNodeTarget(Blueprint, Node).Id);
+    }
+    AuxiliaryIds.Sort();
+    TArray<TSharedPtr<FJsonValue>> AuxiliaryValues;
+    for (const FString& Id : AuxiliaryIds)
+    {
+        AuxiliaryValues.Add(MakeShared<FJsonValueString>(Id));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> PreservedDefaults;
+    for (const FReplacementDefaultRecord& Default : Plan.Defaults)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Default.OldPinId);
+        Value->SetStringField(TEXT("new_binding_id"), Default.NewBindingId);
+        Value->SetField(
+            TEXT("value"), ParseCanonicalJsonValue(Default.CanonicalValueJson));
+        PreservedDefaults.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    TArray<TSharedPtr<FJsonValue>> DroppedConnections;
+    for (const FReplacementConnectionLossRecord& Loss : Plan.LostConnections)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Loss.OldPinId);
+        Value->SetStringField(TEXT("linked_pin_id"), Loss.LinkedPinId);
+        Value->SetStringField(TEXT("reason"), Loss.Reason);
+        DroppedConnections.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    TArray<TSharedPtr<FJsonValue>> DroppedDefaults;
+    for (const FReplacementDefaultLossRecord& Loss : Plan.LostDefaults)
+    {
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Loss.OldPinId);
+        Value->SetField(
+            TEXT("value"), ParseCanonicalJsonValue(Loss.CanonicalValueJson));
+        Value->SetStringField(TEXT("reason"), Loss.Reason);
+        DroppedDefaults.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    TArray<TSharedPtr<FJsonValue>> PreservedMetadata;
+    for (const TCHAR* Field : {
+            TEXT("position"), TEXT("comment"),
+            TEXT("comment_bubble_visible"), TEXT("enabled_state")})
+    {
+        PreservedMetadata.Add(MakeShared<FJsonValueString>(Field));
+    }
+
+    TArray<TSharedPtr<FJsonValue>> Connections;
+    TSet<FString> ConnectionKeys;
+    UEdGraph* Graph = NewNode ? NewNode->GetGraph() : nullptr;
+    for (const FReplacementConnectionRecord& Connection : Plan.Connections)
+    {
+        UEdGraphPin* const* ActualPin = ActualPinsByBinding.Find(
+            Connection.NewBindingId);
+        FError ResolveError;
+        UEdGraphPin* LinkedPin = ResolveSemanticPin(
+            Graph,
+            Connection.LinkedPinId,
+            ResolveError,
+            TEXT("result.connections"));
+        if (!ActualPin || !*ActualPin || !LinkedPin)
+        {
+            continue;
+        }
+        UEdGraphPin* OutputPin = (*ActualPin)->Direction == EGPD_Output
+            ? *ActualPin
+            : LinkedPin;
+        UEdGraphPin* InputPin = (*ActualPin)->Direction == EGPD_Input
+            ? *ActualPin
+            : LinkedPin;
+        const FString SourceId = DescribePinTarget(Blueprint, OutputPin).Id;
+        const FString TargetId = DescribePinTarget(Blueprint, InputPin).Id;
+        const FString Key = SourceId + TEXT("\n") + TargetId;
+        ConnectionKeys.Add(Key);
+        const TSharedRef<FJsonObject> Response = MakeShared<FJsonObject>();
+        Response->SetStringField(TEXT("kind"), Connection.ResponseKind);
+        Response->SetStringField(TEXT("message"), Connection.ResponseMessage);
+        Response->SetBoolField(
+            TEXT("requires_conversion"),
+            Connection.ResponseKind == TEXT("conversion_node") ||
+                Connection.ResponseKind == TEXT("promotion"));
+        TArray<FString> PathAuxiliaryIds;
+        for (UEdGraphNode* Node : CollectAuxiliaryPathNodes(
+                OutputPin, InputPin, AuxiliaryNodes))
+        {
+            PathAuxiliaryIds.Add(DescribeNodeTarget(Blueprint, Node).Id);
+        }
+        PathAuxiliaryIds.Sort();
+        TArray<TSharedPtr<FJsonValue>> PathAuxiliaryValues;
+        for (const FString& Id : PathAuxiliaryIds)
+        {
+            PathAuxiliaryValues.Add(MakeShared<FJsonValueString>(Id));
+        }
+        const TSharedRef<FJsonObject> Edge = MakeShared<FJsonObject>();
+        Edge->SetStringField(TEXT("source_pin_id"), SourceId);
+        Edge->SetStringField(TEXT("target_pin_id"), TargetId);
+        Edge->SetObjectField(TEXT("response"), Response);
+        Edge->SetArrayField(
+            TEXT("auxiliary_node_ids"), MoveTemp(PathAuxiliaryValues));
+        Connections.Add(MakeShared<FJsonValueObject>(Edge));
+    }
+    for (const TSharedPtr<FJsonValue>& EdgeValue : SerializeFinalTopologyEdges(
+            Blueprint, NewNode, AuxiliaryNodes, FString()))
+    {
+        const TSharedPtr<FJsonObject> Edge = EdgeValue->AsObject();
+        const FString Key = Edge->GetStringField(TEXT("source_pin_id")) +
+            TEXT("\n") + Edge->GetStringField(TEXT("target_pin_id"));
+        if (!ConnectionKeys.Contains(Key))
+        {
+            ConnectionKeys.Add(Key);
+            Connections.Add(EdgeValue);
+        }
+    }
+
+    const TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
+    Position->SetNumberField(TEXT("x"), NewNode->NodePosX);
+    Position->SetNumberField(TEXT("y"), NewNode->NodePosY);
+    const TSharedRef<FJsonObject> Data = MakeShared<FJsonObject>();
+    Data->SetStringField(
+        TEXT("replacement_plan_id"), Request.ReplacementPlanId);
+    Data->SetStringField(TEXT("asset_path"), Blueprint->GetPathName());
+    Data->SetStringField(TEXT("graph_id"), Request.GraphId);
+    Data->SetStringField(TEXT("action_id"), Plan.ActionId);
+    Data->SetStringField(TEXT("old_node_id"), Plan.NodeId);
+    Data->SetStringField(
+        TEXT("new_node_id"), DescribeNodeTarget(Blueprint, NewNode).Id);
+    Data->SetStringField(
+        TEXT("class_path"), NewNode->GetClass()->GetPathName());
+    Data->SetObjectField(TEXT("position"), Position);
+    Data->SetArrayField(TEXT("pin_ids"), MoveTemp(PinIds));
+    Data->SetArrayField(TEXT("pins"), MoveTemp(Pins));
+    Data->SetArrayField(
+        TEXT("auxiliary_node_ids"), MoveTemp(AuxiliaryValues));
+    Data->SetArrayField(TEXT("connections"), MoveTemp(Connections));
+    Data->SetArrayField(
+        TEXT("preserved_defaults"), MoveTemp(PreservedDefaults));
+    Data->SetArrayField(
+        TEXT("dropped_connections"), MoveTemp(DroppedConnections));
+    Data->SetArrayField(TEXT("dropped_defaults"), MoveTemp(DroppedDefaults));
+    Data->SetArrayField(
+        TEXT("preserved_metadata"), MoveTemp(PreservedMetadata));
+    Data->SetBoolField(TEXT("transaction_recorded"), true);
+    Data->SetBoolField(TEXT("saved"), false);
+    const TSharedRef<FJsonObject> Result = MakeSuccess(
+        TEXT("Replaced one Blueprint node from an unchanged semantic plan."),
+        Data);
+    TArray<TSharedPtr<FJsonValue>> Warnings;
+    TArray<TSharedPtr<FJsonValue>> Changes;
+    for (const FReplacementConnectionLossRecord& Loss : Plan.LostConnections)
+    {
+        Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+            TEXT("Dropped connection %s -> %s exactly as previewed."),
+            *Loss.OldPinId,
+            *Loss.LinkedPinId)));
+        const TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
+        Change->SetStringField(TEXT("kind"), TEXT("dropped_connection"));
+        Change->SetStringField(TEXT("target"), Loss.OldPinId);
+        Change->SetStringField(TEXT("description"), Loss.Reason);
+        Changes.Add(MakeShared<FJsonValueObject>(Change));
+    }
+    for (const FReplacementDefaultLossRecord& Loss : Plan.LostDefaults)
+    {
+        Warnings.Add(MakeShared<FJsonValueString>(FString::Printf(
+            TEXT("Dropped default on %s exactly as previewed."),
+            *Loss.OldPinId)));
+        const TSharedRef<FJsonObject> Change = MakeShared<FJsonObject>();
+        Change->SetStringField(TEXT("kind"), TEXT("dropped_default"));
+        Change->SetStringField(TEXT("target"), Loss.OldPinId);
+        Change->SetStringField(TEXT("description"), Loss.Reason);
+        Changes.Add(MakeShared<FJsonValueObject>(Change));
+    }
+    Result->SetArrayField(TEXT("warnings"), MoveTemp(Warnings));
+    Result->SetArrayField(TEXT("changes"), MoveTemp(Changes));
+    return SerializeResult(Result);
+}
 }
 
 FString UMCPythonHelper::SuggestBlueprintNodesForConnection(
@@ -3723,9 +4052,12 @@ FString UMCPythonHelper::PreviewBlueprintActionReplacement(
                 return false;
             }
             FSemanticResponse Response;
-            if (!ClassifySemanticResponse(
+            if (!ClassifyReplacementResponse(
                     Graph->GetSchema()->CanCreateConnection(
                         NewPin.Descriptor.Pin, LinkedPin),
+                    NewPin.Descriptor.Pin,
+                    LinkedPin,
+                    OldPin,
                     Request.bAllowConversion,
                     Response))
             {
@@ -4157,5 +4489,691 @@ FString UMCPythonHelper::PreviewBlueprintActionReplacement(
     return SerializeResult(MakeSuccess(
         TEXT("Built a read-only snapshot-bound Blueprint replacement preview."),
         Data));
+#endif
+}
+
+FString UMCPythonHelper::ReplaceBlueprintNodeWithAction(
+    UBlueprint* Blueprint,
+    const FString& RequestJson)
+{
+#if UE_VERSION_NEWER_THAN(5, 7, 99) || UE_VERSION_OLDER_THAN(5, 7, 0)
+    return UnsupportedSemanticVersion(TEXT("Blueprint action replacement"));
+#else
+    if (!Blueprint)
+    {
+        return MissingBlueprint();
+    }
+    FReplacementApplyRequest Request;
+    FError Error;
+    if (!ParseReplacementApplyRequest(RequestJson, Request, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    UEdGraph* Graph = nullptr;
+    if (!ResolveStableGraph(Blueprint, Request.GraphId, Graph, Error, true))
+    {
+        return SemanticFailure(Error);
+    }
+    FReplacementPlanRecord Plan;
+    if (!ResolveReplacementPlan(
+            Request.ReplacementPlanId,
+            Blueprint->GetPathName(),
+            Request.GraphId,
+            Plan,
+            Error))
+    {
+        return SemanticFailure(Error);
+    }
+    if (Request.bAllowLoss != Plan.bAllowLoss)
+    {
+        return SemanticFailure(
+            TEXT("INVALID_INPUT"),
+            TEXT("params.allow_loss"),
+            TEXT("allow_loss must exactly match the replacement preview policy."),
+            TEXT("Repeat preview with the intended loss policy."));
+    }
+    if (Plan.LossCount > 0 && !Request.bAllowLoss)
+    {
+        return SemanticFailure(
+            TEXT("CONFLICT"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The strict replacement plan contains connection or default loss."),
+            TEXT("Review the preview, add mappings, or explicitly preview with allow_loss=true."));
+    }
+
+    FGuid OldNodeGuid;
+    ParseTargetId(Plan.NodeId, ETargetKind::Node, OldNodeGuid);
+    UEdGraphNode* OldNode = nullptr;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node && Node->NodeGuid == OldNodeGuid)
+        {
+            if (OldNode)
+            {
+                return SemanticFailure(
+                    TEXT("PRECONDITION_FAILED"),
+                    TEXT("params.replacement_plan_id"),
+                    TEXT("The planned old node ID is no longer unique."),
+                    TEXT("Inspect the graph and preview replacement again."));
+            }
+            OldNode = Node;
+        }
+    }
+    if (!OldNode)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The planned old node no longer exists."),
+            TEXT("Inspect the graph and preview replacement again."));
+    }
+
+    const TSharedRef<FJsonObject> RevalidationRequest = MakeShared<FJsonObject>();
+    RevalidationRequest->SetStringField(TEXT("graph_id"), Plan.GraphId);
+    RevalidationRequest->SetStringField(TEXT("node_id"), Plan.NodeId);
+    RevalidationRequest->SetStringField(TEXT("action_id"), Plan.ActionId);
+    TArray<TSharedPtr<FJsonValue>> DynamicBindingValues;
+    for (const FString& Id : Plan.DynamicBindingIds)
+    {
+        DynamicBindingValues.Add(MakeShared<FJsonValueString>(Id));
+    }
+    RevalidationRequest->SetArrayField(
+        TEXT("bindings"), MoveTemp(DynamicBindingValues));
+    TArray<TSharedPtr<FJsonValue>> ExplicitMappings;
+    for (const FReplacementMappingRecord& Mapping : Plan.Mappings)
+    {
+        if (Mapping.Origin != TEXT("explicit"))
+        {
+            continue;
+        }
+        const TSharedRef<FJsonObject> Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("old_pin_id"), Mapping.OldPinId);
+        Value->SetStringField(TEXT("new_binding_id"), Mapping.NewBindingId);
+        ExplicitMappings.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    RevalidationRequest->SetArrayField(
+        TEXT("pin_mapping"), MoveTemp(ExplicitMappings));
+    RevalidationRequest->SetBoolField(
+        TEXT("allow_conversion"), Plan.bAllowConversion);
+    RevalidationRequest->SetBoolField(TEXT("allow_loss"), Plan.bAllowLoss);
+    const FString RevalidationJson = PreviewBlueprintActionReplacement(
+        Blueprint,
+        CanonicalJsonString(MakeShared<FJsonValueObject>(
+            RevalidationRequest)));
+    TSharedPtr<FJsonObject> Revalidation;
+    if (!ParseJsonObject(RevalidationJson, Revalidation, Error) ||
+        !Revalidation.IsValid())
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The replacement plan could not be revalidated."),
+            TEXT("Preview replacement again before applying it."));
+    }
+    if (!Revalidation->GetBoolField(TEXT("success")))
+    {
+        return RevalidationJson;
+    }
+    const TSharedPtr<FJsonObject> RevalidatedData =
+        Revalidation->GetObjectField(TEXT("data"));
+    if (RevalidatedData->GetStringField(TEXT("replacement_plan_id")) !=
+        Request.ReplacementPlanId)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The node, action, bindings, defaults, links, or policy changed after preview."),
+            TEXT("Repeat replacement preview and review the new proposal."));
+    }
+
+    FPaletteContextExpectation Expected;
+    Expected.AssetPath = Blueprint->GetPathName();
+    Expected.GraphId = Request.GraphId;
+    Expected.GraphSchemaPath = Graph->GetSchema()->GetClass()->GetPathName();
+    Expected.Kind = EPaletteContextKind::Graph;
+    FPaletteActionRecord Action;
+    if (!ResolvePaletteActionToken(Plan.ActionId, Expected, Action, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    FPaletteFilters Filters;
+    if (!ParseStoredFilters(Action.FiltersJson, Filters, Error))
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The action filter context changed after preview."),
+            TEXT("Repeat palette search and replacement preview."));
+    }
+    TArray<FPaletteCandidate> Candidates;
+    BuildCandidates(
+        Blueprint,
+        Graph,
+        TConstArrayView<UEdGraphPin*>(),
+        Action.Query,
+        Filters,
+        Candidates);
+    if (ResultDigest(Candidates) != Plan.ActionResultDigest)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The native graph action result changed after preview."),
+            TEXT("Repeat palette search and replacement preview."));
+    }
+    const FPaletteCandidate* Candidate = FindExactCandidate(Candidates, Action);
+    if (!Candidate)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The selected action is no longer available."),
+            TEXT("Repeat palette search and replacement preview."));
+    }
+    TArray<FPaletteBindingRecord> DynamicRecords;
+    IBlueprintNodeBinder::FBindingSet DynamicBindings;
+    if (!ResolveDynamicBindingObjects(
+            Plan.ActionId,
+            Plan.DynamicBindingIds,
+            DynamicRecords,
+            DynamicBindings,
+            Error))
+    {
+        return SemanticFailure(Error);
+    }
+    TArray<FString> DynamicPaths;
+    for (const FPaletteBindingRecord& Record : DynamicRecords)
+    {
+        DynamicPaths.Add(Record.ObjectPath);
+    }
+    DynamicPaths.Sort();
+    if (DynamicPaths != Action.BindingPaths)
+    {
+        return SemanticFailure(
+            TEXT("PRECONDITION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The dynamic action bindings changed after preview."),
+            TEXT("Repeat palette search and replacement preview."));
+    }
+
+    TMap<FString, FPaletteBindingRecord> BindingRecords;
+    TMap<FString, UEdGraphPin*> OldPins;
+    TSet<FString> OldPinIds;
+    for (const FReplacementMappingRecord& Mapping : Plan.Mappings)
+    {
+        FPaletteBindingRecord Binding;
+        if (!ResolvePaletteTemplatePinBinding(
+                Plan.ActionId,
+                Mapping.NewBindingId,
+                Binding,
+                Error))
+        {
+            return SemanticFailure(
+                TEXT("PRECONDITION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("One template-pin binding changed after preview."),
+                TEXT("Repeat replacement preview."));
+        }
+        UEdGraphPin* OldPin = ResolveSemanticPin(
+            Graph,
+            Mapping.OldPinId,
+            Error,
+            TEXT("params.replacement_plan_id"));
+        if (!OldPin || OldPin->GetOwningNodeUnchecked() != OldNode)
+        {
+            return SemanticFailure(
+                TEXT("PRECONDITION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("One mapped old pin changed after preview."),
+                TEXT("Repeat replacement preview."));
+        }
+        BindingRecords.Add(Mapping.NewBindingId, Binding);
+        OldPins.Add(Mapping.OldPinId, OldPin);
+        OldPinIds.Add(Mapping.OldPinId);
+    }
+    for (const FReplacementConnectionRecord& Connection : Plan.Connections)
+    {
+        UEdGraphPin* const* OldPin = OldPins.Find(Connection.OldPinId);
+        UEdGraphPin* LinkedPin = ResolveSemanticPin(
+            Graph,
+            Connection.LinkedPinId,
+            Error,
+            TEXT("params.replacement_plan_id"));
+        if (!OldPin || !*OldPin || !LinkedPin ||
+            !(*OldPin)->LinkedTo.Contains(LinkedPin) ||
+            !LinkedPin->LinkedTo.Contains(*OldPin))
+        {
+            return SemanticFailure(
+                TEXT("PRECONDITION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("One planned external link changed after preview."),
+                TEXT("Repeat replacement preview."));
+        }
+    }
+
+    TSharedPtr<FJsonObject> BeforeSnapshot;
+    if (!BuildBlueprintGraphSnapshot(
+            Blueprint, {Request.GraphId}, BeforeSnapshot, Error))
+    {
+        return SemanticFailure(Error);
+    }
+    const TSet<FString> EdgesBefore = CollectStableGraphEdgeKeys(
+        Blueprint, Graph);
+    TSet<UEdGraphNode*> NodesBefore;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node)
+        {
+            NodesBefore.Add(Node);
+        }
+    }
+
+    FMutationScope Scope(NSLOCTEXT(
+        "MCPython",
+        "ReplaceBlueprintNodeWithAction",
+        "Replace Blueprint node from semantic plan"));
+    if (!Scope.IsValid())
+    {
+        return SemanticFailure(
+            TEXT("TRANSACTION_FAILED"),
+            TEXT("transaction"),
+            TEXT("Could not begin a Blueprint replacement transaction."),
+            TEXT("Close any conflicting editor transaction and retry."));
+    }
+    Scope.Modify(Blueprint);
+    Scope.Modify(Graph);
+    Scope.Modify(OldNode);
+    TSet<UEdGraphNode*> ModifiedNodes = {OldNode};
+    for (UEdGraphPin* OldPin : OldNode->Pins)
+    {
+        for (UEdGraphPin* LinkedPin : OldPin->LinkedTo)
+        {
+            UEdGraphNode* LinkedNode = LinkedPin
+                ? LinkedPin->GetOwningNodeUnchecked()
+                : nullptr;
+            if (LinkedNode && !ModifiedNodes.Contains(LinkedNode))
+            {
+                ModifiedNodes.Add(LinkedNode);
+                Scope.Modify(LinkedNode);
+            }
+        }
+    }
+
+    UEdGraphNode* NewNode = Candidate->Spawner->Invoke(
+        Graph,
+        DynamicBindings,
+        FVector2D(Plan.PositionX, Plan.PositionY));
+    auto RollbackFailure = [&](const FString& Code,
+                               const FString& Path,
+                               const FString& Message,
+                               const FString& Hint)
+    {
+        TArray<FString> AffectedIds = {Request.GraphId, Plan.NodeId};
+        for (const FReplacementConnectionRecord& Connection : Plan.Connections)
+        {
+            AffectedIds.Add(Connection.OldPinId);
+            AffectedIds.Add(Connection.LinkedPinId);
+        }
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node || NodesBefore.Contains(Node))
+            {
+                continue;
+            }
+            AffectedIds.Add(DescribeNodeTarget(Blueprint, Node).Id);
+            for (UEdGraphPin* Pin : Node->Pins)
+            {
+                if (Pin && !Pin->bHidden)
+                {
+                    AffectedIds.Add(DescribePinTarget(Blueprint, Pin).Id);
+                }
+            }
+        }
+        return RollbackSemanticFailure(
+            Scope,
+            Blueprint,
+            Request.GraphId,
+            BeforeSnapshot,
+            Code,
+            Path,
+            Message,
+            Hint,
+            AffectedIds,
+            TEXT("Blueprint replacement rollback left a graph delta."),
+#if WITH_DEV_AUTOMATION_TESTS
+            GSemanticFailurePoint ==
+                ESemanticFailurePoint::AfterRollbackResidual
+#else
+            false
+#endif
+        );
+    };
+    if (!NewNode || NewNode == OldNode || NodesBefore.Contains(NewNode) ||
+        NewNode->GetGraph() != Graph || !Graph->Nodes.Contains(NewNode))
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The native action did not create one new replacement node."),
+            TEXT("Repeat palette search and replacement preview."));
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticFailurePoint == ESemanticFailurePoint::AfterInvoke ||
+        GSemanticFailurePoint == ESemanticFailurePoint::AfterRollbackResidual)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected replacement failure after native invocation."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+    Scope.Modify(NewNode);
+    if (NewNode->GetClass()->GetPathName() != Candidate->NodeClassPath)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("params.replacement_plan_id"),
+            TEXT("The replacement action returned an unexpected node class."),
+            TEXT("Repeat palette search and replacement preview."));
+    }
+
+    TMap<FString, UEdGraphPin*> ActualPinsByBinding;
+    for (const TPair<FString, FPaletteBindingRecord>& Pair : BindingRecords)
+    {
+        UEdGraphPin* ActualPin = FindSpawnedPin(NewNode, Pair.Value);
+#if WITH_DEV_AUTOMATION_TESTS
+        if (GSemanticFailurePoint == ESemanticFailurePoint::MissingActualPin)
+        {
+            ActualPin = nullptr;
+        }
+#endif
+        if (!ActualPin)
+        {
+            return RollbackFailure(
+                TEXT("OPERATION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("The spawned node does not match one planned template pin."),
+                TEXT("Repeat replacement preview against the current action."));
+        }
+        ActualPinsByBinding.Add(Pair.Key, ActualPin);
+    }
+
+    const UEdGraphSchema_K2* K2Schema = Cast<UEdGraphSchema_K2>(
+        Graph->GetSchema());
+    if (!K2Schema)
+    {
+        return RollbackFailure(
+            TEXT("UE_VERSION_UNSUPPORTED"),
+            TEXT("params.graph_id"),
+            TEXT("Replacement requires the native K2 graph schema."),
+            TEXT("Use a Blueprint K2 graph."));
+    }
+    for (const FReplacementDefaultRecord& Default : Plan.Defaults)
+    {
+        UEdGraphPin* const* ActualPin = ActualPinsByBinding.Find(
+            Default.NewBindingId);
+        const TSharedPtr<FJsonValue> Value = ParseCanonicalJsonValue(
+            Default.CanonicalValueJson);
+        FNormalizedDefault Normalized;
+        if (!ActualPin || !*ActualPin || !Value.IsValid() ||
+            !NormalizeDefaultValue(
+                (*ActualPin)->PinType,
+                Value,
+                Blueprint,
+                Normalized,
+                Error,
+                TEXT("params.replacement_plan_id")))
+        {
+            return RollbackFailure(
+                TEXT("PRECONDITION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("One preserved default no longer matches the spawned pin."),
+                TEXT("Repeat replacement preview."));
+        }
+        if ((*ActualPin)->PinType.IsContainer())
+        {
+            K2Schema->TrySetDefaultValue(**ActualPin, Normalized.DefaultValue);
+        }
+        else if ((*ActualPin)->PinType.PinCategory ==
+                UEdGraphSchema_K2::PC_Object ||
+            (*ActualPin)->PinType.PinCategory == UEdGraphSchema_K2::PC_Class ||
+            (*ActualPin)->PinType.PinCategory ==
+                UEdGraphSchema_K2::PC_Interface)
+        {
+            K2Schema->TrySetDefaultObject(**ActualPin, Normalized.DefaultObject);
+        }
+        else if ((*ActualPin)->PinType.PinCategory == UEdGraphSchema_K2::PC_Text)
+        {
+            K2Schema->TrySetDefaultText(
+                **ActualPin, Normalized.DefaultTextValue);
+        }
+        else
+        {
+            K2Schema->TrySetDefaultValue(**ActualPin, Normalized.DefaultValue);
+        }
+        const TSharedPtr<FJsonValue> Applied = SerializeDefaultValue(
+            (*ActualPin)->PinType,
+            (*ActualPin)->DefaultValue,
+            (*ActualPin)->DefaultObject,
+            (*ActualPin)->DefaultTextValue);
+        if (!Applied.IsValid() ||
+            CanonicalJsonString(Applied) != Default.CanonicalValueJson)
+        {
+            return RollbackFailure(
+                TEXT("OPERATION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("A preserved default did not round-trip on the new pin."),
+                TEXT("Repeat replacement preview or select a closer action."));
+        }
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticFailurePoint == ESemanticFailurePoint::AfterDefaults)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected replacement failure after defaults."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+
+    NewNode->NodePosX = Plan.PositionX;
+    NewNode->NodePosY = Plan.PositionY;
+    NewNode->NodeComment = Plan.Comment;
+    NewNode->bCommentBubbleVisible = Plan.bCommentBubbleVisible;
+    NewNode->SetEnabledState(static_cast<ENodeEnabledState>(Plan.EnabledState));
+
+    int32 ConnectionIndex = 0;
+    for (const FReplacementConnectionRecord& Connection : Plan.Connections)
+    {
+        UEdGraphPin* const* ActualPin = ActualPinsByBinding.Find(
+            Connection.NewBindingId);
+        UEdGraphPin* const* OldPin = OldPins.Find(Connection.OldPinId);
+        UEdGraphPin* LinkedPin = ResolveSemanticPin(
+            Graph,
+            Connection.LinkedPinId,
+            Error,
+            TEXT("params.replacement_plan_id"));
+        FSemanticResponse Response;
+        if (!ActualPin || !*ActualPin || !OldPin || !*OldPin || !LinkedPin ||
+            !ClassifyReplacementResponse(
+                Graph->GetSchema()->CanCreateConnection(*ActualPin, LinkedPin),
+                *ActualPin,
+                LinkedPin,
+                *OldPin,
+                Plan.bAllowConversion,
+                Response) ||
+            Response.Kind != Connection.ResponseKind)
+        {
+            return RollbackFailure(
+                TEXT("PRECONDITION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("One spawned connection no longer matches the preview."),
+                TEXT("Repeat replacement preview."));
+        }
+        if (!Graph->GetSchema()->TryCreateConnection(*ActualPin, LinkedPin))
+        {
+            return RollbackFailure(
+                TEXT("OPERATION_FAILED"),
+                TEXT("params.replacement_plan_id"),
+                TEXT("K2 schema failed to create one retained connection."),
+                TEXT("Inspect the graph and repeat replacement preview."));
+        }
+        ++ConnectionIndex;
+#if WITH_DEV_AUTOMATION_TESTS
+        if (ConnectionIndex == 1 &&
+            GSemanticFailurePoint ==
+                ESemanticFailurePoint::AfterFirstConnection)
+        {
+            return RollbackFailure(
+                TEXT("OPERATION_FAILED"),
+                TEXT("test.failure_point"),
+                TEXT("Injected replacement failure after the first connection."),
+                TEXT("Disable the automation failure point before retrying."));
+        }
+#endif
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticFailurePoint == ESemanticFailurePoint::BeforeDestroy)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected replacement failure before old-node destruction."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+
+    OldNode->DestroyNode();
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticFailurePoint == ESemanticFailurePoint::AfterDestroy)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected replacement failure after old-node destruction."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+
+    TArray<UEdGraphNode*> AuxiliaryNodes;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node && Node != NewNode && !NodesBefore.Contains(Node))
+        {
+            AuxiliaryNodes.Add(Node);
+        }
+    }
+    AuxiliaryNodes.Sort([](const UEdGraphNode& Left, const UEdGraphNode& Right)
+    {
+        return Left.NodeGuid < Right.NodeGuid;
+    });
+    if (Graph->Nodes.Contains(OldNode) ||
+        !DescribeNodeTarget(Blueprint, NewNode).Id.StartsWith(TEXT("node:")))
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("result.new_node_id"),
+            TEXT("Old/new node identity verification failed."),
+            TEXT("Inspect and resnapshot the graph."));
+    }
+    for (UEdGraphPin* Pin : NewNode->Pins)
+    {
+        if (Pin && !Pin->bHidden &&
+            !DescribePinTarget(Blueprint, Pin).Id.StartsWith(TEXT("pin:")))
+        {
+            return RollbackFailure(
+                TEXT("OPERATION_FAILED"),
+                TEXT("result.pin_ids"),
+                TEXT("One visible replacement pin lacks a stable ID."),
+                TEXT("Wait for the graph to finish loading and retry."));
+        }
+    }
+    for (const FReplacementConnectionRecord& Connection : Plan.Connections)
+    {
+        UEdGraphPin* const* ActualPin = ActualPinsByBinding.Find(
+            Connection.NewBindingId);
+        UEdGraphPin* LinkedPin = ResolveSemanticPin(
+            Graph,
+            Connection.LinkedPinId,
+            Error,
+            TEXT("result.connections"));
+        FSemanticResponse StoredResponse;
+        StoredResponse.Kind = Connection.ResponseKind;
+        StoredResponse.Message = Connection.ResponseMessage;
+        StoredResponse.bRequiresConversion =
+            Connection.ResponseKind == TEXT("conversion_node") ||
+            Connection.ResponseKind == TEXT("promotion");
+        if (!ActualPin || !*ActualPin || !LinkedPin ||
+            !VerifyConnectedSpawnTopology(
+                LinkedPin, *ActualPin, StoredResponse, AuxiliaryNodes))
+        {
+            return RollbackFailure(
+                TEXT("OPERATION_FAILED"),
+                TEXT("result.connections"),
+                TEXT("Final replacement topology does not contain one planned link."),
+                TEXT("Inspect and resnapshot the graph."));
+        }
+    }
+    const TSet<FString> EdgesAfter = CollectStableGraphEdgeKeys(
+        Blueprint, Graph);
+    for (const FString& Edge : EdgesBefore)
+    {
+        FString SourceId;
+        FString TargetId;
+        if (Edge.Split(TEXT("\n"), &SourceId, &TargetId) &&
+            !OldPinIds.Contains(SourceId) && !OldPinIds.Contains(TargetId) &&
+            !EdgesAfter.Contains(Edge))
+        {
+            return RollbackFailure(
+                TEXT("OPERATION_FAILED"),
+                TEXT("result.connections"),
+                TEXT("Replacement changed unrelated graph topology."),
+                TEXT("Inspect and resnapshot the graph."));
+        }
+    }
+    if (NewNode->NodePosX != Plan.PositionX ||
+        NewNode->NodePosY != Plan.PositionY ||
+        NewNode->NodeComment != Plan.Comment ||
+        NewNode->bCommentBubbleVisible != Plan.bCommentBubbleVisible ||
+        static_cast<uint8>(NewNode->GetDesiredEnabledState()) !=
+            Plan.EnabledState)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("result.preserved_metadata"),
+            TEXT("Replacement metadata did not round-trip."),
+            TEXT("Inspect and resnapshot the graph."));
+    }
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GSemanticFailurePoint ==
+        ESemanticFailurePoint::BeforeFinalVerification)
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("test.failure_point"),
+            TEXT("Injected replacement failure before final verification."),
+            TEXT("Disable the automation failure point before retrying."));
+    }
+#endif
+    TSharedPtr<FJsonObject> AfterSnapshot;
+    if (!BuildBlueprintGraphSnapshot(
+            Blueprint, {Request.GraphId}, AfterSnapshot, Error))
+    {
+        return RollbackFailure(
+            TEXT("OPERATION_FAILED"),
+            TEXT("result"),
+            TEXT("Could not capture the final replacement snapshot."),
+            TEXT("Inspect and resnapshot the graph."));
+    }
+    FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+    return ReplacementSuccess(
+        Blueprint,
+        NewNode,
+        Request,
+        Plan,
+        ActualPinsByBinding,
+        AuxiliaryNodes);
 #endif
 }
