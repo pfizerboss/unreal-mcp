@@ -1,67 +1,44 @@
 # Fork README Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Replace the upstream-oriented root README with a concise bilingual landing page that explains this fork and its Blueprint-focused additions.
 
-**Architecture:** Keep all fork positioning, installation, workflow guidance, compatibility facts, attribution, and license information in the root `README.md`. Preserve deeper server documentation in `mcp-server/README.md`; do not duplicate the full action catalog or upstream promotional content in the root page.
-
-**Tech Stack:** GitHub-flavored Markdown, PowerShell, Python 3.11+, generated MCP action catalog.
+**Constraints:** Edit only root `README.md` in Task 2. Keep the page at 260 lines or fewer. Keep deep server documentation in `mcp-server/README.md`.
 
 ---
 
 ### Task 1: Lock the README acceptance contract
 
 **Files:**
-- Modify: `README.md`
-- Reference: `Docs/superpowers/specs/2026-08-02-fork-readme-design.md`
 
-- [ ] **Step 1: Run the pre-change content check**
+- Reference: `README.md`
 
-Run:
+- [ ] **Step 1: Run the Windows PowerShell 5.1-safe pre-change content gate**
+
+Run this ASCII-only Python source; `\u` escapes avoid PowerShell's UTF-8 stdin encoding ambiguity:
 
 ```powershell
-@'
-from pathlib import Path
-
-text = Path("README.md").read_text(encoding="utf-8")
-required = (
-    "pfizerboss/unreal-mcp",
-    "GenOrca/unreal-mcp",
-    "253",
-    "299",
-    "19",
-    "57",
-    "Connected spawn",
-    "Подключённое создание",
-    "English",
-)
-missing = [item for item in required if item not in text]
-assert not missing, missing
-assert len(text.splitlines()) <= 260, len(text.splitlines())
-'@ | python -
+python -c "from pathlib import Path; text=Path('README.md').read_text(encoding='utf-8'); required=('pfizerboss/unreal-mcp','GenOrca/unreal-mcp','# Unreal MCP \u2014 Blueprint & Workflow Fork','## \u0420\u0443\u0441\u0441\u043a\u0438\u0439','## English','### \u0427\u0442\u043e \u044d\u0442\u043e','### \u0427\u0442\u043e \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043e \u043e\u0442\u043d\u043e\u0441\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u043e\u0440\u0438\u0433\u0438\u043d\u0430\u043b\u0430','### \u0413\u043b\u0430\u0432\u043d\u043e\u0435 \u0432 \u043d\u0430\u0448\u0435\u043c \u0444\u043e\u0440\u043a\u0435','### \u0420\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0443\u0435\u043c\u044b\u0435 Blueprint-\u043f\u0440\u043e\u0446\u0435\u0441\u0441\u044b','### \u0411\u044b\u0441\u0442\u0440\u044b\u0439 \u0437\u0430\u043f\u0443\u0441\u043a','### \u0421\u043e\u0432\u043c\u0435\u0441\u0442\u0438\u043c\u043e\u0441\u0442\u044c \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430','### What this is','### Additions over the original project','### Main fork features','### Recommended Blueprint workflows','### Quick start','### Compatibility and validation','253 actions, 21 domains, 19 Blueprint actions','299 actions, 22 domains, 57 Blueprint actions','46 added public actions, including 38 Blueprint actions','253 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f, 21 \u0434\u043e\u043c\u0435\u043d, 19 Blueprint-\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439','299 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439, 22 \u0434\u043e\u043c\u0435\u043d\u0430, 57 Blueprint-\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439','46 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0445 \u043f\u0443\u0431\u043b\u0438\u0447\u043d\u044b\u0445 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439, \u0432 \u0442\u043e\u043c \u0447\u0438\u0441\u043b\u0435 38 Blueprint-\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439','native palette search','pin suggestions','Connected spawn','exact-edge insertion','preview/apply replacement','\u043d\u0430\u0442\u0438\u0432\u043d\u044b\u0439 \u043f\u043e\u0438\u0441\u043a \u043f\u0430\u043b\u0438\u0442\u0440\u044b','\u043f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0438 \u043f\u0438\u043d\u043e\u0432','\u041f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u043e\u0435 \u0441\u043e\u0437\u0434\u0430\u043d\u0438\u0435','\u0432\u0441\u0442\u0430\u0432\u043a\u0430 \u0432 \u0442\u043e\u0447\u043d\u043e\u0435 \u0440\u0435\u0431\u0440\u043e','\u043f\u0440\u0435\u0434\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440/\u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u0437\u0430\u043c\u0435\u043d\u044b','workflow plan/apply/cancel/undo','\u043f\u043b\u0430\u043d/\u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c/\u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c/\u043e\u0442\u043a\u0430\u0442\u0438\u0442\u044c \u043f\u0440\u043e\u0446\u0435\u0441\u0441\u0430','No implicit compile or save.','\u041d\u0435\u0442 \u043d\u0435\u044f\u0432\u043d\u043e\u0439 \u043a\u043e\u043c\u043f\u0438\u043b\u044f\u0446\u0438\u0438 \u0438\u043b\u0438 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u044f.','No base-game generator.','\u041d\u0435\u0442 \u0433\u0435\u043d\u0435\u0440\u0430\u0442\u043e\u0440\u0430 \u0431\u0430\u0437\u043e\u0432\u043e\u0439 \u0438\u0433\u0440\u044b.','Plugins/UnrealMCPython','uv sync --project mcp-server','mcpServers'); missing=[item for item in required if item not in text]; assert not missing, missing; assert len(text.splitlines()) <= 260, len(text.splitlines())"
 ```
 
-Expected: FAIL because the current upstream README does not identify `pfizerboss/unreal-mcp`, has no mirrored English marker, and is longer than 260 lines.
+Expected: **FAIL** on the old upstream README because it does not meet the fork-specific bilingual contract. The assertion reports the missing phrases; rerun after each correction to reveal further missing evidence.
 
 - [ ] **Step 2: Confirm generated catalog totals before writing prose**
 
-Run:
-
 ```powershell
-python -c "import sys; sys.path.insert(0, 'mcp-server/src'); from unreal_mcp.dispatchers._catalog import CATALOG; total=sum(map(len,CATALOG.values())); print(total, len(CATALOG), len(CATALOG['blueprint']))"
+python -c "import sys; sys.path.insert(0, 'mcp-server/src'); from unreal_mcp.dispatchers._catalog import CATALOG; actual=(sum(map(len,CATALOG.values())), len(CATALOG), len(CATALOG['blueprint'])); assert actual == (299, 22, 57), actual; print(*actual)"
 ```
 
-Expected: `299 22 57`.
+Expected exact output: `299 22 57`.
 
 ### Task 2: Replace the root README
 
 **Files:**
+
 - Modify: `README.md`
 
-- [ ] **Step 1: Replace the upstream landing page with the approved bilingual structure**
+- [ ] **Step 1: Write the exact bilingual structure**
 
-Write these sections in this exact order:
+Use this exact heading order:
 
 ```markdown
 # Unreal MCP — Blueprint & Workflow Fork
@@ -71,7 +48,6 @@ Write these sections in this exact order:
 [Русский](#русский) · [English](#english)
 
 ## Русский
-
 ### Что это
 ### Что добавлено относительно оригинала
 ### Главное в нашем форке
@@ -80,53 +56,35 @@ Write these sections in this exact order:
 ### Совместимость и проверка
 
 ## English
-
 ### What this is
 ### Additions over the original project
 ### Main fork features
 ### Recommended Blueprint workflows
 ### Quick start
 ### Compatibility and validation
-
-## Attribution and license
 ```
 
-The Russian and English sections must both state:
+In both languages include these exact count phrases: `253 actions, 21 domains, 19 Blueprint actions`; `299 actions, 22 domains, 57 Blueprint actions`; `46 added public actions, including 38 Blueprint actions`; and their Russian counterparts required by the gate. State stable Blueprint identifiers and filtered inspection; functions, macros, events, dispatchers, interfaces, variables, and components; and strict/lossy replacement policy. Include snapshots, diffs, compile diagnostics, and health checks. Use no implicit compile/save or base-game-generator claims except the explicit required denials.
 
-- original baseline: 253 actions, 21 domains, 19 Blueprint actions;
-- current fork: 299 actions, 22 domains, 57 Blueprint actions;
-- 46 added public actions, including 38 Blueprint actions;
-- stable Blueprint identifiers and filtered inspection;
-- functions, macros, events, dispatchers, interfaces, variables, and components;
-- native palette search, pin suggestions, connected spawn, exact-edge insertion, and preview/apply replacement;
-- explicit strict/lossy replacement policy;
-- snapshots, diffs, compile diagnostics, health checks, workflow plan/apply/cancel/undo;
-- no implicit compile or save;
-- no base-game generator.
+- [ ] **Step 2: Add the workflows and action names**
 
-Include one compact comparison table in the Russian section and avoid repeating it in English.
-
-- [ ] **Step 2: Add the three semantic Blueprint workflows**
-
-Use this exact copyable block in both languages, with translated labels only:
+Include the five semantic action names in prose: native palette search, pin suggestions, connected spawn, exact-edge insertion, preview/apply replacement (and their Russian phrases required by the gate). Include these copyable action workflows in both language sections:
 
 ```text
 Connected spawn:
-inspect_blueprint -> suggest_blueprint_nodes_for_pin
--> add_blueprint_connected_action_node
+inspect_blueprint -> suggest_blueprint_nodes_for_pin -> add_blueprint_connected_action_node
 -> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
 
 Insertion:
-inspect_blueprint -> suggest_blueprint_nodes_for_connection
--> insert_blueprint_action_node
+inspect_blueprint -> suggest_blueprint_nodes_for_connection -> insert_blueprint_action_node
 -> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
 
 Replacement:
-inspect_blueprint -> search_blueprint_node_actions
--> preview_blueprint_action_replacement
--> replace_blueprint_node_with_action
--> diff_blueprint_graphs -> compile_blueprint -> get_blueprint_health
+inspect_blueprint -> search_blueprint_node_actions -> preview_blueprint_action_replacement
+-> replace_blueprint_node_with_action -> diff_blueprint_graphs -> compile_blueprint -> get_blueprint_health
 ```
+
+Name the workflow lifecycle as `workflow plan/apply/cancel/undo` and `план/применить/отменить/откатить процесса`.
 
 - [ ] **Step 3: Add minimal source installation and MCP configuration**
 
@@ -163,73 +121,34 @@ State that UE 5.7 is locally verified, UE 5.6 was not run because it is absent, 
 ### Task 3: Validate, commit, and publish
 
 **Files:**
+
 - Modify: `README.md`
 
 - [ ] **Step 1: Run the post-change README contract**
 
-Run:
-
-```powershell
-@'
-from pathlib import Path
-
-text = Path("README.md").read_text(encoding="utf-8")
-required = (
-    "pfizerboss/unreal-mcp",
-    "GenOrca/unreal-mcp",
-    "253",
-    "299",
-    "19",
-    "57",
-    "Connected spawn",
-    "Подключённое создание",
-    "English",
-)
-missing = [item for item in required if item not in text]
-assert not missing, missing
-assert len(text.splitlines()) <= 260, len(text.splitlines())
-'@ | python -
-```
+Run exactly the same ASCII-only Python command from Task 1, Step 1.
 
 Expected: PASS with no output.
 
 - [ ] **Step 2: Check Markdown structure and stale upstream promotion**
 
-Run:
-
 ```powershell
-@'
-from pathlib import Path
-
-text = Path("README.md").read_text(encoding="utf-8")
-assert text.count("```") % 2 == 0
-assert "```json" in text
-assert "```powershell" in text
-assert text.count("```text") == 2
-assert "github.com/GenOrca/unreal-mcp/releases" not in text
-assert "fab.com" not in text
-assert "youtu.be" not in text
-assert "299 actions" in text
-assert "57 Blueprint" in text
-'@ | python -
+python -c "from pathlib import Path; text=Path('README.md').read_text(encoding='utf-8'); assert text.count('```') % 2 == 0; assert '```json' in text; assert '```powershell' in text; assert text.count('```text') == 2; assert 'github.com/GenOrca/unreal-mcp/releases' not in text; assert 'fab.com' not in text; assert 'youtu.be' not in text"
 git diff --check
 ```
 
 Expected: both commands exit 0.
 
-- [ ] **Step 3: Run focused repository contract tests**
-
-Run:
+- [ ] **Step 3: Confirm catalog counts and run focused repository tests**
 
 ```powershell
+python -c "import sys; sys.path.insert(0, 'mcp-server/src'); from unreal_mcp.dispatchers._catalog import CATALOG; actual=(sum(map(len,CATALOG.values())), len(CATALOG), len(CATALOG['blueprint'])); assert actual == (299, 22, 57), actual; print(*actual)"
 uv run --project mcp-server --extra dev pytest mcp-server/tests/test_blueprint2_contracts.py mcp-server/tests/test_coverage.py -q
 ```
 
-Expected: all selected tests pass.
+Expected: catalog output exactly `299 22 57`; all selected tests pass.
 
 - [ ] **Step 4: Review and commit only the README**
-
-Run:
 
 ```powershell
 git diff -- README.md
@@ -241,8 +160,6 @@ git commit -m "docs: present blueprint-focused fork"
 Expected: one commit containing only `README.md`.
 
 - [ ] **Step 5: Push only the user fork branch**
-
-Run:
 
 ```powershell
 git push origin codex/llm-friendly-expansion
