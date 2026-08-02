@@ -1,466 +1,152 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/GenOrca/Screenshot/refs/heads/main/unreal-mcp/logo.png" width="600" alt="Unreal MCP Logo">
-</p>
+# Unreal MCP — Blueprint & Workflow Fork
 
-<h1 align="center">Unreal MCP</h1>
+> Расширенный форк [GenOrca/unreal-mcp](https://github.com/GenOrca/unreal-mcp), ориентированный на безопасную и понятную для LLM работу с Blueprint.
 
-<p align="center">
-  <strong>Connect AI assistants directly to the Unreal Editor via MCP</strong>
-</p>
+[Русский](#русский) · [English](#english)
 
-<p align="center">
-  <a href="https://github.com/GenOrca/unreal-mcp/releases"><img src="https://img.shields.io/github/v/release/GenOrca/unreal-mcp?style=flat-square&color=blue" alt="Release"></a>
-  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License"></a>
-  <a href="https://www.unrealengine.com/"><img src="https://img.shields.io/badge/Unreal_Engine-5.6+-black?style=flat-square&logo=unrealengine" alt="Unreal Engine 5.6+"></a>
-  <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-purple?style=flat-square" alt="MCP Compatible"></a>
-  <a href="https://fab.com/s/aed5f75d50b2"><img src="https://img.shields.io/badge/Fab-Marketplace-orange?style=flat-square" alt="Fab"></a>
-</p>
+## Русский
 
-<p align="center">
-  <a href="#features">Features</a> &middot;
-  <a href="#how-tools-work">How Tools Work</a> &middot;
-  <a href="#extending">Extending</a> &middot;
-  <a href="#installation">Installation</a> &middot;
-  <a href="#usage">Usage</a> &middot;
-  <a href="#tools-reference">Tools Reference</a> &middot;
-  <a href="#troubleshooting">Troubleshooting</a>
-</p>
+### Что это
 
----
+Unreal MCP подключает AI-ассистента к Unreal Editor через Model Context Protocol. Форк сохраняет широкую работу оригинала с акторами, ассетами, материалами, анимацией, UMG, GAS и другими системами, но значительно расширяет Blueprint и добавляет управляемые транзакционные процессы.
 
-Unreal MCP connects AI assistants to the Unreal Editor through the [Model Context Protocol](https://modelcontextprotocol.io/). Spawn actors, build Blueprint graphs, construct Behavior Trees, design UMG widgets, edit materials, author cinematics — all from natural language.
+### Что добавлено относительно оригинала
 
-**299 actions across 22 domains**, plus `execute_python` as an escape hatch — run any BlueprintCallable function or editor subsystem the engine exposes to Python, on the fly.
+| Version | Actions | Domains | Blueprint |
+|---|---:|---:|---:|
+| Оригинальная база | 253 | 21 | 19 |
+| Этот форк | 299 | 22 | 57 |
 
-**Easy to extend.** Adding an action is a Python function plus a catalog regen — no C++ and no editor rebuild on the Python path. When you need something Python doesn't expose (e.g. reference-skeleton bones), an optional C++ helper layer is there too. See [CLAUDE.md](CLAUDE.md) for the step-by-step workflow.
+Оригинальная база: **253 действия, 21 домен, 19 Blueprint-действий**. Этот форк: **299 действий, 22 домена, 57 Blueprint-действий**. Всего получено **46 добавленных публичных действий, в том числе 38 Blueprint-действий**.
 
-<p align="center">
-  <a href="https://youtu.be/V7KyjzFlBLk?si=QaqVqmt6YL59DHg4">
-    <img src="https://img.youtube.com/vi/V7KyjzFlBLk/hqdefault.jpg" width="600" alt="Watch the demo">
-  </a>
-  <br>
-  <sub>Click to watch the demo on YouTube</sub>
-</p>
+### Главное в нашем форке
 
-## Features
+- Blueprint 2.0: стабильные ID графов, узлов и пинов, краткий обзор и фильтрованная инспекция.
+- Полное авторство функций, макросов, событий, dispatchers, interfaces, переменных и компонентов.
+- Нативный поиск палитры (`native palette search`), подсказки пинов (`pin suggestions`) и безопасное создание узлов из реальной палитры Unreal.
+- Подключённое создание, вставка в точное ребро и предпросмотр/применение замены с явным выбором совместимых bindings.
+- Строгая замена по умолчанию; потеря связей или defaults возможна только через явно согласованный lossy-план.
+- Детерминированные snapshots и diffs, диагностика компиляции и Blueprint health checks.
+- Транзакционный план/применить/отменить/откатить процесса (`workflow plan/apply/cancel/undo`) с confirmation tokens и undo.
+- Нет неявной компиляции или сохранения. Сохранение выполняется отдельным `asset.save_asset`.
+- Нет генератора базовой игры. MCP предоставляет универсальные Blueprint-примитивы.
 
-Each row is one **namespace tool**. The action set is large but the tool list stays small, so it never bloats the model's context. **299 actions across 22 domains.**
-
-| Domain | Capabilities | Actions |
-|---|---|:---:|
-| **actor** | Spawn (class/object/surface raycast), transform get/set, properties, live component properties, hierarchy (attach/detach), folders, tags, bounds, selection, duplication, class queries. | 36 |
-| **asset** | Duplicate/rename/delete/save, list, dependencies & referencers, metadata tags, directories, search, FBX import/export, texture import, glTF/glb import. | 21 |
-| **material** | Create materials & instances, author expression graphs, connect to material properties, MI parameters (scalar/vector/texture/switch), reparent, auto-layout, introspection. | 20 |
-| **blueprint** | Universal Blueprint inspection and authoring: native node-palette search/suggestions, connected spawn, exact-edge insertion, snapshot-bound replacement, stable-ID functions, macros, events, dispatchers, interfaces, reflected/common nodes, pins, variables, SCS components, diagnostics, health, deterministic snapshots and diff. | 57 |
-| **util** | Run arbitrary Unreal Python, discover actions/capabilities, console commands, CVar get/set, world↔screen projection, viewport camera, PIE control, project info, class/enum reflection, output log, log verbosity, LiveCoding compile. | 22 |
-| **animation** | AnimSequence info, notify tracks, sync markers, float curves; SkeletalMesh sockets & bones (C++-backed); skeleton info. | 17 |
-| **umg** | Create Widget Blueprints, add/remove widgets, reparent/wrap/replace, properties, slot layout, text style, event binding, compile. | 15 |
-| **level_sequence** | Create cinematics, camera with Camera Cut track, spawnable/possessable bindings, transform & skeletal-anim tracks, keyframes, Sequencer open/close. | 13 |
-| **behavior_tree** | Create & read Behavior Trees, Blackboard keys, build complete BT hierarchies. | 12 |
-| **editor** | Selection, material/mesh replacement, Blueprint-based replacement, actor merge/join, Proxy Geometry baking, asset-editor open/get/close. | 12 |
-| **static_mesh** | Mesh info (LODs/tris/verts), LOD generation & reuse, materials, collision (simple/convex/per-LOD). | 12 |
-| **gas** | Gameplay Ability System: Ability/Effect Blueprint authoring, effect modifiers, costs & cooldowns, gameplay tags. | 11 |
-| **data_table** | Create DataTables, read/write rows (JSON/CSV), columns, row management. | 8 |
-| **level** | Create/open levels, list actors, world settings, current-level path, save. | 7 |
-| **control_rig** | Create Control Rigs (bones imported from a mesh), hierarchy authoring, RigVM unit nodes, recompile. | 6 |
-| **layer** | Create/delete layers, assign actors, list layer contents. | 6 |
-| **retarget** | IK Rig & IK Retargeter authoring, chain auto-mapping, batch animation retargeting. | 6 |
-| **anim_blueprint** | Create Animation Blueprints (skeleton-bound), AnimGraph sequence player + locomotion state machine authoring (C++-backed). | 4 |
-| **game** | Game mode, Enhanced Input actions & mappings. | 3 |
-| **texture** | Texture info, sRGB and compression settings. | 3 |
-| **vision** | Capture the viewport / any pose / auto-framed actors as MCP Images with on-image actor labels — the assistant sees and identifies the scene. | 3 |
-| **workflow** | Plan, inspect, apply, cancel, and undo guarded multi-action workflows with confirmation tokens and transaction rollback. | 5 |
-
-### Universal Blueprint 2.0 workflow
-
-For palette-first Blueprint editing, use this sequence:
+### Рекомендуемые Blueprint-процессы
 
 ```text
-get_blueprint_brief -> inspect_blueprint
--> search_blueprint_node_actions / suggest_blueprint_nodes_for_pin
--> describe_blueprint_node_action -> add_blueprint_action_node
--> connect_blueprint_pins -> compile_blueprint -> get_blueprint_health
--> asset.save_asset (only when persistence is wanted)
-```
-
-For common semantic graph edits, use the bounded paths below:
-
-```text
-Connected spawn:
-inspect_blueprint -> suggest_blueprint_nodes_for_pin
--> add_blueprint_connected_action_node
+Подключённое создание (Connected spawn):
+inspect_blueprint -> suggest_blueprint_nodes_for_pin -> add_blueprint_connected_action_node
 -> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
 
-Insertion:
-inspect_blueprint -> suggest_blueprint_nodes_for_connection
--> insert_blueprint_action_node
+Вставка (Insertion):
+inspect_blueprint -> suggest_blueprint_nodes_for_connection -> insert_blueprint_action_node
 -> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
 
-Replacement:
-inspect_blueprint -> search_blueprint_node_actions
--> preview_blueprint_action_replacement
--> replace_blueprint_node_with_action
--> diff_blueprint_graphs -> compile_blueprint -> get_blueprint_health
+Замена (Replacement):
+inspect_blueprint -> search_blueprint_node_actions -> preview_blueprint_action_replacement
+-> replace_blueprint_node_with_action -> diff_blueprint_graphs -> compile_blueprint -> get_blueprint_health
 ```
 
-`get_blueprint_brief` is the bounded orientation call; use filtered
-`inspect_blueprint` queries for details. Each query accepts `limit` from 1 to
-500 (default 100) and returns an opaque `next_cursor`. A cursor is invalidated
-when the query, asset, or editor session changes, and must not be reused across
-queries.
+Capability-токены `action:`, `binding:`, `palette-cursor:` и `replacement-plan:` относятся к текущей сессии и контексту. При stale-ошибке повторите inspect, search/suggestion или replacement preview.
 
-Persisted stable IDs use `graph:`, `node:`, `pin:`, `variable:`, and
-`component:` GUID prefixes. Implemented interfaces use `interface:` followed by
-the full class path. Legacy objects without a persisted GUID are reported as
-`fallback:<kind>:<sha1>` with `stable=false`; display names and array indexes
-are not stable IDs.
+### Быстрый запуск
 
-Palette `action:`, template/object `binding:`, `palette-cursor:`, and
-`replacement-plan:` values are bounded capabilities for the current editor
-session and exact asset/graph/pin/action context. They cannot be replayed in
-another context; after a stale-token error repeat search/suggestion, or repeat
-replacement preview. Native palette results are limited to 200 items per page
-and use Unreal's action filter plus `UEdGraphSchema_K2` as compatibility
-authorities. Connected spawn and insertion require the caller to select one
-explicit binding or binding pair; the MCP never guesses between equal pairs.
-Automatic conversion nodes are used only with `allow_conversion=true` and are
-reported explicitly. Replacement is strict by default: every unmapped link or
-non-empty writable default is listed, and applying loss requires a preview and
-apply with the same explicit `allow_loss=true` policy. All three mutations are
-transactional and can be restored through workflow undo.
+Требуются Unreal Engine, Python 3.11+, [uv](https://docs.astral.sh/uv/) и MCP-клиент.
 
-Canonical type examples include `{"kind":"int"}`,
-`{"kind":"real","precision":"double"}`,
-`{"kind":"struct","type_path":"/Script/CoreUObject.Vector"}`, and
-`{"kind":"class","class_path":"/Script/Engine.Actor"}`. Generated
-Blueprint class/type paths use the complete object path, for example
-`/Game/Characters/BP_Hero.BP_Hero_C`. Reflected nodes require an exact full
-path such as `/Script/Engine.Actor:K2_GetActorLocation` or
-`/Script/Engine.Actor:CustomTimeDilation`; short names are not reflection
-fallbacks. In `build_blueprint_graph`, each node `id` is a client-local
-reference used by `source_node` and `target_node` connections.
-
-Mutation actions dirty the package but never compile or save implicitly.
-Call `compile_blueprint` explicitly after a batch; `get_blueprint_health` is an
-explicit compile-backed diagnostic call. Save separately with
-`asset.save_asset` when desired. Blueprint 2.0 advertises runtime capabilities
-for UE 5.6-5.8, but local source/build verification is currently limited to UE
-5.7: UE 5.6 is not installed and UE 5.8 source headers are not available in
-this workspace. Check the returned capability flags before mutation on those
-versions. This surface provides universal Blueprint primitives; a one-click
-base-game generator is not included.
-
-## How Tools Work
-
-Each domain is a single MCP tool. You call it with an `action` name and a `params` object:
-
-```jsonc
-// tool: "actor"
-{ "action": "spawn_from_class",
-  "params": { "class_path": "/Script/Engine.PointLight", "location": [0, 0, 200] } }
+```powershell
+git clone --branch codex/llm-friendly-expansion https://github.com/pfizerboss/unreal-mcp.git
+cd unreal-mcp
+uv sync --project mcp-server
 ```
 
-To discover what a domain can do and the exact parameters each action takes, pass `list_actions`:
-
-```jsonc
-// tool: "material"
-{ "action": "list_actions" }
-// → { "actions": { "create_expression": { "params": "...", "doc": "..." }, ... } }
-```
-
-Need something not covered by a built-in action? Use `util / execute_python` to run any Unreal Python directly — the full engine API is available with no C++ build.
-
-## Extending
-
-Adding a tool is intentionally low-friction — anyone comfortable with Python can do it:
-
-1. Add a `ue_<name>(...)` function (returning a JSON string) to a domain module in
-   `Plugins/UnrealMCPython/Content/Python/UnrealMCPython/<domain>_actions.py`.
-2. Run `python generate_catalog.py` — the action is now exposed by its domain tool.
-3. (Optional) add an in-editor test in `tests/test_<domain>.py`.
-
-The Python path needs no C++ and no editor rebuild. New domain? Drop in a
-`<domain>_actions.py` and list it in the generator. For an API that Python doesn't
-expose, an optional C++ helper (`MCPythonHelper`) is available. Full details in
-[CLAUDE.md](CLAUDE.md).
-
-## Installation
-
-### Prerequisites
-
-- **Unreal Engine** 5.6+
-- **Python** 3.11+
-- **[uv](https://docs.astral.sh/uv/)** — fast Python package manager
-- An **MCP client** (Claude Desktop, VS Code, Cursor, etc.)
-
-### Step 1 — Install the Plugin
-
-**Option A: Download from GitHub Releases (Recommended)**
-
-Each [release](https://github.com/GenOrca/unreal-mcp/releases) ships two kinds of plugin asset. **Most users want the precompiled one for their exact engine version:**
-
-- ✅ **`UnrealMCPython_<engine>_<version>.zip`** (e.g. `UnrealMCPython_5.8_2.2.0.zip`) — **precompiled** for that exact UE version. No C++ toolchain, no rebuild — just drop it in and launch. **Pick the one matching your engine version.**
-- 🛠️ **`UnrealMCPython_Source_<version>.zip`** — **source only**, for C++ developers (the CI release pipeline runs on Linux and does not compile the C++ module). Unreal tries to *compile* it on first open, which **requires Visual Studio with the "Game development with C++" workload**. Without that toolchain the build fails and the editor closes — so don't use this one unless you intend to compile.
-
-Extract, then copy `Plugins/UnrealMCPython/` into your project's `Plugins/` folder:
-
-```
-YourProject/
-└── Plugins/
-    └── UnrealMCPython/
-        ├── Binaries/   (precompiled zip only)
-        ├── Source/
-        ├── Content/
-        └── UnrealMCPython.uplugin
-```
-
-Keep the `mcp-server/` folder from the zip in a convenient location — you'll need its path in Step 3.
-
-> [!NOTE]
-> Precompiled binaries are engine-version-specific. If there's no `_<your engine>_` zip for your version, either ask for one in an issue or use the source zip and let Unreal compile it on first open (Windows: Visual Studio with the "Game development with C++" workload). Maintainers build the per-version binaries locally with `tools/build-plugin.ps1` (the CI pipeline can't — GitHub-hosted runners have no Unreal Engine).
-
-> [!WARNING]
-> **Seeing `'UnrealMCPython' was designed for build 5.7.0 … load anyway?` or a rebuild that fails and closes the editor?** You downloaded the **source** zip (or a binary for a different engine version). Download the **`UnrealMCPython_<your engine>_<version>.zip`** that matches your engine instead — it loads without compiling. (Source builds from releases ≤ 2.2.0 also pin an old engine version; this is fixed on `main`.)
-
-**Option B: Install from [Fab](https://fab.com/s/aed5f75d50b2)**
-
-> [!NOTE]
-> The Fab version may lag behind the latest GitHub release. After installing from Fab, you still need the `mcp-server/` folder from this repository.
-
-### Step 2 — Enable Plugins in Unreal
-
-1. Open your project in Unreal Engine
-2. **Edit > Plugins** — enable **Unreal-MCPython** and **Python Editor Script Plugin**
-3. Restart the editor
-
-### Step 3 — Configure your MCP Client
-
-Add the server to your MCP client config:
+Скопируйте `Plugins/UnrealMCPython` в каталог `Plugins` своего Unreal-проекта и откройте или соберите проект. Затем добавьте сервер в конфигурацию MCP-клиента:
 
 ```json
 {
   "mcpServers": {
-    "unreal-mcpython": {
+    "unreal-mcp": {
       "command": "uv",
       "args": [
         "--directory",
         "C:/absolute/path/to/unreal-mcp/mcp-server",
         "run",
-        "src/unreal_mcp/main.py"
+        "python",
+        "-m",
+        "unreal_mcp.main"
       ]
     }
   }
 }
 ```
 
-> [!IMPORTANT]
-> Replace the path with the actual absolute path to your `mcp-server` folder.
+Откройте Unreal Editor: плагин запускает локальный TCP-сервер на `127.0.0.1:12029`. После этого MCP-клиент сможет вызывать namespace tools.
 
-<details>
-<summary>Config file locations by client</summary>
+### Совместимость и проверка
 
-| Client | Path |
-|---|---|
-| **Claude Desktop** (Windows) | `%APPDATA%\Claude\claude_desktop_config.json` |
-| **Claude Desktop** (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| **VS Code / Cursor** | `.vscode/mcp.json` in your workspace |
+- Локально полностью проверен **Unreal Engine 5.7**.
+- UE 5.6 не запускался: движок не установлен в тестовой среде.
+- UE 5.8 не запускался: локальная установка не содержит build tools, editor binary и source headers.
+- Последний release gate: 930 MCP/Python tests, 16/16 native Blueprint2 tests и 420 in-editor tests без failures/errors; semantic workflow stress — 12/12.
 
-</details>
+## English
 
-### Step 4 — Connect
+### What this is
 
-1. Restart your MCP client
-2. The MCP server starts automatically
-3. Verify — you should see the 22 Unreal-MCPython domain tools listed in your client
+Unreal MCP connects an AI assistant to Unreal Editor through the Model Context Protocol. This fork keeps the original project's broad actor, asset, material, animation, UMG, GAS, and editor tooling while expanding Blueprint authoring and guarded transactional workflows.
 
-## Usage
+### Additions over the original project
 
-Just describe what you want in natural language:
+The original baseline had **253 actions, 21 domains, 19 Blueprint actions**. This fork has **299 actions, 22 domains, 57 Blueprint actions**: **46 added public actions, including 38 Blueprint actions**.
 
+### Main fork features
+
+- Blueprint 2.0 with stable graph/node/pin identifiers, compact orientation, and filtered inspection.
+- Authoring for functions, macros, events, dispatchers, interfaces, variables, and components.
+- Native palette search, pin suggestions, and safe spawning from Unreal's real node palette.
+- Connected spawn, exact-edge insertion, and preview/apply replacement with explicit binding selection.
+- Strict replacement by default; a lossy replacement requires an explicitly matching preview/apply policy.
+- Deterministic snapshots and diffs, compile diagnostics, and Blueprint health checks.
+- Guarded workflow plan/apply/cancel/undo with confirmation tokens and transaction rollback.
+- No implicit compile or save. Persist explicitly with `asset.save_asset`.
+- No base-game generator. The project exposes universal Blueprint primitives instead.
+
+### Recommended Blueprint workflows
+
+```text
+Connected spawn:
+inspect_blueprint -> suggest_blueprint_nodes_for_pin -> add_blueprint_connected_action_node
+-> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
+
+Insertion:
+inspect_blueprint -> suggest_blueprint_nodes_for_connection -> insert_blueprint_action_node
+-> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
+
+Replacement:
+inspect_blueprint -> search_blueprint_node_actions -> preview_blueprint_action_replacement
+-> replace_blueprint_node_with_action -> diff_blueprint_graphs -> compile_blueprint -> get_blueprint_health
 ```
-"Place 10 trees randomly on the terrain surface"
-"Find all static meshes with 'rock' in the name"
-"Create M_Ground, add a Constant3Vector for base color, and connect it"
-"Explain what the selected Blueprint nodes do"
-"Create BP_Door from Actor, add a bool 'IsOpen' variable exposed on spawn"
-"Build a Behavior Tree with a Selector root and MoveTo/Wait tasks"
-"Create a HUD widget with a health bar and a 'Score: 0' label"
-"Make a 6-second level sequence with a CineCamera flying from (0,0,200) to (1200,600,500)"
-"Tag all PointLights in the level and move them to a 'Lighting' layer"
+
+`action:`, `binding:`, `palette-cursor:`, and `replacement-plan:` capabilities are scoped to the current editor session and exact context. Repeat inspect, search/suggestion, or replacement preview after a stale-capability error.
+
+### Quick start
+
+Requirements: Unreal Engine, Python 3.11+, [uv](https://docs.astral.sh/uv/), and an MCP client.
+
+```powershell
+git clone --branch codex/llm-friendly-expansion https://github.com/pfizerboss/unreal-mcp.git
+cd unreal-mcp
+uv sync --project mcp-server
 ```
 
-## Tools Reference
+Copy `Plugins/UnrealMCPython` into your Unreal project's `Plugins` directory, then open or build the project. Configure the MCP client using the JSON example in the Russian section. The plugin listens locally on `127.0.0.1:12029`.
 
-Pass any action below to its domain tool. Use `{ "action": "list_actions" }` on a domain to see each action's parameters and docs.
+### Compatibility and validation
 
-<details>
-<summary><strong>actor</strong> (36)</summary>
+- **Unreal Engine 5.7** is the locally verified release target.
+- UE 5.6 was not run because it is not installed in the test environment.
+- UE 5.8 was not run because the local installation lacks build tools, the editor binary, and source headers.
+- Latest release gate: 930 MCP/Python tests, 16/16 native Blueprint2 tests, and 420 in-editor tests with no failures/errors; semantic workflow stress passed 12/12.
 
-`add_actor_tag` · `attach_actor` · `delete_by_label` · `detach_actor` · `duplicate_actor` · `duplicate_selected` · `get_actor_bounds` · `get_actor_folder` · `get_actor_tags` · `get_actors_of_class` · `get_all_details` · `get_attached_actors` · `get_component_property` · `get_in_view_frustum` · `get_property` · `get_selected_actors` · `get_transform` · `invert_selection` · `line_trace` · `list_actor_components` · `list_all_with_locations` · `remove_actor_tag` · `rename_actor` · `select_actors` · `select_all` · `set_actor_folder` · `set_actor_hidden` · `set_component_property` · `set_location` · `set_property` · `set_rotation` · `set_scale` · `set_transform` · `spawn_from_class` · `spawn_from_object` · `spawn_on_surface_raycast`
+## Attribution and license
 
-</details>
-
-<details>
-<summary><strong>asset</strong> (21)</summary>
-
-`asset_exists` · `delete_asset` · `delete_directory` · `duplicate_asset` · `export_fbx` · `find_by_query` · `find_referencers` · `get_asset_info` · `get_dependencies` · `get_gltf_import_status` · `get_metadata_tag` · `get_static_mesh_details` · `import_fbx` · `import_gltf` · `import_texture` · `list_assets` · `make_directory` · `remove_metadata_tag` · `rename_asset` · `save_asset` · `set_metadata_tag`
-
-</details>
-
-<details>
-<summary><strong>material</strong> (20)</summary>
-
-`connect_expressions` · `connect_property` · `create_expression` · `create_material` · `create_material_instance` · `delete_expression` · `get_material_info` · `get_mi_scalar_param` · `get_mi_static_switch` · `get_mi_texture_param` · `get_mi_vector_param` · `layout_expressions` · `list_parameters` · `recompile` · `set_expression_property` · `set_instance_parent` · `set_mi_scalar_param` · `set_mi_static_switch` · `set_mi_texture_param` · `set_mi_vector_param`
-
-</details>
-
-<details>
-<summary><strong>blueprint</strong> (57)</summary>
-
-`add_blueprint_action_node` · `add_blueprint_connected_action_node` · `add_blueprint_interface` · `add_blueprint_node` · `add_component_to_blueprint` · `add_event_dispatcher` · `add_reflected_blueprint_node` · `add_variable` · `auto_layout_graph` · `build_blueprint_graph` · `compile_blueprint` · `connect_blueprint_pins` · `create_blueprint` · `create_blueprint_function` · `create_blueprint_macro` · `create_custom_event` · `delete_blueprint_function` · `delete_blueprint_macro` · `delete_custom_event` · `describe_blueprint_node_action` · `diff_blueprint_graphs` · `disconnect_blueprint_pins` · `get_blueprint_brief` · `get_blueprint_graph_info` · `get_blueprint_health` · `get_selected_bp_node_infos` · `get_selected_bp_nodes` · `inspect_blueprint` · `insert_blueprint_action_node` · `list_blueprint_components` · `list_blueprint_variables` · `list_callable_functions` · `preview_blueprint_action_replacement` · `remove_blueprint_interface` · `remove_blueprint_node` · `remove_blueprint_variable` · `remove_component_from_blueprint` · `remove_event_dispatcher` · `rename_blueprint_component` · `rename_blueprint_function` · `rename_blueprint_variable` · `reorder_blueprint_component` · `reparent_blueprint_component` · `replace_blueprint_node_with_action` · `search_blueprint_node_actions` · `set_blueprint_component_transform` · `set_blueprint_function_signature` · `set_blueprint_node_position` · `set_blueprint_node_properties` · `set_blueprint_variable_default` · `set_blueprint_variable_metadata` · `set_blueprint_variable_replication` · `set_component_property` · `set_variable_flags` · `snapshot_blueprint_graph` · `suggest_blueprint_nodes_for_connection` · `suggest_blueprint_nodes_for_pin`
-
-</details>
-
-<details>
-<summary><strong>util</strong> (22)</summary>
-
-`describe_action` · `execute_console_command` · `execute_python` · `get_capabilities` · `get_cvar` · `get_output_log` · `get_project_info` · `get_viewport_camera` · `is_in_pie` · `list_class_properties` · `list_enum_values` · `livecoding_compile` · `print_message` · `save_all_dirty` · `screen_to_world` · `search_actions` · `set_cvar` · `set_log_verbosity` · `set_viewport_camera` · `start_pie` · `stop_pie` · `world_to_screen`
-
-</details>
-
-<details>
-<summary><strong>animation</strong> (17)</summary>
-
-`add_float_curve` · `add_notify_track` · `add_socket` · `add_sync_marker` · `find_socket` · `get_anim_sequence_info` · `get_skeletal_mesh_info` · `get_skeleton_info` · `list_bones` · `list_curves` · `list_notifies` · `list_notify_tracks` · `list_sockets` · `list_sync_markers` · `remove_curve` · `remove_notify_track` · `remove_socket`
-
-</details>
-
-<details>
-<summary><strong>umg</strong> (15)</summary>
-
-`add_widget` · `bind_widget_event` · `compile_widget_blueprint` · `create_widget_blueprint` · `get_widget_blueprint_info` · `get_widget_property` · `list_widget_events` · `remove_widget` · `reparent_widget` · `replace_widget` · `set_slot_layout` · `set_text_style` · `set_widget_properties` · `set_widget_property` · `wrap_widget`
-
-</details>
-
-<details>
-<summary><strong>level_sequence</strong> (13)</summary>
-
-`add_anim_track` · `add_camera` · `add_possessable` · `add_spawnable_from_class` · `add_transform_keyframe` · `add_transform_track` · `close_sequencer` · `convert_binding` · `create_level_sequence` · `get_sequence_info` · `open_in_sequencer` · `remove_binding` · `set_playback_range`
-
-</details>
-
-<details>
-<summary><strong>behavior_tree</strong> (12)</summary>
-
-`add_blackboard_key` · `build_behavior_tree` · `create_behavior_tree` · `create_blackboard` · `get_behavior_tree_structure` · `get_blackboard_data` · `get_bt_node_details` · `get_selected_bt_nodes` · `list_behavior_trees` · `list_bt_node_classes` · `remove_blackboard_key` · `set_blackboard_to_behavior_tree`
-
-</details>
-
-<details>
-<summary><strong>editor</strong> (12)</summary>
-
-`close_asset_editor` · `create_proxy_actor` · `get_open_assets` · `get_selected_assets` · `join_actors` · `merge_actors` · `open_editor_for_asset` · `replace_mesh_on_selected` · `replace_mesh_on_specified` · `replace_mtl_on_selected` · `replace_mtl_on_specified` · `replace_selected_with_bp`
-
-</details>
-
-<details>
-<summary><strong>static_mesh</strong> (12)</summary>
-
-`add_simple_collision` · `get_collision_info` · `get_lod_screen_sizes` · `get_static_mesh_info` · `list_static_mesh_materials` · `remove_collisions` · `remove_lods` · `set_convex_collision` · `set_lod_for_collision` · `set_lod_from_static_mesh` · `set_lods` · `set_static_mesh_material`
-
-</details>
-
-<details>
-<summary><strong>gas</strong> (11)</summary>
-
-`add_effect_modifier` · `add_gameplay_tag` · `clear_effect_modifiers` · `create_ability_blueprint` · `create_effect_blueprint` · `get_ability_info` · `get_effect_info` · `list_gameplay_tags` · `set_ability_costs` · `set_ability_tags` · `set_effect_duration`
-
-</details>
-
-<details>
-<summary><strong>data_table</strong> (8)</summary>
-
-`create_data_table` · `does_row_exist` · `export_to_csv` · `get_column_names` · `get_row_names` · `get_rows_as_json` · `remove_row` · `set_rows_from_json`
-
-</details>
-
-<details>
-<summary><strong>level</strong> (7)</summary>
-
-`create_level` · `get_current_level_path` · `list_level_actors` · `load_level` · `save_all_levels` · `save_current_level` · `set_world_settings`
-
-</details>
-
-<details>
-<summary><strong>control_rig</strong> (6)</summary>
-
-`add_rig_bone` · `add_rig_null` · `add_unit_node` · `create_control_rig` · `get_control_rig_info` · `recompile_control_rig`
-
-</details>
-
-<details>
-<summary><strong>layer</strong> (6)</summary>
-
-`add_actor_to_layer` · `create_layer` · `delete_layer` · `get_actors_in_layer` · `list_layers` · `remove_actor_from_layer`
-
-</details>
-
-<details>
-<summary><strong>retarget</strong> (6)</summary>
-
-`add_retarget_chain` · `auto_map_chains` · `batch_retarget` · `create_ik_rig` · `create_retargeter` · `get_ik_rig_info`
-
-</details>
-
-<details>
-<summary><strong>anim_blueprint</strong> (4)</summary>
-
-`add_anim_graph_sequence_player` · `build_anim_state_machine` · `create_anim_blueprint` · `get_anim_blueprint_info`
-
-</details>
-
-<details>
-<summary><strong>game</strong> (3)</summary>
-
-`add_input_action` · `add_input_mapping` · `set_game_mode`
-
-</details>
-
-<details>
-<summary><strong>texture</strong> (3)</summary>
-
-`get_texture_info` · `set_texture_compression` · `set_texture_srgb`
-
-</details>
-
-<details>
-<summary><strong>vision</strong> (3)</summary>
-
-`capture_actors` · `capture_from` · `capture_viewport`
-
-</details>
-
-<details>
-<summary><strong>workflow</strong> (5)</summary>
-
-`apply` · `cancel` · `get` · `plan` · `undo`
-
-</details>
-
-## Troubleshooting
-
-| Problem | Solution |
-|---|---|
-| MCP server not starting | Verify Python 3.11+ and `uv` are installed |
-| Path errors | Check the absolute path in your client config |
-| Plugin not visible | Restart UE and confirm both plugins are enabled |
-| Tools not showing | Restart your MCP client and verify the config |
-| An action errors on params | Call `{ "action": "list_actions" }` on that domain to see exact parameter names |
-
-## Contributing
-
-Issues, feature requests, and pull requests are welcome on [GitHub](https://github.com/GenOrca/unreal-mcp). See [CLAUDE.md](CLAUDE.md) for the architecture and the workflow for adding new actions.
-
-## License
-
-[Apache-2.0](LICENSE.txt)
+This repository is an independent fork of [GenOrca/unreal-mcp](https://github.com/GenOrca/unreal-mcp). Original work remains credited to its authors and contributors. Fork additions are distributed under the repository's [Apache License 2.0](LICENSE.txt).
