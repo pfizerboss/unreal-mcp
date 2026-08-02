@@ -12,6 +12,7 @@ Saved/
 
 # Claude Code local settings
 .claude/
+.worktrees/
 *.sln
 *.suo
 *.opensdf
