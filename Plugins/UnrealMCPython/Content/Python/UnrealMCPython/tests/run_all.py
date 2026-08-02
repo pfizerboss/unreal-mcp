@@ -14,6 +14,8 @@ import sys
 import importlib
 import unittest
 
+import unreal
+
 _MODULES = [
     "UnrealMCPython.tests.test_util",
     "UnrealMCPython.tests.test_workflow",
@@ -67,6 +69,14 @@ if _load_errors:
 runner = unittest.TextTestRunner(verbosity=2, stream=sys.stdout)
 result = runner.run(suite)
 
+remaining_assets = []
+if unreal.EditorAssetLibrary.does_directory_exist("/Game/__MCPTests"):
+    remaining_assets = unreal.EditorAssetLibrary.list_assets(
+        "/Game/__MCPTests",
+        recursive=True,
+        include_folder=False,
+    )
+
 total = result.testsRun
 fails = len(result.failures)
 errors = len(result.errors)
@@ -75,4 +85,15 @@ passed = total - fails - errors - skipped
 
 print(f"\n{'='*60}")
 print(f"Results: {passed} passed | {fails} failed | {errors} errors | {skipped} skipped / {total} total")
+print(f"remaining_assets={len(remaining_assets)}")
 print('='*60)
+
+if not result.wasSuccessful():
+    raise RuntimeError(
+        f"In-editor suite failed: {fails} failures, {errors} errors"
+    )
+
+if remaining_assets:
+    raise RuntimeError(
+        f"In-editor test assets remain under /Game/__MCPTests: {remaining_assets}"
+    )

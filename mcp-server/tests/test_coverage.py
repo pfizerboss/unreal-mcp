@@ -67,16 +67,7 @@ SPECIAL = {domain: set(actions) for domain, actions in SERVER_LOCAL_TESTS.items(
 
 # ── Technical debt: actions with no in-editor behavior test yet. SHRINK over time. ──
 # Adding a new action? Write a test in test_<domain>.py instead of adding it here.
-SEMANTIC_PENDING_EDITOR_TESTS = {
-    "suggest_blueprint_nodes_for_connection",
-    "add_blueprint_connected_action_node",
-    "insert_blueprint_action_node",
-    "preview_blueprint_action_replacement",
-    "replace_blueprint_node_with_action",
-}
-KNOWN_UNTESTED: dict[str, set[str]] = {
-    "blueprint": SEMANTIC_PENDING_EDITOR_TESTS,
-}
+KNOWN_UNTESTED: dict[str, set[str]] = {}
 
 
 def _referenced(domain: str) -> set[str]:
@@ -100,8 +91,8 @@ def test_all_blueprint_actions_are_referenced_by_split_editor_suites():
     referenced = _referenced("blueprint")
 
     assert len(actions) == 57
-    assert actions - SEMANTIC_PENDING_EDITOR_TESTS <= referenced
-    assert KNOWN_UNTESTED["blueprint"] == SEMANTIC_PENDING_EDITOR_TESTS
+    assert actions <= referenced
+    assert "blueprint" not in KNOWN_UNTESTED
 
 
 def test_blueprint_palette_editor_suite_covers_required_scenarios():

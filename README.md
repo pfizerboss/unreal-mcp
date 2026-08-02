@@ -30,7 +30,7 @@
 
 Unreal MCP connects AI assistants to the Unreal Editor through the [Model Context Protocol](https://modelcontextprotocol.io/). Spawn actors, build Blueprint graphs, construct Behavior Trees, design UMG widgets, edit materials, author cinematics — all from natural language.
 
-**294 actions across 22 domains**, plus `execute_python` as an escape hatch — run any BlueprintCallable function or editor subsystem the engine exposes to Python, on the fly.
+**299 actions across 22 domains**, plus `execute_python` as an escape hatch — run any BlueprintCallable function or editor subsystem the engine exposes to Python, on the fly.
 
 **Easy to extend.** Adding an action is a Python function plus a catalog regen — no C++ and no editor rebuild on the Python path. When you need something Python doesn't expose (e.g. reference-skeleton bones), an optional C++ helper layer is there too. See [CLAUDE.md](CLAUDE.md) for the step-by-step workflow.
 
@@ -44,14 +44,14 @@ Unreal MCP connects AI assistants to the Unreal Editor through the [Model Contex
 
 ## Features
 
-Each row is one **namespace tool**. The action set is large but the tool list stays small, so it never bloats the model's context. **294 actions across 22 domains.**
+Each row is one **namespace tool**. The action set is large but the tool list stays small, so it never bloats the model's context. **299 actions across 22 domains.**
 
 | Domain | Capabilities | Actions |
 |---|---|:---:|
 | **actor** | Spawn (class/object/surface raycast), transform get/set, properties, live component properties, hierarchy (attach/detach), folders, tags, bounds, selection, duplication, class queries. | 36 |
 | **asset** | Duplicate/rename/delete/save, list, dependencies & referencers, metadata tags, directories, search, FBX import/export, texture import, glTF/glb import. | 21 |
 | **material** | Create materials & instances, author expression graphs, connect to material properties, MI parameters (scalar/vector/texture/switch), reparent, auto-layout, introspection. | 20 |
-| **blueprint** | Universal Blueprint inspection and authoring: native node-palette search/suggestions, safe palette spawning, stable-ID functions, macros, events, dispatchers, interfaces, reflected/common nodes, pins, variables, SCS components, diagnostics, health, deterministic snapshots and diff. | 52 |
+| **blueprint** | Universal Blueprint inspection and authoring: native node-palette search/suggestions, connected spawn, exact-edge insertion, snapshot-bound replacement, stable-ID functions, macros, events, dispatchers, interfaces, reflected/common nodes, pins, variables, SCS components, diagnostics, health, deterministic snapshots and diff. | 57 |
 | **util** | Run arbitrary Unreal Python, discover actions/capabilities, console commands, CVar get/set, world↔screen projection, viewport camera, PIE control, project info, class/enum reflection, output log, log verbosity, LiveCoding compile. | 22 |
 | **animation** | AnimSequence info, notify tracks, sync markers, float curves; SkeletalMesh sockets & bones (C++-backed); skeleton info. | 17 |
 | **umg** | Create Widget Blueprints, add/remove widgets, reparent/wrap/replace, properties, slot layout, text style, event binding, compile. | 15 |
@@ -83,6 +83,26 @@ get_blueprint_brief -> inspect_blueprint
 -> asset.save_asset (only when persistence is wanted)
 ```
 
+For common semantic graph edits, use the bounded paths below:
+
+```text
+Connected spawn:
+inspect_blueprint -> suggest_blueprint_nodes_for_pin
+-> add_blueprint_connected_action_node
+-> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
+
+Insertion:
+inspect_blueprint -> suggest_blueprint_nodes_for_connection
+-> insert_blueprint_action_node
+-> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
+
+Replacement:
+inspect_blueprint -> search_blueprint_node_actions
+-> preview_blueprint_action_replacement
+-> replace_blueprint_node_with_action
+-> diff_blueprint_graphs -> compile_blueprint -> get_blueprint_health
+```
+
 `get_blueprint_brief` is the bounded orientation call; use filtered
 `inspect_blueprint` queries for details. Each query accepts `limit` from 1 to
 500 (default 100) and returns an opaque `next_cursor`. A cursor is invalidated
@@ -95,12 +115,19 @@ the full class path. Legacy objects without a persisted GUID are reported as
 `fallback:<kind>:<sha1>` with `stable=false`; display names and array indexes
 are not stable IDs.
 
-Palette `action:` IDs and `palette-cursor:` values are bounded capabilities for
-the current editor session, asset, graph, query, and optional source pin. They
-cannot be replayed in another context; repeat search or pin suggestion after a
-stale-ID error. Native palette results are limited to 200 items per page and
-use Unreal's current action filter as the compatibility authority. Spawning a
-suggested node does not connect it automatically.
+Palette `action:`, template/object `binding:`, `palette-cursor:`, and
+`replacement-plan:` values are bounded capabilities for the current editor
+session and exact asset/graph/pin/action context. They cannot be replayed in
+another context; after a stale-token error repeat search/suggestion, or repeat
+replacement preview. Native palette results are limited to 200 items per page
+and use Unreal's action filter plus `UEdGraphSchema_K2` as compatibility
+authorities. Connected spawn and insertion require the caller to select one
+explicit binding or binding pair; the MCP never guesses between equal pairs.
+Automatic conversion nodes are used only with `allow_conversion=true` and are
+reported explicitly. Replacement is strict by default: every unmapped link or
+non-empty writable default is listed, and applying loss requires a preview and
+apply with the same explicit `allow_loss=true` policy. All three mutations are
+transactional and can be restored through workflow undo.
 
 Canonical type examples include `{"kind":"int"}`,
 `{"kind":"real","precision":"double"}`,
@@ -288,9 +315,9 @@ Pass any action below to its domain tool. Use `{ "action": "list_actions" }` on 
 </details>
 
 <details>
-<summary><strong>blueprint</strong> (52)</summary>
+<summary><strong>blueprint</strong> (57)</summary>
 
-`add_blueprint_action_node` · `add_blueprint_interface` · `add_blueprint_node` · `add_component_to_blueprint` · `add_event_dispatcher` · `add_reflected_blueprint_node` · `add_variable` · `auto_layout_graph` · `build_blueprint_graph` · `compile_blueprint` · `connect_blueprint_pins` · `create_blueprint` · `create_blueprint_function` · `create_blueprint_macro` · `create_custom_event` · `delete_blueprint_function` · `delete_blueprint_macro` · `delete_custom_event` · `describe_blueprint_node_action` · `diff_blueprint_graphs` · `disconnect_blueprint_pins` · `get_blueprint_brief` · `get_blueprint_graph_info` · `get_blueprint_health` · `get_selected_bp_node_infos` · `get_selected_bp_nodes` · `inspect_blueprint` · `list_blueprint_components` · `list_blueprint_variables` · `list_callable_functions` · `remove_blueprint_interface` · `remove_blueprint_node` · `remove_blueprint_variable` · `remove_component_from_blueprint` · `remove_event_dispatcher` · `rename_blueprint_component` · `rename_blueprint_function` · `rename_blueprint_variable` · `reorder_blueprint_component` · `reparent_blueprint_component` · `search_blueprint_node_actions` · `set_blueprint_component_transform` · `set_blueprint_function_signature` · `set_blueprint_node_position` · `set_blueprint_node_properties` · `set_blueprint_variable_default` · `set_blueprint_variable_metadata` · `set_blueprint_variable_replication` · `set_component_property` · `set_variable_flags` · `snapshot_blueprint_graph` · `suggest_blueprint_nodes_for_pin`
+`add_blueprint_action_node` · `add_blueprint_connected_action_node` · `add_blueprint_interface` · `add_blueprint_node` · `add_component_to_blueprint` · `add_event_dispatcher` · `add_reflected_blueprint_node` · `add_variable` · `auto_layout_graph` · `build_blueprint_graph` · `compile_blueprint` · `connect_blueprint_pins` · `create_blueprint` · `create_blueprint_function` · `create_blueprint_macro` · `create_custom_event` · `delete_blueprint_function` · `delete_blueprint_macro` · `delete_custom_event` · `describe_blueprint_node_action` · `diff_blueprint_graphs` · `disconnect_blueprint_pins` · `get_blueprint_brief` · `get_blueprint_graph_info` · `get_blueprint_health` · `get_selected_bp_node_infos` · `get_selected_bp_nodes` · `inspect_blueprint` · `insert_blueprint_action_node` · `list_blueprint_components` · `list_blueprint_variables` · `list_callable_functions` · `preview_blueprint_action_replacement` · `remove_blueprint_interface` · `remove_blueprint_node` · `remove_blueprint_variable` · `remove_component_from_blueprint` · `remove_event_dispatcher` · `rename_blueprint_component` · `rename_blueprint_function` · `rename_blueprint_variable` · `reorder_blueprint_component` · `reparent_blueprint_component` · `replace_blueprint_node_with_action` · `search_blueprint_node_actions` · `set_blueprint_component_transform` · `set_blueprint_function_signature` · `set_blueprint_node_position` · `set_blueprint_node_properties` · `set_blueprint_variable_default` · `set_blueprint_variable_metadata` · `set_blueprint_variable_replication` · `set_component_property` · `set_variable_flags` · `snapshot_blueprint_graph` · `suggest_blueprint_nodes_for_connection` · `suggest_blueprint_nodes_for_pin`
 
 </details>
 

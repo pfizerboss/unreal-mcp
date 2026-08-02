@@ -1654,6 +1654,93 @@ def test_live_blueprint_palette_round_trip_uses_the_public_workflow():
     )
 
 
+def test_semantic_editor_suite_is_registered_and_proves_release_workflows():
+    repository_root = Path(__file__).parents[2]
+    tests_root = (
+        repository_root
+        / "Plugins"
+        / "UnrealMCPython"
+        / "Content"
+        / "Python"
+        / "UnrealMCPython"
+        / "tests"
+    )
+    runner_source = (tests_root / "run_all.py").read_text(encoding="utf-8")
+    semantic_source = (tests_root / "test_blueprint2_semantic.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"UnrealMCPython.tests.test_blueprint2_semantic"' in runner_source
+    for action in (
+        "ue_suggest_blueprint_nodes_for_connection",
+        "ue_add_blueprint_connected_action_node",
+        "ue_insert_blueprint_action_node",
+        "ue_preview_blueprint_action_replacement",
+        "ue_replace_blueprint_node_with_action",
+        "ue_compile_blueprint",
+        "ue_get_blueprint_health",
+    ):
+        assert action in semantic_source
+    for workflow_action in (
+        "ue_add_blueprint_connected_action_node",
+        "ue_insert_blueprint_action_node",
+        "ue_replace_blueprint_node_with_action",
+    ):
+        assert semantic_source.count(workflow_action) >= 2
+    assert "allow_loss=True" in semantic_source
+    assert "Semantic workflow stress: {completed}/12" in semantic_source
+    assert "Semantic test assets remain" in semantic_source
+
+
+def test_editor_runner_reports_blueprint_fixture_cleanup():
+    repository_root = Path(__file__).parents[2]
+    runner_path = (
+        repository_root
+        / "Plugins"
+        / "UnrealMCPython"
+        / "Content"
+        / "Python"
+        / "UnrealMCPython"
+        / "tests"
+        / "run_all.py"
+    )
+    source = runner_path.read_text(encoding="utf-8")
+
+    assert '"/Game/__MCPTests"' in source
+    assert "remaining_assets={len(remaining_assets)}" in source
+    assert "if remaining_assets:" in source
+    assert "if not result.wasSuccessful():" in source
+
+
+def test_live_semantic_round_trip_covers_five_actions_and_exact_undo():
+    e2e_path = Path(__file__).with_name("test_e2e.py")
+    tree = ast.parse(e2e_path.read_text(encoding="utf-8"))
+    workflow = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_blueprint_semantic_graph_editing_round_trip"
+    )
+    source = ast.unparse(workflow)
+
+    for action in (
+        "suggest_blueprint_nodes_for_connection",
+        "add_blueprint_connected_action_node",
+        "insert_blueprint_action_node",
+        "preview_blueprint_action_replacement",
+        "replace_blueprint_node_with_action",
+    ):
+        assert action in source
+    for workflow_action in ("plan", "apply", "undo"):
+        assert f"action='{workflow_action}'" in source
+    assert "restored['data'] == before_workflow['data']" in source
+    assert "section['total_count'] == 0" in source
+    assert "delete_asset" in source
+    assert "_editor_reachable" in source
+    assert "_assert_not_connection_error" in source
+    assert source.index("'save_asset'") < source.index("action='plan'")
+
+
 def test_live_e2e_accounts_for_every_json_action():
     e2e_path = Path(__file__).with_name("test_e2e.py")
     tree = ast.parse(e2e_path.read_text(encoding="utf-8"))

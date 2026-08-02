@@ -99,6 +99,10 @@ void CleanupSemanticPackage(UPackage* Package)
     {
         return;
     }
+    if (Package->IsRooted())
+    {
+        Package->RemoveFromRoot();
+    }
     TArray<UObject*> Objects;
     GetObjectsWithOuter(Package, Objects, true);
     for (int32 Index = Objects.Num() - 1; Index >= 0; --Index)
@@ -136,6 +140,7 @@ FSemanticFixture MakeSemanticFixture(const TCHAR* TestName)
         TestName,
         *FGuid::NewGuid().ToString(EGuidFormats::Digits));
     Fixture.Package = CreatePackage(*PackageName);
+    Fixture.Package->AddToRoot();
     Fixture.Blueprint = FKismetEditorUtilities::CreateBlueprint(
         AActor::StaticClass(),
         Fixture.Package,
@@ -2345,16 +2350,8 @@ bool FMCPythonBlueprintSemanticInsertTest::RunTest(const FString& Parameters)
 
     FSemanticFixture ConversionFixture = MakeSemanticFixture(
         TEXT("MCPythonBlueprintSemanticConversionInsertTest"));
-    if (ConversionFixture.Package)
-    {
-        ConversionFixture.Package->AddToRoot();
-    }
     ON_SCOPE_EXIT
     {
-        if (ConversionFixture.Package && ConversionFixture.Package->IsRooted())
-        {
-            ConversionFixture.Package->RemoveFromRoot();
-        }
         CleanupSemanticPackage(ConversionFixture.Package);
     };
     if (!ConversionFixture.Blueprint || !ConversionFixture.Graph ||

@@ -806,6 +806,467 @@ def test_blueprint_palette_round_trip():
         assert absent.get("exists") is False, absent
 
 
+def test_blueprint_semantic_graph_editing_round_trip():
+    """Five semantic Blueprint actions survive MCP, workflow, and cleanup."""
+    asset_path = f"/Game/__MCPTests/BlueprintSemantic_{uuid4().hex}"
+
+    def checked(result, label):
+        _assert_not_connection_error(result, label)
+        return result
+
+    def dispatch(action, params):
+        return checked(
+            run(disp._dispatch("blueprint", action, params)), action
+        )
+
+    def inspect(queries):
+        result = dispatch(
+            "inspect_blueprint",
+            {"asset_path": asset_path, "queries": queries},
+        )
+        assert result.get("success") is True, result
+        return result["data"]["results"]
+
+    def search(query, predicate):
+        cursor = ""
+        for _ in range(50):
+            result = dispatch(
+                "search_blueprint_node_actions",
+                {
+                    "asset_path": asset_path,
+                    "graph_id": graph_id,
+                    "query": query,
+                    "filters": {},
+                    "cursor": cursor,
+                    "limit": 200,
+                },
+            )
+            assert result.get("success") is True, result
+            for item in result["data"]["items"]:
+                if predicate(item):
+                    return item
+            cursor = result["data"]["next_cursor"]
+            if not cursor:
+                break
+        pytest.fail(f"No semantic palette action matched {query!r}")
+
+    def suggest_pin(pin_id, query):
+        result = dispatch(
+            "suggest_blueprint_nodes_for_pin",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "pin_id": pin_id,
+                "query": query,
+                "cursor": "",
+                "limit": 200,
+            },
+        )
+        assert result.get("success") is True, result
+        return result
+
+    def suggest_connection(source_pin_id, target_pin_id, query, predicate):
+        cursor = ""
+        for _ in range(50):
+            result = dispatch(
+                "suggest_blueprint_nodes_for_connection",
+                {
+                    "asset_path": asset_path,
+                    "graph_id": graph_id,
+                    "source_pin_id": source_pin_id,
+                    "target_pin_id": target_pin_id,
+                    "query": query,
+                    "filters": {},
+                    "allow_conversion": False,
+                    "cursor": cursor,
+                    "limit": 200,
+                },
+            )
+            assert result.get("success") is True, result
+            for item in result["data"]["items"]:
+                if predicate(item) and item["binding_pairs"]:
+                    return item, item["binding_pairs"][0]
+            cursor = result["data"]["next_cursor"]
+            if not cursor:
+                break
+        pytest.fail(f"No connection action matched {query!r}")
+
+    def print_suggestion(pin_id):
+        result = suggest_pin(pin_id, "Print String")
+        for item in result["data"]["items"]:
+            if item["member_path"].endswith(":PrintString"):
+                assert item["connection_bindings"], item
+                return item, item["connection_bindings"][0]
+        pytest.fail(f"Print String is not compatible with {pin_id}: {result}")
+
+    try:
+        created = dispatch(
+            "create_blueprint",
+            {
+                "asset_path": asset_path,
+                "parent_class_path": "/Script/Engine.Actor",
+            },
+        )
+        assert created.get("success") is True, created
+        assert created.get("saved") is not True, created
+
+        events = inspect(
+            [{"op": "events", "detail": "detailed", "limit": 100}]
+        )[0]["items"]
+        graph_ids = {
+            item["graph_id"]
+            for item in events
+            if item.get("graph_id", "").startswith("graph:")
+        }
+        assert len(graph_ids) == 1, events
+        graph_id = next(iter(graph_ids))
+        nodes = inspect(
+            [
+                {
+                    "op": "nodes",
+                    "graph_id": graph_id,
+                    "detail": "detailed",
+                    "limit": 500,
+                }
+            ]
+        )[0]["items"]
+        event_output = next(
+            pin
+            for node in nodes
+            for pin in node.get("pins", [])
+            if pin["direction"] == "output"
+            and pin["type"]["kind"] == "exec"
+        )
+        event_pin_id = event_output["pin_id"]
+
+        print_action, print_binding = print_suggestion(event_pin_id)
+        connected = dispatch(
+            "add_blueprint_connected_action_node",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "pin_id": event_pin_id,
+                "action_id": print_action["action_id"],
+                "connection_binding_id": print_binding["binding_id"],
+                "position": {"x": 560, "y": 160},
+                "allow_conversion": False,
+                "bindings": [
+                    item["binding_id"] for item in print_action["bindings"]
+                ],
+            },
+        )
+        assert connected.get("success") is True, connected
+        assert connected["data"]["saved"] is False, connected
+        target_node_id = connected["data"]["node_id"]
+        target_input = next(
+            pin
+            for pin in connected["data"]["pins"]
+            if pin["direction"] == "input" and pin["type"]["kind"] == "exec"
+        )
+
+        sequence, pair = suggest_connection(
+            event_pin_id,
+            target_input["id"],
+            "Sequence",
+            lambda item: item["node_class_path"].endswith(
+                "K2Node_ExecutionSequence"
+            ),
+        )
+        inserted = dispatch(
+            "insert_blueprint_action_node",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "source_pin_id": event_pin_id,
+                "target_pin_id": target_input["id"],
+                "action_id": sequence["action_id"],
+                "input_binding_id": pair["input_binding_id"],
+                "output_binding_id": pair["output_binding_id"],
+                "position": {"x": 320, "y": 160},
+                "bindings": [
+                    item["binding_id"] for item in sequence["bindings"]
+                ],
+            },
+        )
+        assert inserted.get("success") is True, inserted
+        assert inserted["data"]["saved"] is False, inserted
+
+        used_pin_ids = {
+            edge[endpoint]
+            for edge in inserted["data"]["connections"]
+            for endpoint in ("source_pin_id", "target_pin_id")
+        }
+        free_sequence_output = next(
+            pin
+            for pin in inserted["data"]["pins"]
+            if pin["direction"] == "output"
+            and pin["type"]["kind"] == "exec"
+            and pin["id"] not in used_pin_ids
+        )
+        second_action, second_binding = print_suggestion(
+            free_sequence_output["id"]
+        )
+        second_connected = dispatch(
+            "add_blueprint_connected_action_node",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "pin_id": free_sequence_output["id"],
+                "action_id": second_action["action_id"],
+                "connection_binding_id": second_binding["binding_id"],
+                "position": {"x": 620, "y": 420},
+                "allow_conversion": False,
+                "bindings": [],
+            },
+        )
+        assert second_connected.get("success") is True, second_connected
+        assert second_connected["data"]["saved"] is False, second_connected
+        workflow_pin = next(
+            pin
+            for pin in second_connected["data"]["pins"]
+            if pin["direction"] == "output" and pin["type"]["kind"] == "exec"
+        )
+
+        semantic_snapshot = dispatch(
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        )
+        assert semantic_snapshot.get("success") is True, semantic_snapshot
+
+        replacement_action = search(
+            "Print String",
+            lambda item: item["member_path"].endswith(":PrintString")
+            and not item["requires_binding"],
+        )
+        strict_preview = dispatch(
+            "preview_blueprint_action_replacement",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "node_id": target_node_id,
+                "action_id": replacement_action["action_id"],
+                "bindings": [],
+                "pin_mapping": [],
+                "allow_conversion": False,
+                "allow_loss": False,
+            },
+        )
+        assert strict_preview.get("success") is True, strict_preview
+        assert strict_preview["data"]["applicable"] is True, strict_preview
+        strict_apply = dispatch(
+            "replace_blueprint_node_with_action",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "replacement_plan_id": strict_preview["data"][
+                    "replacement_plan_id"
+                ],
+                "allow_loss": False,
+            },
+        )
+        assert strict_apply.get("success") is True, strict_apply
+        assert strict_apply["data"]["saved"] is False, strict_apply
+
+        branch_action = search(
+            "Branch",
+            lambda item: item["node_class_path"].endswith("K2Node_IfThenElse"),
+        )
+        branch = dispatch(
+            "add_blueprint_action_node",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "action_id": branch_action["action_id"],
+                "position": {"x": 960, "y": 240},
+                "bindings": [],
+            },
+        )
+        assert branch.get("success") is True, branch
+        condition = next(
+            pin
+            for pin in branch["data"]["pins"]
+            if pin["direction"] == "input" and pin["type"]["kind"] == "bool"
+        )
+        changed = dispatch(
+            "set_blueprint_node_properties",
+            {
+                "asset_path": asset_path,
+                "node_id": branch["data"]["node_id"],
+                "properties": {"pin_defaults": {condition["id"]: True}},
+            },
+        )
+        assert changed.get("success") is True, changed
+        loss_lists = []
+        lossy_preview = None
+        for allow_loss in (False, True):
+            preview = dispatch(
+                "preview_blueprint_action_replacement",
+                {
+                    "asset_path": asset_path,
+                    "graph_id": graph_id,
+                    "node_id": branch["data"]["node_id"],
+                    "action_id": replacement_action["action_id"],
+                    "bindings": [],
+                    "pin_mapping": [],
+                    "allow_conversion": False,
+                    "allow_loss": allow_loss,
+                },
+            )
+            assert preview.get("success") is True, preview
+            assert preview["data"]["applicable"] is allow_loss, preview
+            loss_lists.append(
+                (
+                    preview["data"]["unmapped_connections"],
+                    preview["data"]["unmapped_defaults"],
+                )
+            )
+            if allow_loss:
+                lossy_preview = preview
+        assert loss_lists[0] == loss_lists[1], loss_lists
+        assert lossy_preview is not None
+        lossy_apply = dispatch(
+            "replace_blueprint_node_with_action",
+            {
+                "asset_path": asset_path,
+                "graph_id": graph_id,
+                "replacement_plan_id": lossy_preview["data"][
+                    "replacement_plan_id"
+                ],
+                "allow_loss": True,
+            },
+        )
+        assert lossy_apply.get("success") is True, lossy_apply
+        assert lossy_apply["warnings"], lossy_apply
+        assert lossy_apply["data"]["saved"] is False, lossy_apply
+
+        compiled = dispatch("compile_blueprint", {"asset_path": asset_path})
+        assert compiled.get("success") is True, compiled
+        health = dispatch("get_blueprint_health", {"asset_path": asset_path})
+        assert health.get("success") is True, health
+        assert health["data"]["healthy"] is True, health
+
+        saved = checked(
+            run(
+                disp._dispatch(
+                    "asset", "save_asset", {"asset_path": asset_path}
+                )
+            ),
+            "save_asset before semantic workflow",
+        )
+        assert saved.get("success") is True, saved
+
+        workflow_action, workflow_binding = print_suggestion(
+            workflow_pin["id"]
+        )
+        before_workflow = dispatch(
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        )
+        operations = [
+            {
+                "id": "semantic-connected-spawn",
+                "domain": "blueprint",
+                "action": "add_blueprint_connected_action_node",
+                "params": {
+                    "asset_path": asset_path,
+                    "graph_id": graph_id,
+                    "pin_id": workflow_pin["id"],
+                    "action_id": workflow_action["action_id"],
+                    "connection_binding_id": workflow_binding["binding_id"],
+                    "position": {"x": 900, "y": 420},
+                    "allow_conversion": False,
+                    "bindings": [],
+                },
+            }
+        ]
+        planned = checked(
+            run(disp.workflow(action="plan", params={"operations": operations})),
+            "workflow.plan semantic",
+        )
+        assert planned.get("success") is True, planned
+        applied = checked(
+            run(
+                disp.workflow(
+                    action="apply",
+                    params={
+                        "plan_id": planned["data"]["workflow_id"],
+                        "confirmation_token": planned["data"][
+                            "confirmation_token"
+                        ],
+                        "wait_for_completion": True,
+                    },
+                )
+            ),
+            "workflow.apply semantic",
+        )
+        assert applied.get("success") is True, applied
+        assert applied["data"].get("transaction_recorded") is True, applied
+        undo_token = applied["data"].get("undo_token")
+        assert undo_token, applied
+        undone = checked(
+            run(
+                disp.workflow(
+                    action="undo",
+                    params={
+                        "plan_id": planned["data"]["workflow_id"],
+                        "undo_token": undo_token,
+                    },
+                )
+            ),
+            "workflow.undo semantic",
+        )
+        assert undone.get("success") is True, undone
+        restored = dispatch(
+            "snapshot_blueprint_graph",
+            {"asset_path": asset_path, "graph_ids": [graph_id]},
+        )
+        assert restored["data"] == before_workflow["data"], (
+            before_workflow,
+            restored,
+        )
+        diff = dispatch(
+            "diff_blueprint_graphs",
+            {
+                "before_snapshot": before_workflow["data"],
+                "after_snapshot": restored["data"],
+                "queries": [],
+            },
+        )
+        assert all(
+            section["total_count"] == 0
+            for section in diff["data"]["sections"]
+        ), diff
+    finally:
+        present = checked(
+            run(
+                disp._dispatch(
+                    "asset", "asset_exists", {"asset_path": asset_path}
+                )
+            ),
+            "asset_exists semantic cleanup",
+        )
+        if present.get("exists") is True:
+            deleted = checked(
+                run(
+                    disp._dispatch(
+                        "asset", "delete_asset", {"asset_path": asset_path}
+                    )
+                ),
+                "delete_asset semantic cleanup",
+            )
+            assert deleted.get("success") is True, deleted
+        absent = checked(
+            run(
+                disp._dispatch(
+                    "asset", "asset_exists", {"asset_path": asset_path}
+                )
+            ),
+            "asset_exists after semantic cleanup",
+        )
+        assert absent.get("exists") is False, absent
+        assert _editor_reachable(), "Editor unreachable after semantic cleanup"
+
+
 def test_zzz_editor_survived_suite():
     """Last test in the file: the editor must still be alive after the full sweep."""
     assert _editor_reachable(), "Unreal editor is no longer reachable after the E2E suite (it crashed mid-run)."

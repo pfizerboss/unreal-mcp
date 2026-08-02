@@ -26,7 +26,7 @@ It enables smooth communication between MCP clients (e.g., Claude, Cursor, Winds
 ## Key Features
 
 - MCP server for communication with Unreal Engine
-- 22 namespace dispatcher tools exposing 294 actions, each callable as `{action, params}`
+- 22 namespace dispatcher tools exposing 299 actions, each callable as `{action, params}`
 - Supports Python 3.11 and later
 
 ## Universal Blueprint 2.0
@@ -41,6 +41,26 @@ get_blueprint_brief -> inspect_blueprint
 -> asset.save_asset (only when persistence is wanted)
 ```
 
+Semantic graph paths:
+
+```text
+Connected spawn:
+inspect_blueprint -> suggest_blueprint_nodes_for_pin
+-> add_blueprint_connected_action_node
+-> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
+
+Insertion:
+inspect_blueprint -> suggest_blueprint_nodes_for_connection
+-> insert_blueprint_action_node
+-> snapshot_blueprint_graph -> compile_blueprint -> get_blueprint_health
+
+Replacement:
+inspect_blueprint -> search_blueprint_node_actions
+-> preview_blueprint_action_replacement
+-> replace_blueprint_node_with_action
+-> diff_blueprint_graphs -> compile_blueprint -> get_blueprint_health
+```
+
 Inspection is paginated per query with `limit` 1-500 (default 100). Its opaque
 cursor becomes invalid when the query, asset, or editor session changes.
 Stable IDs use `graph:`, `node:`, `pin:`, `variable:`, `component:`, and
@@ -52,13 +72,21 @@ classes use full paths such as `/Game/Characters/BP_Hero.BP_Hero_C`.
 Reflected members also require exact paths, for example
 `/Script/Engine.Actor:K2_GetActorLocation`.
 
-Palette `action:` IDs and `palette-cursor:` values are bounded to the current
-editor session, asset, graph, query, and optional source pin. Repeat search or
-pin suggestion when an ID becomes stale; do not replay it in another graph.
-Native palette pages return at most 200 actions. Pin suggestions reflect
-Unreal's current native action filter, and spawning never auto-connects pins.
+Palette `action:`, `binding:`, `palette-cursor:`, and `replacement-plan:`
+values are bounded to the current editor session and exact asset, graph, pin,
+action, and policy context. Repeat search/suggestion or replacement preview
+when a capability becomes stale; never replay it in another graph. Native
+palette pages return at most 200 actions. Unreal's native action filter and K2
+schema remain authoritative. Connected spawn and insertion require one
+explicit binding or binding pair. `allow_conversion` must opt into reported
+conversion nodes. Replacement refuses any unmapped link/default unless both
+preview and apply use the same explicit `allow_loss=true`. Semantic mutations
+support workflow undo and never compile or save implicitly.
 
-Blueprint mutations do not compile or save implicitly. Compile explicitly,
+The catalog contains 299 actions across 22 domains, including 57 Blueprint
+actions; the exhaustive JSON sweep covers 298 pairs because the typed-image
+viewport capture is the sole exception. Blueprint mutations do not compile or
+save implicitly. Compile explicitly,
 run the compile-backed health check as a separate diagnostic call, and save
 with `asset.save_asset` only when wanted. Runtime capabilities target UE
 5.6-5.8; this workspace has locally verified only UE 5.7 because UE 5.6 is not
